@@ -20,6 +20,8 @@ struct SignInfo: Sendable {
 
     var shortSigner: String {
         if unsigned { return "unsigned" }
+        // A signature that doesn't validate proves nothing about who made it: say so before any name.
+        if valid == false { return "invalid" }
         if isPlatform { return "Apple (platform)" }
         if isAppleSigned { return "Apple" }
         if isAdhoc { return "ad-hoc" }
@@ -32,7 +34,14 @@ struct SignInfo: Sendable {
         guard let s = runtimeStatus else { return [] }
         return Self.flagNames(s)
     }
-    var staticFlagNames: [String] { Self.flagNames(staticFlags) }
+    /// The CodeDirectory's own flags (SecCodeSignatureFlags), named as `codesign -d` prints them. They
+    /// share few bits with the runtime CS_* status: static 0x1 is "host", runtime 0x1 is VALID.
+    var staticFlagNames: [String] { Self.staticFlags.filter { staticFlags & $0.0 != 0 }.map(\.1) }
+    static let staticFlags: [(UInt32, String)] = [
+        (0x0000_0001, "host"), (0x0000_0002, "adhoc"), (0x0000_0100, "hard"), (0x0000_0200, "kill"),
+        (0x0000_0400, "expires"), (0x0000_0800, "restrict"), (0x0000_1000, "enforcement"),
+        (0x0000_2000, "library-validation"), (0x0001_0000, "runtime"), (0x0002_0000, "linker-signed"),
+    ]
 
     static let csFlags: [(UInt32, String)] = [
         (0x0000_0001, "VALID"), (0x0000_0002, "ADHOC"), (0x0000_0004, "GET_TASK_ALLOW"),
@@ -50,6 +59,19 @@ struct SignInfo: Sendable {
 }
 
 enum CodeSign {
+    /// Apple's own software ("Software Signing" from Apple's CA), checked by Security rather than by
+    /// certificate display names: anyone can make a chain whose certificates are *called* "Apple Root CA"
+    /// and "Software Signing".
+    private static let anchorApple = requirement("anchor apple")
+    /// Signed by the Mac App Store. Every App Store app has this, so it says "Apple" only together with a
+    /// com.apple. identifier, which that same signature covers (Keynote, Numbers, the App Store Xcode).
+    private static let appStore = requirement("anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.9] exists")
+
+    private static func requirement(_ text: String) -> SecRequirement? {
+        var r: SecRequirement?
+        return SecRequirementCreateWithString(text as CFString, [], &r) == errSecSuccess ? r : nil
+    }
+
     static func inspect(pid: pid_t, path: String?) -> SignInfo {
         var out = SignInfo()
         var code: SecCode?
@@ -88,7 +110,15 @@ enum CodeSign {
         out.isAdhoc = out.staticFlags & 0x2 != 0
         if let certs = info[kSecCodeInfoCertificates as String] as? [SecCertificate] {
             out.authority = certs.compactMap { SecCertificateCopySubjectSummary($0) as String? }
-            out.isAppleSigned = out.authority.last == "Apple Root CA" && (out.authority.first?.hasPrefix("Software Signing") ?? false)
+            func satisfies(_ req: SecRequirement?) -> Bool {
+                guard let req else { return false }
+                if dynamic, let code { return SecCodeCheckValidity(code, [], req) == errSecSuccess }
+                // Signature and chain only: hashing every file of a bundle is far too slow per process.
+                return SecStaticCodeCheckValidity(sc, SecCSFlags(rawValue: kSecCSDoNotValidateResources
+                                                                 | kSecCSDoNotValidateExecutable), req) == errSecSuccess
+            }
+            out.isAppleSigned = satisfies(anchorApple)
+                || (out.identifier?.hasPrefix("com.apple.") == true && satisfies(appStore))
         }
         if let ent = info[kSecCodeInfoEntitlementsDict as String] as? [String: Any] {
             out.entitlementKeys = ent.keys.sorted()
