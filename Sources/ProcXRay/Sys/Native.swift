@@ -332,18 +332,25 @@ enum Shell {
 
     /// `timeout`: SIGTERM the tool after this many seconds, SIGKILL it 2 s later if it's still running.
     /// `maxBytes`: stop reading and terminate the tool once it has written this much.
+    /// `discardStdout`: stdout goes to /dev/null and only stderr is returned, for a tool whose result is a file.
     ///
     /// Started with posix_spawn, not Foundation's Process: Process took ~67 ms per launch here (even for
     /// /usr/bin/true), posix_spawn 2–4 ms, which matters for tools run once per process (launchctl print pid/…).
     static func exec(_ path: String, _ args: [String], mergeStderr: Bool = true,
-                     timeout: Double = 60, maxBytes: Int = 64 << 20) -> Result {
+                     timeout: Double = 60, maxBytes: Int = 64 << 20, discardStdout: Bool = false) -> Result {
         var fds: [Int32] = [-1, -1]
         guard pipe(&fds) == 0 else { return Result(output: "failed to run \(path): no pipe", status: -1) }
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
-        posix_spawn_file_actions_adddup2(&actions, fds[1], 1)
-        if mergeStderr {
+        if discardStdout {
+            posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
+            posix_spawn_file_actions_adddup2(&actions, fds[1], 2)
+        } else {
+            posix_spawn_file_actions_adddup2(&actions, fds[1], 1)
+        }
+        if discardStdout {
+        } else if mergeStderr {
             posix_spawn_file_actions_adddup2(&actions, fds[1], 2)
         } else {
             posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
@@ -378,12 +385,17 @@ enum Shell {
         var data = Data()
         var timedOut = false, truncated = false
         var buf = [UInt8](repeating: 0, count: 64 << 10)
+        // Set at EOF while the tool still runs (it closed its output, or writes only to a file): the loop
+        // goes on waiting for it, so the time limit and cancelling still apply.
+        var eof = false
         reading: while true {
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let ready = poll(&pfd, 1, 100)
+            var ready: Int32 = 0
+            if eof { usleep(50_000) } else { ready = poll(&pfd, 1, 100) }
             if ready > 0 {
                 let n = read(fd, &buf, buf.count)
-                if n == 0 { break }                                   // EOF: every writer closed the pipe
+                // EOF: every writer closed the pipe.
+                if n == 0 { if child.isRunning { eof = true; continue } else { break } }
                 if n < 0 && errno != EINTR { break }
                 if n > 0 {
                     let room = maxBytes - data.count
@@ -401,6 +413,7 @@ enum Shell {
                 stop()
             }
             if child.isRunning { continue }
+            if eof { break }
             // The tool has exited but the pipe is still open: a background child inherited it.
             // Give buffered output a moment, then stop waiting for that child.
             if let e = exitedAt {

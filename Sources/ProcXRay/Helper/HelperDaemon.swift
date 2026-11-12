@@ -88,6 +88,30 @@ enum HelperDaemon {
             reply(try? JSONEncoder().encode(v))
         }
 
+        func machPorts(reply: @escaping (Data?, String?) -> Void) {
+            guard callerIsAdmin else { reply(nil, "Mach ports of every process can only be read for an admin user."); return }
+            let cancel = self.cancel
+            DispatchQueue.global(qos: .userInitiated).async {
+                // lsmp writes its JSON to a path. A directory of root's own (umask 077), so no other user can
+                // read the port map or plant a file there.
+                var template = Array((NSTemporaryDirectory() + "procxray-lsmp.XXXXXX").utf8CString)
+                guard let dir = template.withUnsafeMutableBufferPointer({ mkdtemp($0.baseAddress) }).map({ String(cString: $0) }) else {
+                    reply(nil, "helper: no temporary directory"); return
+                }
+                let file = dir + "/ports.json"
+                defer { unlink(file); rmdir(dir) }
+                let r = Shell.Cancel.$current.withValue(cancel) {
+                    // Its text listing (as long as the JSON) goes nowhere; stderr comes back for errors.
+                    Shell.exec("/usr/bin/lsmp", ["-a", "-j", file], timeout: 40, discardStdout: true)
+                }
+                guard let data = FileManager.default.contents(atPath: file), let snap = MachSnapshot.parse(data) else {
+                    let why = r.timedOut ? "lsmp ran past its time limit" : r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    reply(nil, "lsmp failed: \(why.isEmpty ? "exit \(r.status)" : why)"); return
+                }
+                reply(try? JSONEncoder().encode(snap), nil)
+            }
+        }
+
         /// Runs off the connection's queue: messages on one connection are delivered one at a time, so a
         /// 13 s sample run inline held up the app's metrics refresh and health probe behind it.
         func runTool(_ tool: Int, pid: Int32, reply: @escaping (String) -> Void) {
