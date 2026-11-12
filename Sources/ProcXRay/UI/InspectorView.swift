@@ -38,19 +38,19 @@ struct InspectorView: View {
                     SubPanes(selection: $resourcesPane, names: ["Usage", "Memory map"]) {
                         if resourcesPane == "Memory map" {
                             toolTab(.vmmap, auto: false, title: "vmmap --summary \(proc.pid)",
-                                    parse: VmmapParser.parse, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
+                                    parse: { VmmapParser.parse($0) }, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
                         } else {
                             UsageTab(proc: proc, exited: exited)
                         }
                     }
                 case .connections:
                     toolTab(.lsof, auto: true, title: "lsof -n -P -p \(proc.pid)",
-                            parse: LsofParser.parse, isEmpty: \.isEmpty) { [pid = proc.pid] in LsofView(entries: $0, filter: $1, pid: pid) }
+                            parse: { LsofParser.parse($0) }, isEmpty: \.isEmpty) { [pid = proc.pid] in LsofView(entries: $0, filter: $1, pid: pid) }
                 case .activity:
                     SubPanes(selection: $activityPane, names: ["Logs", "Sample", "Syscalls"]) {
                         if activityPane == "Sample" {
                             toolTab(.sample, auto: false, title: "sample \(proc.pid) 1 (all thread stacks for 1s)",
-                                    parse: SampleParser.parse, isEmpty: \.threads.isEmpty) { SampleView(report: $0, filter: $1) }
+                                    parse: { SampleParser.parse($0) }, isEmpty: \.threads.isEmpty) { SampleView(report: $0, filter: $1) }
                         } else if activityPane == "Syscalls" {
                             // A new process gets a new tracer (and the old one's trace stops).
                             SyscallTraceView(proc: proc, exited: exited).id(proc.key)
@@ -76,7 +76,7 @@ struct InspectorView: View {
                               Shell.run("/usr/bin/log", ["show", "--last", "10m", "--style", "compact", "--info",
                                   "--predicate", "processID == \(pid) OR eventMessage CONTAINS \"\(pid)\""], timeout: 120)
                           },
-                          parse: LogParser.parse, isEmpty: \.isEmpty) { LogView(entries: $0, filter: $1) }
+                          parse: { LogParser.parse($0) }, isEmpty: \.isEmpty) { LogView(entries: $0, filter: $1) }
     }
 
     /// lsof / vmmap / sample need root (or task_for_pid rights) for most processes: route them through
