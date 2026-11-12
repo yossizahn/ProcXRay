@@ -63,7 +63,7 @@ struct ProcXRayApp: App {
         }
 
         WindowGroup("Process", id: ProcessWindow.id, for: ProcessRef.self) { $ref in
-            if let ref { ProcessWindow(ref: ref).environment(store) }
+            if $ref.wrappedValue != nil { ProcessWindow(ref: $ref).environment(store) }
         }
         .defaultSize(width: 900, height: 640)
         .commandsRemoved()   // no "New Process Window": these only open from a process row

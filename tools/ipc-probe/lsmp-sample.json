@@ -1,0 +1,2682 @@
+{
+ "version": "1.0",
+ "processes": [
+  {
+   "pid": 1409,
+   "name": "Finder",
+   "ports": [
+    {
+     "name": "0x00000103",
+     "ipc-object": "0xcf1921ab",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 2,
+     "identifier": "0x00000000",
+     "type": "THREAD-CONTROL"
+    },
+    {
+     "name": "0x00000203",
+     "ipc-object": "0xd9e2b7a7",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 3,
+     "identifier": "0x00000000",
+     "type": "TASK-CONTROL",
+     "pid": 1409,
+     "process": "Finder"
+    },
+    {
+     "type": "port",
+     "name": "0x00000303",
+     "ipc-object": "0x2bfa635b",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 0,
+     "oref": false,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "type": "port",
+     "name": "0x00000403",
+     "ipc-object": "0x42a40054",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 0,
+     "oref": false,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00000807",
+     "ipc-object": "0xba913788",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 13,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00000903",
+     "ipc-object": "0x32919e78",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "SEMAPHORE"
+    },
+    {
+     "name": "0x00000a03",
+     "ipc-object": "0x41232de6",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "VOUCHER"
+    },
+    {
+     "name": "0x00000b03",
+     "ipc-object": "0x03a475af",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00000d03",
+     "ipc-object": "0xdd96e60f",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00000e03",
+     "ipc-object": "0x0c4c84a4",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "type": "port",
+     "name": "0x00000f03",
+     "ipc-object": "0x4295239c",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard",
+      "imp donation",
+      "(null)"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 1,
+     "oref": true,
+     "queue_limit": 6,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00001003",
+     "ipc-object": "0xdf6d63a6",
+     "rights": [
+      "send"
+     ],
+     "notifications": [
+      "dead name"
+     ],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "type": "port",
+     "name": "0x00001203",
+     "ipc-object": "0xf03d6e9f",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard",
+      "imp donation",
+      "(null)"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 1,
+     "oref": true,
+     "queue_limit": 6,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00001303",
+     "ipc-object": "0xdf9afd1d",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x0000146b",
+     "ipc-object": "0x9455223c",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "type": "port",
+     "name": "0x00001503",
+     "ipc-object": "0xcca511de",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 1,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "type": "port",
+     "name": "0x00001803",
+     "ipc-object": "0xe6699dd0",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 1,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00001903",
+     "ipc-object": "0xe8d52788",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00001d03",
+     "ipc-object": "0xa433031c",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 18,
+     "identifier": "0x00000000",
+     "type": "HOST"
+    },
+    {
+     "name": "0x00001f03",
+     "ipc-object": "0xa90d243e",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 18,
+     "identifier": "0x00000000",
+     "type": "CLOCK"
+    },
+    {
+     "type": "port set",
+     "name": "0x0000240f",
+     "ipc-object": "0x289ea01c",
+     "members": [
+      {
+       "ipc-object": "0xb53170fc",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 5660,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00002323",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0x55973b21",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00002a03",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0x9c0f9dbc",
+       "rights": [
+        "recv"
+       ],
+       "port_status_flags": [],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 0,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00003e03",
+       "pid": 1409,
+       "process": "Finder"
+      }
+     ]
+    },
+    {
+     "name": "0x0000255b",
+     "ipc-object": "0x4798a9ac",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "NAMED-MEMORY",
+     "description": "VM-MAP-COPY(0xa6b4af5fca787fd5, 16KiB)"
+    },
+    {
+     "type": "port set",
+     "name": "0x00002b03",
+     "ipc-object": "0xc29997fe",
+     "members": [
+      {
+       "ipc-object": "0xb53170fc",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 5660,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00002323",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0xa187614a",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00002c03",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0x2bdb36db",
+       "rights": [
+        "recv"
+       ],
+       "port_status_flags": [],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 0,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00002d03",
+       "pid": 1409,
+       "process": "Finder"
+      }
+     ]
+    },
+    {
+     "name": "0x00002eff",
+     "ipc-object": "0x4bed33a7",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "NAMED-MEMORY",
+     "description": "VM-MAP-COPY(0xa7bb559b92523917, 16KiB)"
+    },
+    {
+     "name": "0x00004c6f",
+     "ipc-object": "0x3f6b7602",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "THREAD-CONTROL"
+    },
+    {
+     "name": "0x000057df",
+     "ipc-object": "0x5cf03781",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-OBJECT",
+     "description": "AppleM2ScalerCSCDriver(0x10000039d)"
+    },
+    {
+     "type": "port set",
+     "name": "0x00006113",
+     "ipc-object": "0xb5d2f474",
+     "members": [
+      {
+       "ipc-object": "0xb53170fc",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 5660,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00002323",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0x9c0f9dbc",
+       "rights": [
+        "recv"
+       ],
+       "port_status_flags": [],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 0,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00003e03",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0xaa233f2f",
+       "rights": [
+        "recv"
+       ],
+       "port_status_flags": [],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 0,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x0000551f",
+       "pid": 1409,
+       "process": "Finder"
+      }
+     ]
+    },
+    {
+     "type": "dead name",
+     "name": "0x0000693f",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "type": "dead name",
+     "name": "0x00006a7f",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "type": "port set",
+     "name": "0x00006f03",
+     "ipc-object": "0xc94b6d99",
+     "members": [
+      {
+       "ipc-object": "0xb53170fc",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 5660,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00002323",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0x9c0f9dbc",
+       "rights": [
+        "recv"
+       ],
+       "port_status_flags": [],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 0,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00003e03",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0xaa233f2f",
+       "rights": [
+        "recv"
+       ],
+       "port_status_flags": [],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 0,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x0000551f",
+       "pid": 1409,
+       "process": "Finder"
+      }
+     ]
+    },
+    {
+     "name": "0x00008903",
+     "ipc-object": "0xdd1a2dfc",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 4,
+     "identifier": "0x00000000",
+     "type": "TASK-NAME",
+     "pid": 1409,
+     "process": "Finder"
+    },
+    {
+     "name": "0x00008b03",
+     "ipc-object": "0xab126999",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "TASK_ID_TOKEN",
+     "pid": 22544,
+     "process": "Unknown"
+    },
+    {
+     "name": "0x0000921b",
+     "ipc-object": "0x0a436ef9",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 11,
+     "identifier": "0x00000000",
+     "type": "MAIN-DEVICE"
+    },
+    {
+     "type": "port",
+     "name": "0x00009743",
+     "ipc-object": "0xda3d4f05",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 1,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "type": "port set",
+     "name": "0x00009fc3",
+     "ipc-object": "0xe4406363",
+     "members": [
+      {
+       "ipc-object": "0x21030f40",
+       "rights": [
+        "recv"
+       ],
+       "port_status_flags": [],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 0,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x000222a3",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0x4ab198f4",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00037a57",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0x30b1366f",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00040047",
+       "pid": 1409,
+       "process": "Finder"
+      }
+     ]
+    },
+    {
+     "type": "port set",
+     "name": "0x0000ae43",
+     "ipc-object": "0x1b338a69",
+     "members": [
+      {
+       "ipc-object": "0xb53170fc",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 5660,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00002323",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0xda3d4f05",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00009743",
+       "pid": 1409,
+       "process": "Finder"
+      },
+      {
+       "ipc-object": "0xb01888af",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x0000af1b",
+       "pid": 1409,
+       "process": "Finder"
+      }
+     ]
+    },
+    {
+     "name": "0x0000b14b",
+     "ipc-object": "0x13b956d0",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "SEMAPHORE"
+    },
+    {
+     "name": "0x0000c003",
+     "ipc-object": "0xc39fc394",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-CONNECT",
+     "description": "RootDomainUserClient(0x100001031)"
+    },
+    {
+     "name": "0x0000d803",
+     "ipc-object": "0x3e3c0919",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-OBJECT",
+     "description": "IOServiceMessageUserNotification"
+    },
+    {
+     "type": "port",
+     "name": "0x00010703",
+     "ipc-object": "0x4052dd45",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 1,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00010ecf",
+     "ipc-object": "0x52f29feb",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 8,
+     "identifier": "0x00000000",
+     "pid": -1,
+     "process": "unknown"
+    },
+    {
+     "name": "0x00011103",
+     "ipc-object": "0x2bb32c16",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-OBJECT",
+     "description": "IOSurfaceRoot(0x10000055c)"
+    },
+    {
+     "name": "0x00011303",
+     "ipc-object": "0xb400daee",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "TASK-NAME",
+     "pid": 1409,
+     "process": "Finder"
+    },
+    {
+     "type": "port",
+     "name": "0x0001160b",
+     "ipc-object": "0xa833b655",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard",
+      "imp donation",
+      "(null)"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 1,
+     "oref": true,
+     "queue_limit": 6,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00011703",
+     "ipc-object": "0x8ca9ed5c",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-OBJECT",
+     "description": "IOServiceMessageUserNotification"
+    },
+    {
+     "name": "0x00011803",
+     "ipc-object": "0xec7010a2",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-CONNECT",
+     "description": "AGXDeviceUserClient(0x10000103e)"
+    },
+    {
+     "type": "dead name",
+     "name": "0x000129b7",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "name": "0x00013a03",
+     "ipc-object": "0xee645367",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 5,
+     "identifier": "0x00000000",
+     "type": "IOKIT-OBJECT",
+     "description": "AGXAcceleratorG13G_B0(0x1000006a8)"
+    },
+    {
+     "type": "dead name",
+     "name": "0x0001aa4b",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "type": "dead name",
+     "name": "0x0001c163",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "type": "dead name",
+     "name": "0x0001dd27",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "name": "0x0001f407",
+     "ipc-object": "0x27955730",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "VOUCHER"
+    }
+   ],
+   "total": 790,
+   "send_rights": 563,
+   "receive_rights": 302,
+   "send_once_rights": 0,
+   "port_sets": 29,
+   "dead_names": 12,
+   "dead_name requests": 34,
+   "vouchers": 2,
+   "exception_ports": [
+    {
+     "port_object": "0xa90b8288",
+     "receiver_object": "0x12b99199",
+     "flavor": "0x001",
+     "behavior": "MACH + UNKNOWN",
+     "mask": " RESOURCE"
+    }
+   ]
+  },
+  {
+   "pid": 675,
+   "name": "cfprefsd",
+   "ports": [
+    {
+     "name": "0x00000103",
+     "ipc-object": "0x27a1016f",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "pid": -1,
+     "process": "unknown"
+    },
+    {
+     "name": "0x00000203",
+     "ipc-object": "0x5e128a92",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 3,
+     "identifier": "0x00000000",
+     "type": "TASK-CONTROL",
+     "pid": 675,
+     "process": "cfprefsd"
+    },
+    {
+     "type": "port",
+     "name": "0x00000303",
+     "ipc-object": "0x04e96980",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 0,
+     "oref": false,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "type": "port",
+     "name": "0x00000403",
+     "ipc-object": "0x3d8c38ba",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 0,
+     "oref": false,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00000813",
+     "ipc-object": "0x4b9d3831",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 4,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00000903",
+     "ipc-object": "0xa90d243e",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "CLOCK"
+    },
+    {
+     "name": "0x00000a03",
+     "ipc-object": "0x68061237",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "SEMAPHORE"
+    },
+    {
+     "name": "0x00000b03",
+     "ipc-object": "0xe8d52788",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "type": "port",
+     "name": "0x00000c03",
+     "ipc-object": "0xa5ceba4e",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 1,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 5,
+     "msg_count": 1,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00000e03",
+     "ipc-object": "0x40acfa07",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "type": "port",
+     "name": "0x00001703",
+     "ipc-object": "0xdf9afd1d",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard",
+      "imp donation",
+      "(null)"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 1,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 16,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00001b07",
+     "ipc-object": "0xaaa01e66",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "type": "port",
+     "name": "0x00001c03",
+     "ipc-object": "0xee4c26fd",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 2,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00001d03",
+     "ipc-object": "0xa433031c",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "HOST"
+    },
+    {
+     "name": "0x00001e0f",
+     "ipc-object": "0x41232de6",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "VOUCHER"
+    },
+    {
+     "name": "0x00002307",
+     "ipc-object": "0x92094de5",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00002803",
+     "ipc-object": "0x03a475af",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00002923",
+     "ipc-object": "0x8d94724e",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "THREAD-CONTROL"
+    },
+    {
+     "name": "0x00005a73",
+     "ipc-object": "0x71235603",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "VOUCHER"
+    },
+    {
+     "name": "0x0000853f",
+     "ipc-object": "0x472fef0d",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "VOUCHER"
+    },
+    {
+     "name": "0x000223b3",
+     "ipc-object": "0x6d89e5b9",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "THREAD-CONTROL"
+    },
+    {
+     "type": "port",
+     "name": "0x0002f393",
+     "ipc-object": "0x99d5cc0a",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [
+      "imp donation"
+     ],
+     "boosts": 0,
+     "notifications": [
+      "no sender",
+      "port destroy request"
+     ],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 1,
+     "oref": true,
+     "queue_limit": 6,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x0002f6c3",
+     "ipc-object": "0xb10a529f",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "type": "port",
+     "name": "0x00030193",
+     "ipc-object": "0x604d7380",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [
+      "imp donation"
+     ],
+     "boosts": 0,
+     "notifications": [
+      "no sender",
+      "port destroy request"
+     ],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 1,
+     "oref": true,
+     "queue_limit": 6,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00033f13",
+     "ipc-object": "0xf03d6e9f",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    }
+   ],
+   "total": 1193,
+   "send_rights": 605,
+   "receive_rights": 607,
+   "send_once_rights": 0,
+   "port_sets": 0,
+   "dead_names": 0,
+   "dead_name requests": 4,
+   "vouchers": 26,
+   "exception_ports": []
+  },
+  {
+   "pid": 991,
+   "name": "distnoted",
+   "ports": [
+    {
+     "name": "0x00000103",
+     "ipc-object": "0x683b6715",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 2,
+     "identifier": "0x00000000",
+     "type": "THREAD-CONTROL"
+    },
+    {
+     "name": "0x00000203",
+     "ipc-object": "0xed8d15cd",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 3,
+     "identifier": "0x00000000",
+     "type": "TASK-CONTROL",
+     "pid": 991,
+     "process": "distnoted"
+    },
+    {
+     "type": "port",
+     "name": "0x00000303",
+     "ipc-object": "0xe8643891",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 0,
+     "oref": false,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "type": "port",
+     "name": "0x00000403",
+     "ipc-object": "0x0ff4fba3",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 0,
+     "oref": false,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00000813",
+     "ipc-object": "0xffaa9039",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 4,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "type": "port",
+     "name": "0x00000903",
+     "ipc-object": "0x9ef1bf76",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 1,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "type": "port",
+     "name": "0x00000a03",
+     "ipc-object": "0x45b0da53",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 2,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00000b03",
+     "ipc-object": "0xaaa01e66",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00000c03",
+     "ipc-object": "0x965dca88",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "type": "port set",
+     "name": "0x00001103",
+     "ipc-object": "0x8cda7c7c",
+     "members": [
+      {
+       "ipc-object": "0xd0682135",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00001203",
+       "pid": 991,
+       "process": "distnoted"
+      },
+      {
+       "ipc-object": "0x001fd9fa",
+       "rights": [
+        "recv"
+       ],
+       "port_status_flags": [],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 0,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00001303",
+       "pid": 991,
+       "process": "distnoted"
+      },
+      {
+       "ipc-object": "0xfc8f8643",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00001403",
+       "pid": 991,
+       "process": "distnoted"
+      }
+     ]
+    },
+    {
+     "type": "port",
+     "name": "0x00001923",
+     "ipc-object": "0x0c4c84a4",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard",
+      "imp donation",
+      "(null)"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 1,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 16,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00001a03",
+     "ipc-object": "0xe8d52788",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00001b03",
+     "ipc-object": "0x03a475af",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00001c03",
+     "ipc-object": "0x41232de6",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "VOUCHER"
+    },
+    {
+     "name": "0x00001d03",
+     "ipc-object": "0xa433031c",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "HOST"
+    },
+    {
+     "name": "0x00001e03",
+     "ipc-object": "0x3ef85667",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "SEMAPHORE"
+    },
+    {
+     "name": "0x00001f03",
+     "ipc-object": "0xa90d243e",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "CLOCK"
+    },
+    {
+     "name": "0x0000243b",
+     "ipc-object": "0xc2f38bb1",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "VOUCHER"
+    },
+    {
+     "name": "0x00002c87",
+     "ipc-object": "0x03161812",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "VOUCHER"
+    },
+    {
+     "name": "0x0001035b",
+     "ipc-object": "0xbb105ecc",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "THREAD-CONTROL"
+    },
+    {
+     "type": "port",
+     "name": "0x00011e4b",
+     "ipc-object": "0x9b7cf08a",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [
+      "imp donation"
+     ],
+     "boosts": 0,
+     "notifications": [
+      "no sender",
+      "port destroy request"
+     ],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 1,
+     "oref": true,
+     "queue_limit": 6,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00015703",
+     "ipc-object": "0xc4a0f898",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00015803",
+     "ipc-object": "0x4295239c",
+     "rights": [
+      "send"
+     ],
+     "notifications": [
+      "dead name"
+     ],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "type": "port",
+     "name": "0x0001fd03",
+     "ipc-object": "0xdf6d63a6",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [
+      "imp donation"
+     ],
+     "boosts": 0,
+     "notifications": [
+      "no sender",
+      "port destroy request"
+     ],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 1,
+     "oref": true,
+     "queue_limit": 6,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    }
+   ],
+   "total": 653,
+   "send_rights": 391,
+   "receive_rights": 268,
+   "send_once_rights": 0,
+   "port_sets": 1,
+   "dead_names": 0,
+   "dead_name requests": 31,
+   "vouchers": 119,
+   "exception_ports": []
+  },
+  {
+   "pid": 1407,
+   "name": "Dock",
+   "ports": [
+    {
+     "name": "0x00000103",
+     "ipc-object": "0xbba8559e",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 2,
+     "identifier": "0x00000000",
+     "type": "THREAD-CONTROL"
+    },
+    {
+     "name": "0x00000203",
+     "ipc-object": "0x8665db7e",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 3,
+     "identifier": "0x00000000",
+     "type": "TASK-CONTROL",
+     "pid": 1407,
+     "process": "Dock"
+    },
+    {
+     "type": "port",
+     "name": "0x00000303",
+     "ipc-object": "0x563abae0",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 0,
+     "oref": false,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "type": "port",
+     "name": "0x00000403",
+     "ipc-object": "0xdc1083d4",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 0,
+     "oref": false,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x0000080b",
+     "ipc-object": "0xba913788",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 7,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00000903",
+     "ipc-object": "0x0ff9c699",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "SEMAPHORE"
+    },
+    {
+     "type": "port",
+     "name": "0x00000a03",
+     "ipc-object": "0xf841218a",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 2,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 5,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00000b03",
+     "ipc-object": "0xe8d52788",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "type": "port",
+     "name": "0x00000c03",
+     "ipc-object": "0xcb92fad5",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 1,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 5,
+     "msg_count": 1,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00000e1b",
+     "ipc-object": "0x27928615",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00001033",
+     "ipc-object": "0x7a2b19d6",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00001103",
+     "ipc-object": "0xa60666b1",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00001603",
+     "ipc-object": "0x614a0a4f",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00001a03",
+     "ipc-object": "0x03a475af",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00001b03",
+     "ipc-object": "0xaaa01e66",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "UNKNOWN"
+    },
+    {
+     "name": "0x00001c03",
+     "ipc-object": "0x41232de6",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "VOUCHER"
+    },
+    {
+     "name": "0x00001d03",
+     "ipc-object": "0xa433031c",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "HOST"
+    },
+    {
+     "name": "0x00001f03",
+     "ipc-object": "0xa90d243e",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "CLOCK"
+    },
+    {
+     "type": "port",
+     "name": "0x00002903",
+     "ipc-object": "0xb10a529f",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard",
+      "imp donation",
+      "(null)"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 1,
+     "oref": true,
+     "queue_limit": 6,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00002a03",
+     "ipc-object": "0xdbaa2907",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "TASK-NAME",
+     "pid": 1407,
+     "process": "Dock"
+    },
+    {
+     "name": "0x00002e03",
+     "ipc-object": "0xc5f9664f",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "TASK_ID_TOKEN",
+     "pid": 22512,
+     "process": "Unknown"
+    },
+    {
+     "type": "port",
+     "name": "0x00003103",
+     "ipc-object": "0xc4a0f898",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard",
+      "imp donation",
+      "(null)"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 1,
+     "oref": true,
+     "queue_limit": 6,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "type": "port set",
+     "name": "0x00004003",
+     "ipc-object": "0x6d0db4df",
+     "members": [
+      {
+       "ipc-object": "0xd3ca3bbd",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "imp donation"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x000000763ac71400",
+       "identifier": "0x00000f23",
+       "pid": 1407,
+       "process": "Dock"
+      },
+      {
+       "ipc-object": "0x36d41a2a",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "imp donation"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000007639cc0a00",
+       "identifier": "0x00002703",
+       "pid": 1407,
+       "process": "Dock"
+      },
+      {
+       "ipc-object": "0x8a6ef636",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00003303",
+       "pid": 1407,
+       "process": "Dock"
+      }
+     ]
+    },
+    {
+     "type": "port",
+     "name": "0x00004d23",
+     "ipc-object": "0xc2036308",
+     "rights": [
+      "recv",
+      "send"
+     ],
+     "port_status_flags": [
+      "guarded",
+      "strict guard",
+      "imp donation",
+      "(null)"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 1,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 16,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x00005103",
+     "ipc-object": "0xc4f549e6",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-CONNECT",
+     "description": "IOHIDParamUserClient(0x100001023)"
+    },
+    {
+     "name": "0x000057c3",
+     "ipc-object": "0x1a46ed19",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "NAMED-MEMORY",
+     "description": "VM-MAP-COPY(0x53f47513255580c5, 688KiB)"
+    },
+    {
+     "name": "0x00005c07",
+     "ipc-object": "0xf237f8d2",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "THREAD-CONTROL"
+    },
+    {
+     "type": "port",
+     "name": "0x00006003",
+     "ipc-object": "0x7122b6ac",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [
+      "imp donation"
+     ],
+     "boosts": 0,
+     "notifications": [],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 0,
+     "oref": true,
+     "queue_limit": 1024,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "type": "port set",
+     "name": "0x00006503",
+     "ipc-object": "0xe6a0e3c2",
+     "members": [
+      {
+       "ipc-object": "0x8a6ef636",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00003303",
+       "pid": 1407,
+       "process": "Dock"
+      },
+      {
+       "ipc-object": "0x92703cbf",
+       "rights": [
+        "recv"
+       ],
+       "port_status_flags": [],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 0,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00006c03",
+       "pid": 1407,
+       "process": "Dock"
+      },
+      {
+       "ipc-object": "0x1e83afab",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00006d03",
+       "pid": 1407,
+       "process": "Dock"
+      }
+     ]
+    },
+    {
+     "type": "port set",
+     "name": "0x00007003",
+     "ipc-object": "0x1ca0ff21",
+     "members": [
+      {
+       "ipc-object": "0x8a6ef636",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00003303",
+       "pid": 1407,
+       "process": "Dock"
+      },
+      {
+       "ipc-object": "0x2c7577ef",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00006403",
+       "pid": 1407,
+       "process": "Dock"
+      },
+      {
+       "ipc-object": "0x2e7a3360",
+       "rights": [
+        "recv"
+       ],
+       "port_status_flags": [],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 0,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00006f03",
+       "pid": 1407,
+       "process": "Dock"
+      }
+     ]
+    },
+    {
+     "type": "port set",
+     "name": "0x00007603",
+     "ipc-object": "0xce357498",
+     "members": [
+      {
+       "ipc-object": "0x8a6ef636",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00003303",
+       "pid": 1407,
+       "process": "Dock"
+      },
+      {
+       "ipc-object": "0x7122b6ac",
+       "rights": [
+        "recv"
+       ],
+       "port_status_flags": [
+        "imp donation"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 0,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 1024,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00006003",
+       "pid": 1407,
+       "process": "Dock"
+      },
+      {
+       "ipc-object": "0x115e733d",
+       "rights": [
+        "recv",
+        "send"
+       ],
+       "port_status_flags": [
+        "guarded",
+        "strict guard"
+       ],
+       "boosts": 0,
+       "notifications": [],
+       "recv_rights": 1,
+       "send_rights": 1,
+       "send_once_rights": 0,
+       "oref": true,
+       "queue_limit": 5,
+       "msg_count": 0,
+       "context": "0x0000000000000000",
+       "identifier": "0x00006103",
+       "pid": 1407,
+       "process": "Dock"
+      }
+     ]
+    },
+    {
+     "type": "dead name",
+     "name": "0x0000849b",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "name": "0x0000bb03",
+     "ipc-object": "0xae6b45b1",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-CONNECT",
+     "description": "IOSurfaceRootUserClient(0x10004e8e3)"
+    },
+    {
+     "type": "port",
+     "name": "0x0000c223",
+     "ipc-object": "0x12021f27",
+     "rights": [
+      "recv"
+     ],
+     "port_status_flags": [
+      "imp donation"
+     ],
+     "boosts": 0,
+     "notifications": [
+      "no sender",
+      "port destroy request"
+     ],
+     "recv_rights": 1,
+     "send_rights": 0,
+     "send_once_rights": 1,
+     "oref": true,
+     "queue_limit": 6,
+     "msg_count": 0,
+     "context": "0x0000000000000000"
+    },
+    {
+     "name": "0x0000e703",
+     "ipc-object": "0x48566d7c",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "NAMED-MEMORY",
+     "description": "VM-MAP-COPY(0x4b14c274bd4730eb, 1152KiB)"
+    },
+    {
+     "type": "dead name",
+     "name": "0x0000e953",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "type": "dead name",
+     "name": "0x0000f61b",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "type": "dead name",
+     "name": "0x0000ff07",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "type": "dead name",
+     "name": "0x00011c67",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "type": "dead name",
+     "name": "0x0001280b",
+     "ipc-object": "0x00000000",
+     "send_rights": 1
+    },
+    {
+     "name": "0x0001501b",
+     "ipc-object": "0xa02b5995",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-OBJECT",
+     "description": "IOUserIterator"
+    },
+    {
+     "name": "0x00019707",
+     "ipc-object": "0xe25e7f24",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-OBJECT",
+     "description": "IOServiceMessageUserNotification"
+    },
+    {
+     "name": "0x000206b7",
+     "ipc-object": "0x2bb32c16",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-OBJECT",
+     "description": "IOSurfaceRoot(0x10000055c)"
+    },
+    {
+     "name": "0x0002249f",
+     "ipc-object": "0xee645367",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 3,
+     "identifier": "0x00000000",
+     "type": "IOKIT-OBJECT",
+     "description": "AGXAcceleratorG13G_B0(0x1000006a8)"
+    },
+    {
+     "name": "0x0002342f",
+     "ipc-object": "0x5cf03781",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 1,
+     "identifier": "0x00000000",
+     "type": "IOKIT-OBJECT",
+     "description": "AppleM2ScalerCSCDriver(0x10000039d)"
+    },
+    {
+     "name": "0x0002a15b",
+     "ipc-object": "0x7b7eb3d3",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 8,
+     "identifier": "0x00000000",
+     "pid": -1,
+     "process": "unknown"
+    },
+    {
+     "name": "0x0002a5f3",
+     "ipc-object": "0x0a436ef9",
+     "rights": [
+      "send"
+     ],
+     "notifications": [],
+     "send_rights": 5,
+     "identifier": "0x00000000",
+     "type": "MAIN-DEVICE"
+    }
+   ],
+   "total": 639,
+   "send_rights": 435,
+   "receive_rights": 245,
+   "send_once_rights": 0,
+   "port_sets": 7,
+   "dead_names": 32,
+   "dead_name requests": 135,
+   "vouchers": 1,
+   "exception_ports": [
+    {
+     "port_object": "0xa90b8288",
+     "receiver_object": "0x12b99199",
+     "flavor": "0x001",
+     "behavior": "MACH + UNKNOWN",
+     "mask": " RESOURCE"
+    }
+   ]
+  }
+ ]
+}

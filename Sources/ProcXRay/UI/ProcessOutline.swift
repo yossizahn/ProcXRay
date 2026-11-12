@@ -323,15 +323,18 @@ struct ProcessOutline: NSViewRepresentable {
             let current = outline.selectedRow >= 0 ? (outline.item(atRow: outline.selectedRow) as? Item)?.id : nil
             guard current != parent.selection else { return }
             if let id = parent.selection, let it = byID[id] {
-                // Programmatic jumps (Select Parent / Responsible) may target a row inside a collapsed group.
-                var chain: [Item] = []
-                var p = outline.parent(forItem: it) as? Item
-                while let x = p { chain.append(x); p = outline.parent(forItem: x) as? Item }
-                for x in chain.reversed() { collapsed.remove(x.id); defaultCollapsed.remove(x.id); outline.expandItem(x) }
+                // Programmatic jumps (Select Parent / Responsible, inspector links) may target a row inside
+                // a collapsed group. The outline doesn't know the parents of rows it hasn't loaded, so the
+                // path comes from the displayed tree.
+                for x in Self.path(to: it, in: shownRoots) {
+                    collapsed.remove(x.id); defaultCollapsed.remove(x.id); outline.expandItem(x)
+                }
                 let row = outline.row(forItem: it)
                 if row >= 0 {
                     outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
                     outline.scrollRowToVisible(row)
+                } else {
+                    outline.deselectAll(nil)   // never leave another row highlighted
                 }
             } else {
                 // Nothing selected, or a target this outline doesn't show: never leave another row
@@ -346,6 +349,16 @@ struct ProcessOutline: NSViewRepresentable {
                     }
                 }
             }
+        }
+
+        /// The displayed ancestors of `target`, outermost first; empty when it's a root or not shown.
+        private static func path(to target: Item, in items: [Item]) -> [Item] {
+            for it in items {
+                if it.shown.contains(where: { $0 === target }) { return [it] }
+                let sub = path(to: target, in: it.shown)
+                if !sub.isEmpty { return [it] + sub }
+            }
+            return []
         }
 
         private func syncSortIndicators(_ outline: NSOutlineView) {

@@ -24,6 +24,8 @@ struct ProcessesView: View {
     @State private var sort = [KeyPathComparator(\ProcNode.pidKey)]
     @State private var pendingSignal: (ProcInfo, Int32, String)?
     @State private var signalError: String?
+    /// The pane's history. Kept here so hiding the pane doesn't lose it; this view never reads it.
+    @State private var paneNav = InspectorNavigation()
 
     // This body must not read per-refresh data (store.procs, nodes): then it would re-render every tick,
     // and each re-render pushes SwiftUI's environment through every cell view of the outline. The outline
@@ -49,7 +51,7 @@ struct ProcessesView: View {
                 // A grouping switch re-parents nearly every row; start from a fresh outline (all expanded).
                 .id(grouping)
         } bottom: {
-            SelectedProcessPane(selection: selection, grouping: grouping, filter: search, sort: sort)
+            SelectedProcessPane(selection: $selection, nav: paneNav, grouping: grouping, filter: search, sort: sort)
         }
         .focusedSceneValue(\.inspectProcess, hasProcessSelected ? { inspectSelected() } : nil)
         .searchable(text: $search, placement: .toolbar, prompt: "name, pid, path, team, bundle, label…")
@@ -112,24 +114,49 @@ extension View {
 /// only this pane, not ProcessesView (see the note there).
 struct SelectedProcessPane: View {
     @Environment(Store.self) var store
-    let selection: ProcNode.ID?
+    @Binding var selection: ProcNode.ID?
+    let nav: InspectorNavigation
     var grouping: Grouping
     var filter: String
     var sort: [KeyPathComparator<ProcNode>]
 
-    var body: some View {
-        if let id = selection, let pid = SmartTree.pid(forRow: id), let p = store.procs[pid] {
-            InspectorView(proc: p)
-        // Reading store.procs makes the summary follow each refresh.
-        } else if let id = selection, id < 0, SmartTree.pid(forRow: id) == nil, !store.procs.isEmpty,
-                  let n = Self.find(id, in: store.nodes(grouping: grouping, filter: filter, sort: sort)) {
-            GroupSummaryView(node: n)
-        } else {
-            Text(selection.map { $0 < 0 ? "Group row — select a process inside it." : "This process has exited." }
-                 ?? "Select a process")
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+    /// The process the selected row stands for, by key: a pid reused under a still-selected row is another process.
+    private var selectedProc: ProcInfo? {
+        selection.flatMap(SmartTree.pid(forRow:)).flatMap { store.procs[$0] }
+    }
+
+    /// Following a link selects its process in the tree. A row the search hides can't be selected, so the
+    /// tree's selection clears; the pane keeps showing the process.
+    private var links: InspectorLinks {
+        InspectorLinks(nav: nav) { [$selection, store] p in
+            // Back to a process that has exited: select nothing, not whatever reused its pid (which
+            // would push that process and drop the forward history).
+            $selection.wrappedValue = store.live(p) != nil ? Int(p.pid) : nil
         }
+    }
+
+    var body: some View {
+        Group {
+            // Reading store.procs makes the summary follow each refresh.
+            if let id = selection, id < 0, SmartTree.pid(forRow: id) == nil, !store.procs.isEmpty,
+               let n = Self.find(id, in: store.nodes(grouping: grouping, filter: filter, sort: sort)) {
+                GroupSummaryView(node: n).environment(\.inspectorLinks, links)
+            } else if selection.map({ $0 < 0 && SmartTree.pid(forRow: $0) == nil }) == true {
+                placeholder("Group row — select a process inside it.")
+            } else {
+                // Nothing selected (deselected, or the row went away when its process exited): keep
+                // showing the last process, as a browser keeps its page.
+                InspectorHost(links: links) { placeholder("Select a process") }
+            }
+        }
+        // Selecting a row in the tree is a navigation: it goes into the history.
+        .onChange(of: selectedProc?.key, initial: true) { _, _ in
+            if let p = selectedProc { nav.push(p) }
+        }
+    }
+
+    private func placeholder(_ s: String) -> some View {
+        Text(s).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     static func find(_ id: Int, in nodes: [ProcNode]) -> ProcNode? {
@@ -188,8 +215,7 @@ struct GroupSummaryView: View {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
                 ForEach(ps.prefix(5), id: \.key) { p in
                     GridRow {
-                        Text(verbatim: p.name).lineLimit(1)
-                        Text(verbatim: "\(p.pid)").foregroundStyle(.secondary).monospacedDigit()
+                        ProcessChip(proc: p)
                         Text(verbatim: value(p)).monospacedDigit().gridColumnAlignment(.trailing)
                     }
                 }
@@ -203,38 +229,32 @@ struct ProcessRef: Codable, Hashable {
     var pid: pid_t
     var start: TimeInterval
     init(_ p: ProcInfo) { pid = p.pid; start = p.start.timeIntervalSince1970 }
+    init(pid: pid_t, start: TimeInterval) { self.pid = pid; self.start = start }
 }
 
 /// Property sheet for one process, opened by double-clicking (or Return on) a row.
+/// Links followed inside it show their process in the same window, with back and forward; ⌘-click opens another.
 struct ProcessWindow: View {
     static let id = "process"
     @Environment(Store.self) var store
-    let ref: ProcessRef
-    @State private var lastSeen: ProcInfo?
-    @State private var lastSign: SignInfo?
+    /// The window's scene value. It follows the process shown, so opening that process again brings this
+    /// window forward, and a restored window comes back on it.
+    @Binding var ref: ProcessRef?
+    @State private var nav = InspectorNavigation()
 
     var body: some View {
-        let live = store.procs[ref.pid].flatMap { $0.start.timeIntervalSince1970 == ref.start ? $0 : nil }
-        Group {
-            if let p = live ?? lastSeen {
-                VStack(spacing: 0) {
-                    if live == nil {
-                        Text("This process has exited. Showing its last known state.")
-                            .font(.callout).frame(maxWidth: .infinity).padding(6)
-                            .background(.orange.opacity(0.2))
-                    }
-                    InspectorView(proc: p, exited: live == nil, lastSign: lastSign)
-                }
-                .navigationTitle(Text(verbatim: "\(p.name) (\(p.pid))"))
-            } else {
-                Text(verbatim: "pid \(ref.pid) is not running").foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+        let ref = self.ref ?? ProcessRef(pid: -1, start: 0)
+        InspectorHost(links: InspectorLinks(nav: nav)) {
+            Text(verbatim: "pid \(ref.pid) is not running").foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .onChange(of: live, initial: true) { _, p in if let p { lastSeen = p } }
-        // The store forgets a process's signature once it exits; keep the last one this window saw.
-        .onChange(of: live.map { "\($0.codeKey)|\(store.signInfo(for: $0) != nil)" }, initial: true) { _, _ in
-            if let p = live, let s = store.signInfo(for: p) { lastSign = s }
+        .navigationTitle(Text(verbatim: nav.current.map { "\($0.proc.name) (\($0.proc.pid))" } ?? "pid \(ref.pid)"))
+        // At launch a restored window can appear before the first process snapshot: wait for it.
+        .onChange(of: store.procs[ref.pid]?.start, initial: true) { _, _ in
+            if nav.current == nil, let p = store.procs[ref.pid], p.start.timeIntervalSince1970 == ref.start { nav.push(p) }
+        }
+        .onChange(of: nav.current?.proc.key) { _, _ in
+            if let p = nav.current?.proc { self.ref = ProcessRef(p) }
         }
         .frame(minWidth: 640, minHeight: 420)
     }

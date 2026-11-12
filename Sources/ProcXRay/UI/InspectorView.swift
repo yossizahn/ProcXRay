@@ -33,11 +33,13 @@ struct InspectorView: View {
     }
 
     private var sign: SignInfo? { store.signInfo(for: proc) ?? lastSign }
+    @Environment(\.inspectorLinks) private var links
 
     var body: some View {
         VStack(spacing: 0) {
             // Fixed-height header: a missing icon or path must not shift the tab strip below it.
             HStack(spacing: 6) {
+                if let links { HistoryButtons(links: links) }
                 Group {
                     if let img = IconCache.icon(for: proc) { Image(nsImage: img) } else { Image(systemName: "terminal") }
                 }
@@ -170,15 +172,32 @@ struct InspectorTabStrip: View {
 
 // MARK: - Key/value grid
 
+/// A value in the key/value grid: text, or a link to a process followed by optional text.
+enum KVValue {
+    case text(String)
+    case process(ProcInfo, note: String = "")
+}
+
 struct KV: View {
-    let rows: [(String, String)]
+    let rows: [(String, KVValue)]
+    init(rows: [(String, KVValue)]) { self.rows = rows }
+    init(rows: [(String, String)]) { self.rows = rows.map { ($0.0, .text($0.1)) } }
+
     var body: some View {
         ScrollView {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
                     GridRow {
                         Text(r.0).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                        Text(r.1).textSelection(.enabled).font(.system(.body, design: .monospaced))
+                        switch r.1 {
+                        case .text(let t):
+                            Text(t).textSelection(.enabled).font(.system(.body, design: .monospaced))
+                        case .process(let p, let note):
+                            HStack(spacing: 6) {
+                                ProcessChip(proc: p)
+                                if !note.isEmpty { Text(note).foregroundStyle(.secondary).textSelection(.enabled) }
+                            }
+                        }
                     }
                 }
             }
@@ -196,15 +215,14 @@ struct GeneralTab: View {
 
     var body: some View {
         let p = proc
-        let parent = store.procs[p.ppid]
-        let resp = store.responsibleDescription(p)
+        // A parent started after its child is a later process that reused the pid.
+        let parent = store.procs[p.ppid].flatMap { $0.start <= p.start ? $0 : nil }
+        let respProc = store.responsibleProcess(p)
         let coalMembers = p.coalition.map { c in store.procs.values.filter { $0.coalition == c }.count } ?? 0
         let jetMembers = p.jetsamCoalition.map { c in store.procs.values.filter { $0.jetsamCoalition == c }.count } ?? 0
         var rows: [(String, String)] = [
             ("Path", p.path ?? "— (\(p.comm))"),
             ("Working dir", cwd?.key == p.key ? cwd?.path ?? "—" : "—"),
-            ("Parent", "\(parent?.name ?? "?") (\(p.ppid))"),
-            ("Responsible", resp),
             ("Coalition", p.coalition.map { "resource \($0) (\(coalMembers) member(s)) · jetsam \(p.jetsamCoalition.map(String.init) ?? "—") (\(jetMembers) member(s))" } ?? "—"),
             ("Process group", "\(p.pgid)"),
             ("User", "\(p.user) (uid \(p.uid))"),
@@ -255,7 +273,13 @@ struct GeneralTab: View {
         if let a = p.lsAppName { rows.append(("LaunchServices", "\(a) \(p.lsTags.joined(separator: " "))")) }
         // Re-read on an exec and on every manual refresh: a `cd` changes nothing else we watch.
         // …and when the helper comes or goes, since it reads what we can't.
-        return KV(rows: rows).task(id: "\(p.codeKey)|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
+        var all: [(String, KVValue)] = rows.map { ($0.0, .text($0.1)) }
+        let links: [(String, KVValue)] = [
+            ("Parent", parent.map { .process($0) } ?? .text(p.ppid == p.pid ? "none" : "not running (\(p.ppid))")),
+            ("Responsible", respProc.map { .process($0) } ?? .text(store.responsibleDescription(p))),
+        ]
+        all.insert(contentsOf: links, at: 2)
+        return KV(rows: all).task(id: "\(p.codeKey)|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
             guard !exited else { return }   // keep the last value; the pid may be someone else's now
             let pid = p.pid, start = p.start, key = p.key
             let helper = store.helperState.isRunning
@@ -311,13 +335,15 @@ struct LineageTab: View {
             var out: [ProcInfo] = []
             var cur = proc
             var seen: Set<pid_t> = [proc.pid]
-            while let par = store.procs[cur.ppid], !seen.contains(par.pid) {
+            // A "parent" started after its child reused the parent's pid; the chain ends there.
+            while let par = store.procs[cur.ppid], par.start <= cur.start, !seen.contains(par.pid) {
                 out.append(par); seen.insert(par.pid); cur = par
             }
             return out
         }()
-        let children = store.procs.values.filter { $0.ppid == proc.pid && $0.pid != proc.pid }.sorted { $0.pid < $1.pid }
-        let attributed = store.procs.values.filter { $0.responsible == proc.pid && $0.pid != proc.pid }.sorted { $0.pid < $1.pid }
+        // Started before this process: then the pid it points at was someone else's (shown for an exited one).
+        let children = store.procs.values.filter { $0.ppid == proc.pid && $0.pid != proc.pid && $0.start >= proc.start }.sorted { $0.pid < $1.pid }
+        let attributed = store.procs.values.filter { $0.responsible == proc.pid && $0.pid != proc.pid && $0.start >= proc.start }.sorted { $0.pid < $1.pid }
         let coal = proc.coalition.map { c in store.procs.values.filter { $0.coalition == c && $0.pid != proc.pid }.sorted { $0.pid < $1.pid } } ?? []
         // Jetsam-mates outside the resource coalition: typically the host app and its extensions.
         let jet = proc.jetsamCoalition.map { j in
@@ -371,9 +397,7 @@ struct LineageTab: View {
 
     private func row(_ p: ProcInfo) -> some View {
         HStack {
-            if let i = IconCache.icon(for: p) { Image(nsImage: i) }
-            Text(p.name)
-            Text(verbatim: "\(p.pid)").monospacedDigit().foregroundStyle(.secondary)
+            ProcessChip(proc: p)
             Spacer()
             Text(p.path ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
         }

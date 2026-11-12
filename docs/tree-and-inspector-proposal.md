@@ -1,6 +1,6 @@
 # Proposal: a grouped process tree, pickable columns and a linked inspector
 
-Status: proposal, written 2026-11-12. Steps 1–3 of the order of work are implemented (Smart tree with roll-ups, launchd labels from all three domains, Extensions with extension points; see `SmartTree.swift`). One deviation: the `.appex/` rule is checked before the LaunchServices `UIElement`/`BackgroundOnly` rules, because Finder Sync and Quick Look extensions register as `BackgroundOnly` and otherwise filled Background apps.
+Status: proposal, written 2026-11-12. Steps 1–4 of the order of work are implemented: Smart tree with roll-ups, launchd labels from all three domains, Extensions with extension points (see `SmartTree.swift`), and process chips with back/forward in the current tabs (see `UI/InspectorNavigation.swift`). Deviations: the `.appex/` rule is checked before the LaunchServices `UIElement`/`BackgroundOnly` rules, because Finder Sync and Quick Look extensions register as `BackgroundOnly` and otherwise filled Background apps. The chip's hover card is a tooltip rather than a popover, so it never covers what the pointer is moving towards; chips also have a context menu (Show, Open in New Window, Copy PID, Copy Path, Reveal in Finder). Chips so far appear in General (parent, responsible), Lineage and the group summary pane; the header, Origin and socket peers come with steps 7 and 9.
 
 This covers three changes that build on each other:
 
