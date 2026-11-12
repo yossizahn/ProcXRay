@@ -243,8 +243,9 @@ struct GeneralTab: View {
                 ("CPU now", p.cpuPercent.map { String(format: "%.1f %%", $0) } ?? "—"),
                 ("Threads", p.threads.map { t in c?.runningThreads.map { "\(t) (\($0) running)" } ?? "\(t)" } ?? "—"),
                 ("Disk read / written", "\(Fmt.bytes(p.diskRead)) / \(Fmt.bytes(p.diskWrite))"),
-                ("Billed energy", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
-                ("Idle wakeups", p.wakeups.map(String.init) ?? "—"),
+                ("Energy", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
+                ("Billed energy", c?.billedEnergyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
+                ("Wakeups (idle + interrupt)", p.wakeups.map(String.init) ?? "—"),
             ]
             if let c {
                 rows += [

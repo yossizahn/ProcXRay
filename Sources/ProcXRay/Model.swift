@@ -30,9 +30,12 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var cpuPercent: Double?
     var diskRead: UInt64?
     var diskWrite: UInt64?
+    /// Energy the process's own threads used on the CPU, in nanojoules (rusage ri_energy_nj).
     var energyNJ: UInt64?
     var wakeups: UInt64?
     var counters: Counters?
+    /// Per-second rates over the last refresh interval (nil on a process's first sample).
+    var rates: Rates?
 
     // joined from other sources
     var launchdLabel: String?
@@ -218,7 +221,9 @@ final class Store {
                                                  columns: Set<String>, nodes: [ProcNode])?
 
     private(set) var signCache: [String: SignInfo] = [:]
-    @ObservationIgnored private var prevCPU: [String: (UInt64, UInt64)] = [:]   // key -> (cpuNanos, wall uptime nanos)
+    /// Each process's counters at the last refresh, by key: CPU % and the rate columns divide the change
+    /// by the time between the two readings.
+    @ObservationIgnored private var prevSamples: [String: Sample] = [:]
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var refreshing = false
     @ObservationIgnored private var signing = false
@@ -268,7 +273,7 @@ final class Store {
             if !paused {
                 // A CPU % averaged over the whole off-screen stretch would be misleading: start a fresh
                 // baseline and take the second sample shortly after so the column fills in quickly.
-                prevCPU = [:]
+                prevSamples = [:]
                 refresh()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                     guard let self, !self.paused else { return }
@@ -350,7 +355,7 @@ final class Store {
     func refresh(full: Bool = true) {
         guard !refreshing else { return }
         refreshing = true
-        let prev = prevCPU
+        let prev = prevSamples
         let cache = signCache
         let useHelper = helperState.isRunning
         let readSlow = full || ticksSinceSlow + 1 >= Self.slowEvery || lsApps.isEmpty
@@ -363,7 +368,7 @@ final class Store {
             // Ask the helper first, but collect local data while it answers; the snapshot waits for the
             // helper only after that, and never longer than helperBudget (it normally takes ~10 ms).
             let priv = useHelper ? Pending { HelperClient.shared.allMetrics(timeout: Self.helperBudget) } : nil
-            var marked = Self.snapshot(prevCPU: prev, signCache: cache, priv: { priv?.wait() }, ls: ls, jobs: jobs, otherJobs: otherJobs)
+            var marked = Self.snapshot(prev: prev, signCache: cache, priv: { priv?.wait() }, ls: ls, jobs: jobs, otherJobs: otherJobs)
             Self.markLeftBehind(&marked.procs, lsApps: marked.ls)
             let snap = marked
             let ms = Int((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
@@ -380,7 +385,7 @@ final class Store {
                     self.jobs = snap.jobs
                     self.otherJobs = snap.otherJobs
                 }
-                self.prevCPU = snap.cpu
+                self.prevSamples = snap.samples
                 if full { self.fullRefreshGen &+= 1 }
                 self.updateGhostCount()
                 self.lastRefresh = Date()
@@ -464,7 +469,7 @@ final class Store {
         var ls: [LSApp]
         var jobs: [LaunchdJob]
         var otherJobs: [LaunchdJob] = []
-        var cpu: [String: (UInt64, UInt64)]
+        var samples: [String: Sample]
         /// Set when the process list couldn't be read; `procs` is then empty and must not be published.
         var error: String?
     }
@@ -474,7 +479,7 @@ final class Store {
     nonisolated static let helperBudget = 1.5
 
     /// `priv`: helper metrics, asked for only after the local pass so a slow helper delays just the merge.
-    nonisolated static func snapshot(prevCPU: [String: (UInt64, UInt64)], signCache: [String: SignInfo],
+    nonisolated static func snapshot(prev: [String: Sample], signCache: [String: SignInfo],
                                      priv privSource: () -> [Int32: PrivMetrics]? = { nil },
                                      ls: [LSApp]? = nil, jobs: [LaunchdJob]? = nil,
                                      otherJobs: [LaunchdJob]? = nil) -> Snapshot {
@@ -490,12 +495,12 @@ final class Store {
         let now = DispatchTime.now().uptimeNanoseconds
         var users: [uid_t: String] = [:]
         var out: [pid_t: ProcInfo] = [:]
-        var cpu: [String: (UInt64, UInt64)] = [:]
+        var samples: [String: Sample] = [:]
 
         let list: [Native.KProc]
         switch Native.listProcesses() {
         case .success(let l): list = l
-        case .failure(let e): return Snapshot(procs: [:], ls: ls, jobs: jobs, otherJobs: otherJobs, cpu: prevCPU, error: e.message)
+        case .failure(let e): return Snapshot(procs: [:], ls: ls, jobs: jobs, otherJobs: otherJobs, samples: prev, error: e.message)
         }
         for k in list where k.pid >= 0 {
             let user = users[k.uid] ?? { let u = Native.userName(k.uid); users[k.uid] = u; return u }()
@@ -520,17 +525,18 @@ final class Store {
                 p.viaHelper = p.fill(from: m)
                 if p.responsible == nil { p.responsible = m.responsible }
             }
-            if let c = p.cpuNanos {
-                if let (pc, pw) = prevCPU[p.key], now > pw, c >= pc {
-                    p.cpuPercent = Double(c - pc) / Double(now - pw) * 100
-                }
-                cpu[p.key] = (c, now)
+            let sample = Sample(p, at: now)
+            if let before = prev[p.key], now > before.at {
+                let r = Rates(from: before, to: sample)
+                p.cpuPercent = r.cpuPercent
+                p.rates = r
             }
+            samples[p.key] = sample
             // sandbox check is cheap but noisy for zombies
             if !p.isZombie { p.sandboxed = Native.sandboxed(pid, start: p.start) ?? priv?[pid]?.sandboxed }
             out[pid] = p
         }
-        return Snapshot(procs: out, ls: ls, jobs: jobs, otherJobs: otherJobs, cpu: cpu)
+        return Snapshot(procs: out, ls: ls, jobs: jobs, otherJobs: otherJobs, samples: samples)
     }
 
     // MARK: Derived views
@@ -871,5 +877,61 @@ final class ColumnMemo {
         let v = col.value(p, store)
         values[i][p.pid] = v
         return v
+    }
+}
+
+/// The counters a rate is worked out from, for one process at one moment.
+struct Sample: Sendable {
+    var at: UInt64                    // uptime nanoseconds
+    var cpu, waiting, diskRead, diskWrite, energy, wakeups: UInt64?
+    var contextSwitches, faults, pageins, machMsgsSent, machMsgsReceived, unixSyscalls, machSyscalls: UInt32?
+
+    init(_ p: ProcInfo, at: UInt64) {
+        self.at = at
+        cpu = p.cpuNanos; waiting = p.counters?.waitingNanos
+        diskRead = p.diskRead; diskWrite = p.diskWrite; energy = p.energyNJ; wakeups = p.wakeups
+        let c = p.counters
+        contextSwitches = c?.contextSwitches; faults = c?.faults; pageins = c?.pageins
+        machMsgsSent = c?.machMsgsSent; machMsgsReceived = c?.machMsgsReceived
+        unixSyscalls = c?.unixSyscalls; machSyscalls = c?.machSyscalls
+    }
+}
+
+/// Change per second between two samples of one process. A rate is nil when either reading is missing.
+struct Rates: Hashable, Sendable {
+    var cpuPercent: Double?
+    /// Time runnable but not running, as a percentage of one core (like CPU %, it can pass 100).
+    var waitingPercent: Double?
+    var contextSwitches, faults, pageins: Double?
+    var diskRead, diskWrite: Double?          // bytes per second
+    var watts: Double?
+    var wakeups, syscalls, machMsgs: Double?
+
+    init(from a: Sample, to b: Sample) {
+        let secs = Double(b.at - a.at) / 1e9
+        // 64-bit lifetime totals only grow; a drop means the reading is off, so no rate.
+        func d64(_ x: UInt64?, _ y: UInt64?) -> Double? {
+            guard let x, let y, y >= x else { return nil }
+            return Double(y - x)
+        }
+        // proc_taskinfo keeps these as 32-bit ints that wrap. Subtracting modulo 2^32 gives the true change
+        // as long as fewer than 2^32 events happen between two refreshes (seconds apart), so a wrap still
+        // gives the right rate.
+        func d32(_ x: UInt32?, _ y: UInt32?) -> Double? {
+            guard let x, let y else { return nil }
+            return Double(y &- x)
+        }
+        func sum(_ x: Double?, _ y: Double?) -> Double? { x.flatMap { a in y.map { a + $0 } } }
+        cpuPercent = d64(a.cpu, b.cpu).map { $0 / 1e9 / secs * 100 }
+        waitingPercent = d64(a.waiting, b.waiting).map { $0 / 1e9 / secs * 100 }
+        contextSwitches = d32(a.contextSwitches, b.contextSwitches).map { $0 / secs }
+        faults = d32(a.faults, b.faults).map { $0 / secs }
+        pageins = d32(a.pageins, b.pageins).map { $0 / secs }
+        diskRead = d64(a.diskRead, b.diskRead).map { $0 / secs }
+        diskWrite = d64(a.diskWrite, b.diskWrite).map { $0 / secs }
+        watts = d64(a.energy, b.energy).map { $0 / 1e9 / secs }   // nanojoules → joules per second
+        wakeups = d64(a.wakeups, b.wakeups).map { $0 / secs }
+        syscalls = sum(d32(a.unixSyscalls, b.unixSyscalls), d32(a.machSyscalls, b.machSyscalls)).map { $0 / secs }
+        machMsgs = sum(d32(a.machMsgsSent, b.machMsgsSent), d32(a.machMsgsReceived, b.machMsgsReceived)).map { $0 / secs }
     }
 }

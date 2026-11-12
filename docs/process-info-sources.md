@@ -26,7 +26,7 @@ The availability notes on unused APIs were measured on 2026-11-12 (macOS 27, App
 |---|---|
 | `proc_pidpath` | **path** |
 | `proc_pidinfo(PROC_PIDTASKINFO)` → `proc_taskinfo` | **rss**, **virt**, **threads**, **cpuNanos** (user + system, mach ticks converted to ns); in `counters`: **runningThreads**, **contextSwitches**, **faults**, **cowFaults**, **pageins**, **machMsgsSent**, **machMsgsReceived**, **machSyscalls**, **unixSyscalls** |
-| `proc_pid_rusage(RUSAGE_INFO_V6)` | **footprint**, **diskRead**, **diskWrite**, **energyNJ** (billed energy), **wakeups** (package idle + interrupt), and **cpuNanos** if task info failed; in `counters`: **instructions**, **cycles**, **pCoreNanos** (performance-core CPU time), **waitingNanos**, **logicalWrites**, **peakFootprint** (lifetime max), **neuralFootprint** |
+| `proc_pid_rusage(RUSAGE_INFO_V6)` | **footprint**, **diskRead**, **diskWrite**, **energyNJ** (`ri_energy_nj`, the process's own CPU energy; until 2026-11-12 this read `ri_billed_energy`, which measured 0 for a process using 4 W of CPU), **billedEnergyNJ** (`ri_billed_energy`, shown as "Billed energy" in the inspector), **wakeups** (package idle + interrupt), and **cpuNanos** if task info failed; in `counters`: **instructions**, **cycles**, **pCoreNanos** (performance-core CPU time), **waitingNanos**, **logicalWrites**, **peakFootprint** (lifetime max), **neuralFootprint** |
 
 `PrivMetrics.read` makes both calls; the app and the helper use the same function. The `proc_taskinfo` counters are 32-bit in the kernel and are read as unsigned, so they wrap at 2^32.
 
@@ -109,7 +109,7 @@ Grouped by how hard it is to get. "Same user" means the call worked for another 
 
 `rusage_info_v6` (measured: works, same user):
 
-- `ri_energy_nj`, `ri_penergy_nj`: energy in nanojoules
+- `ri_penergy_nj`: the part of `ri_energy_nj` spent on performance cores (measured: 4.107 of 4.109 W for `yes`)
 - `ri_cpu_time_qos_*`: CPU time per QoS class
 - `ri_billed_system_time`, `ri_serviced_system_time`: CPU billed to this process for work done by others, and the reverse; probably what top's `cpu_me` / `cpu_others` show. Not added because the units are unconfirmed.
 - `ri_serviced_energy`

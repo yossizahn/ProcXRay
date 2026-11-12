@@ -64,7 +64,7 @@ struct Column: Identifiable {
             case .cpu: "CPU"
             case .memory: "Memory"
             case .disk: "Disk"
-            case .energy: "Energy"
+            case .energy: "Energy and activity"
             case .security: "Security"
             case .time: "Time"
             }
@@ -183,6 +183,11 @@ private func text(_ s: String?) -> CellValue { s.map { .text($0) } ?? .empty }
 private let bytesFormat: (Double) -> String = { Fmt.bytes(UInt64(max(0, $0))) }
 private let countFormat: (Double) -> String = { Fmt.count(Int64($0)) }
 private let secsFormat: (Double) -> String = { Fmt.secs(UInt64(max(0, $0))) }
+/// Events per second: one decimal below 10, whole numbers above.
+private let perSecFormat: (Double) -> String = { $0 == 0 ? "0" : $0 < 10 ? String(format: "%.1f/s", $0) : "\(Fmt.count(Int64($0.rounded())))/s" }
+private let bytesPerSecFormat: (Double) -> String = { $0 < 1 ? "0" : Fmt.bytes(UInt64($0)) + "/s" }
+private let wattsFormat: (Double) -> String = { $0 == 0 ? "0" : $0 < 0.01 ? "<0.01 W" : String(format: "%.2f W", $0) }
+private let rateNote = " Over the last refresh; — for a process's first refresh."
 
 /// "all", "none" or "n of m" over the processes whose answer is known.
 @MainActor private func share(_ members: [ProcInfo], _ test: (ProcInfo) -> Bool?) -> CellValue {
@@ -305,6 +310,11 @@ private let catalogue: [Column] = [
             section: .cpu, minWidth: 44, width: 52, format: { Fmt.pct($0) }) { $0.cpuPercent },
     .amount(id: "cpuTime", title: "CPU time", tooltip: "User plus system CPU time since the process started. Group rows: the sum.",
             section: .cpu, width: 80, format: secsFormat) { $0.cpuNanos.map { Double($0) } },
+    .amount(id: "waiting", title: "Waiting for CPU",
+            tooltip: "Time the process's threads were ready to run but no core was free, as a percentage of one core." + rateNote,
+            section: .cpu, width: 70, rule: .blank, format: { String(format: "%.1f", $0) }) { $0.rates?.waitingPercent },
+    .amount(id: "cswRate", title: "Context switches/s", tooltip: "Context switches per second. Group rows: the sum." + rateNote,
+            section: .cpu, width: 90, format: perSecFormat) { $0.rates?.contextSwitches },
     .amount(id: "threads", title: "Threads", tooltip: "Number of threads. Group rows: the sum.",
             section: .cpu, minWidth: 44, width: 56, format: countFormat) { $0.threads.map { Double($0) } },
     .amount(id: "running", title: "Running threads", tooltip: "Threads running or ready to run right now. Group rows: the sum.",
@@ -344,7 +354,16 @@ private let catalogue: [Column] = [
     .amount(id: "neural", title: "Neural Engine", tooltip: "Memory charged to the process for the Neural Engine. Group rows: the sum.",
             section: .memory, width: 76, format: bytesFormat) { $0.counters?.neuralFootprint.map { Double($0) } },
 
+    .amount(id: "faultRate", title: "Page faults/s", tooltip: "Page faults per second. Group rows: the sum." + rateNote,
+            section: .memory, width: 80, format: perSecFormat) { $0.rates?.faults },
+    .amount(id: "pageinRate", title: "Page-ins/s", tooltip: "Pages read in from disk per second. Group rows: the sum." + rateNote,
+            section: .memory, width: 70, format: perSecFormat) { $0.rates?.pageins },
+
     // Disk
+    .amount(id: "readRate", title: "Read/s", tooltip: "Bytes read from disk per second. Group rows: the sum." + rateNote,
+            section: .disk, width: 80, format: bytesPerSecFormat) { $0.rates?.diskRead },
+    .amount(id: "writeRate", title: "Written/s", tooltip: "Bytes written to disk per second. Group rows: the sum." + rateNote,
+            section: .disk, width: 80, format: bytesPerSecFormat) { $0.rates?.diskWrite },
     .amount(id: "diskRead", title: "Disk read", tooltip: "Bytes read from disk since the process started. Group rows: the sum.",
             section: .disk, width: 76, format: bytesFormat) { $0.diskRead.map { Double($0) } },
     .amount(id: "diskWritten", title: "Disk written", tooltip: "Bytes written to disk since the process started. Group rows: the sum.",
@@ -360,7 +379,17 @@ private let catalogue: [Column] = [
             section: .disk, width: 80, format: bytesFormat) { $0.counters?.logicalWrites.map { Double($0) } },
 
     // Energy
-    .amount(id: "energy", title: "Energy", tooltip: "Energy billed to the process since it started, in joules. Group rows: the sum.",
+    .amount(id: "power", title: "Power",
+            tooltip: "Energy the process's threads used on the CPU, per second, in watts (rusage ri_energy_nj). Group rows: the sum." + rateNote,
+            section: .energy, width: 70, format: wattsFormat) { $0.rates?.watts },
+    .amount(id: "wakeupRate", title: "Wakeups/s",
+            tooltip: "Package idle plus interrupt wakeups per second (rusage ri_pkg_idle_wkups + ri_interrupt_wkups). Group rows: the sum." + rateNote,
+            section: .energy, width: 80, format: perSecFormat) { $0.rates?.wakeups },
+    .amount(id: "syscallRate", title: "System calls/s", tooltip: "BSD plus Mach system calls per second. Group rows: the sum." + rateNote,
+            section: .energy, width: 90, format: perSecFormat) { $0.rates?.syscalls },
+    .amount(id: "machMsgRate", title: "Mach messages/s", tooltip: "Mach messages sent plus received per second. Group rows: the sum." + rateNote,
+            section: .energy, width: 90, format: perSecFormat) { $0.rates?.machMsgs },
+    .amount(id: "energy", title: "Energy", tooltip: "Energy the process's threads used on the CPU since it started, in joules (rusage ri_energy_nj). Group rows: the sum.",
             section: .energy, width: 80, format: { String(format: "%.1f J", $0) }) { $0.energyNJ.map { Double($0) / 1e9 } },
 
     // Security

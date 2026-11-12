@@ -123,6 +123,8 @@ struct Counters: Codable, Hashable, Sendable {
     var logicalWrites: UInt64?
     var peakFootprint: UInt64?
     var neuralFootprint: UInt64?
+    /// rusage's billed energy, kept apart from the process's own energy (see `energyNJ`).
+    var billedEnergyNJ: UInt64?
 }
 
 extension PrivMetrics {
@@ -152,7 +154,10 @@ extension PrivMetrics {
             m.footprint = ru.ri_phys_footprint
             m.diskRead = ru.ri_diskio_bytesread
             m.diskWrite = ru.ri_diskio_byteswritten
-            m.energyNJ = ru.ri_billed_energy
+            // The process's own CPU energy. (ri_billed_energy is something else: measured 0 for a process
+            // busy on a CPU at 4 W.)
+            m.energyNJ = ru.ri_energy_nj
+            c.billedEnergyNJ = ru.ri_billed_energy
             m.wakeups = ru.ri_pkg_idle_wkups &+ ru.ri_interrupt_wkups
             let cpu = ru.ri_user_time &+ ru.ri_system_time
             if m.cpuNanos == nil { m.cpuNanos = Native.machToNanos(cpu) }

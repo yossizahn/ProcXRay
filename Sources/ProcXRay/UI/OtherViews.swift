@@ -250,7 +250,7 @@ struct LaunchdView: View {
 
 enum SelfTest {
     @MainActor static func run() {
-        let snap = Store.snapshot(prevCPU: [:], signCache: [:])
+        let snap = Store.snapshot(prev: [:], signCache: [:])
         if let e = snap.error { print(e); exit(1) }
         let procs = snap.procs
         print("processes: \(procs.count)")
@@ -260,7 +260,7 @@ enum SelfTest {
         if hs.isRunning {
             let t0 = Date()
             let priv = HelperClient.shared.allMetrics() ?? [:]
-            let merged = Store.snapshot(prevCPU: [:], signCache: [:], priv: { priv }).procs
+            let merged = Store.snapshot(prev: [:], signCache: [:], priv: { priv }).procs
             print("helper metrics: \(priv.count) pids, \(priv.values.filter { $0.rss != nil }.count) with task info, \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
             print("merged readable task info: \(merged.values.filter(\.isInspectable).count) / \(merged.count) (via helper: \(merged.values.filter(\.viaHelper).count))")
             if let ld = merged[1] { print("launchd via helper: rss=\(ld.rss ?? 0) threads=\(ld.threads ?? -1)") }

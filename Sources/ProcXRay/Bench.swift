@@ -36,8 +36,8 @@ enum Bench {
         time("per-pid userName") { for p in Native.allProcesses() { _ = Native.userName(p.uid) } }
         if helper { time("helper allMetrics (XPC)") { _ = HelperClient.shared.allMetrics() } }
         let priv = helper ? HelperClient.shared.allMetrics() : nil
-        time("full snapshot()") { _ = Store.snapshot(prevCPU: [:], signCache: [:], priv: { priv }) }
-        let snap = Store.snapshot(prevCPU: [:], signCache: [:], priv: { priv })
+        time("full snapshot()") { _ = Store.snapshot(prev: [:], signCache: [:], priv: { priv }) }
+        let snap = Store.snapshot(prev: [:], signCache: [:], priv: { priv })
         let store = Store(); store.procs = snap.procs; store.lsApps = snap.ls
         for g in Grouping.allCases {
             time("nodes(\(g.label))") {
@@ -75,6 +75,27 @@ enum Bench {
         time("ghosts()") { _ = Store.ghosts(procs: snap.procs, lsApps: snap.ls) }
         let one = Array(snap.procs.values.prefix(50))
         time("CodeSign.inspect x50") { for p in one { _ = CodeSign.inspect(pid: p.pid, path: p.path) } }
+    }
+
+    /// `ProcXRay --rates <pid>…`: two snapshots `--interval` seconds apart (default 2), then each pid's
+    /// rates, for checking the rate columns against another tool.
+    static func rates(_ args: [String]) {
+        var interval = 2.0
+        var pids: [pid_t] = []
+        var i = 0
+        while i < args.count {
+            if args[i] == "--interval", i + 1 < args.count { interval = Double(args[i + 1]) ?? 2; i += 2; continue }
+            if let p = pid_t(args[i]) { pids.append(p) }
+            i += 1
+        }
+        let a = Store.snapshot(prev: [:], signCache: [:])
+        Thread.sleep(forTimeInterval: interval)
+        let b = Store.snapshot(prev: a.samples, signCache: [:])
+        for pid in pids {
+            guard let p = b.procs[pid], let r = p.rates else { print("\(pid): no rates"); continue }
+            func f(_ v: Double?) -> String { v.map { String(format: "%.1f", $0) } ?? "—" }
+            print("\(pid) \(p.name): cpu% \(f(r.cpuPercent)) waiting% \(f(r.waitingPercent)) csw/s \(f(r.contextSwitches)) faults/s \(f(r.faults)) pageins/s \(f(r.pageins)) read B/s \(f(r.diskRead)) write B/s \(f(r.diskWrite)) W \(r.watts.map { String(format: "%.3f", $0) } ?? "—") wakeups/s \(f(r.wakeups)) syscalls/s \(f(r.syscalls)) machmsgs/s \(f(r.machMsgs))")
+        }
     }
 
     /// `ProcXRay --helper-call <status|argsenv|lsof|vmmap|sample|procinfo|btm> [pid]`: one helper call from
