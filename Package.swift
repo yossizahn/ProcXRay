@@ -8,7 +8,7 @@ let package = Package(
         .executableTarget(
             name: "ProcXRay",
             path: "Sources/ProcXRay",
-            linkerSettings: [.linkedFramework("Security"), .linkedFramework("AppKit")]
+            linkerSettings: [.linkedFramework("Security"), .linkedFramework("AppKit"), .linkedFramework("IOKit")]
         )
     ]
 )

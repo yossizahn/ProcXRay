@@ -1,4 +1,5 @@
 import Darwin
+import IOKit.pwr_mgt
 import Foundation
 
 /// Thin wrappers over libproc / sysctl / private libsystem symbols.
@@ -175,6 +176,38 @@ enum Native {
         return rc == 0 ? ri : nil
     }
 
+    /// Open file descriptors (files, sockets, pipes…). The size query returns the table's allocation, so
+    /// the list is fetched to count the entries actually in use.
+    static func openFileCount(_ pid: pid_t) -> Int? {
+        let stride = MemoryLayout<proc_fdinfo>.stride
+        let size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        guard size > 0 else { return nil }
+        var buf = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(size) / stride + 32)
+        let got = buf.withUnsafeMutableBytes { proc_pidinfo(pid, PROC_PIDLISTFDS, 0, $0.baseAddress, Int32($0.count)) }
+        return got >= 0 ? Int(got) / stride : nil
+    }
+
+    /// CPU time per QoS class, in nanoseconds, highest class first.
+    static func cpuTimeByQoS(_ pid: pid_t) -> [(String, UInt64)]? {
+        guard let r = rusage(pid) else { return nil }
+        return [
+            ("User interactive", r.ri_cpu_time_qos_user_interactive), ("User initiated", r.ri_cpu_time_qos_user_initiated),
+            ("Default", r.ri_cpu_time_qos_default), ("Utility", r.ri_cpu_time_qos_utility),
+            ("Background", r.ri_cpu_time_qos_background), ("Maintenance", r.ri_cpu_time_qos_maintenance),
+            ("Legacy", r.ri_cpu_time_qos_legacy),
+        ].map { ($0.0, machToNanos($0.1)) }
+    }
+
+    /// Power assertions the process holds (keeping the system or display awake), as (type, name).
+    static func powerAssertions(_ pid: pid_t) -> [(String, String)] {
+        var dict: Unmanaged<CFDictionary>?
+        guard IOPMCopyAssertionsByProcess(&dict) == kIOReturnSuccess,
+              let all = dict?.takeRetainedValue() as? [NSNumber: [[String: Any]]] else { return [] }
+        return (all[NSNumber(value: pid)] ?? []).map {
+            (($0["AssertType"] as? String) ?? "?", ($0["AssertName"] as? String) ?? "")
+        }
+    }
+
     /// Returns (resource coalition id, jetsam coalition id).
     static func coalition(_ pid: pid_t) -> (UInt64, UInt64)? {
         var buf = [UInt64](repeating: 0, count: 5)
@@ -210,11 +243,19 @@ enum Native {
     struct ArgsEnv { var execPath: String; var args: [String]; var env: [String] }
 
     static func argsEnv(_ pid: pid_t) -> ArgsEnv? {
-        var argmax: Int32 = 0
-        var sz = MemoryLayout<Int32>.size
-        var mibMax: [Int32] = [CTL_KERN, KERN_ARGMAX]
-        guard sysctl(&mibMax, 2, &argmax, &sz, nil, 0) == 0 else { return nil }
-        var buf = [UInt8](repeating: 0, count: Int(argmax))
+        var buf: [UInt8] = []
+        return argsEnv(pid, buffer: &buf)
+    }
+
+    /// `buffer`: reused across calls, so reading many processes zeroes one ARG_MAX buffer, not one each.
+    static func argsEnv(_ pid: pid_t, buffer buf: inout [UInt8]) -> ArgsEnv? {
+        if buf.isEmpty {
+            var argmax: Int32 = 0
+            var sz = MemoryLayout<Int32>.size
+            var mibMax: [Int32] = [CTL_KERN, KERN_ARGMAX]
+            guard sysctl(&mibMax, 2, &argmax, &sz, nil, 0) == 0 else { return nil }
+            buf = [UInt8](repeating: 0, count: Int(argmax))
+        }
         var size = buf.count
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
         guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size > 4 else { return nil }

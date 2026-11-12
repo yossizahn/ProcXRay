@@ -268,13 +268,15 @@ struct OverviewTab: View {
         let parent = store.procs[p.ppid].flatMap { $0.start <= p.start && $0.pid != p.pid ? $0 : nil }
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                // Now, over the last refresh; sparklines arrive with the Resources step.
+                // Now (over the last refresh), with the last few minutes behind it.
+                let h = store.history[p.key]
                 HStack(spacing: 8) {
-                    StatTile(title: "CPU", value: p.cpuPercent.map { "\(Fmt.pct($0)) %" } ?? "—",
-                             sub: p.threads.map { "\($0) threads" })
-                    StatTile(title: "Memory", value: Fmt.bytes(p.footprint), sub: "footprint")
-                    StatTile(title: "Disk", value: diskRate(r), sub: "read + written")
-                    StatTile(title: "Power", value: r?.watts.map { String(format: "%.2f W", $0) } ?? "—", sub: "CPU energy")
+                    SparkTile(title: "CPU", value: p.cpuPercent.map { "\(Fmt.pct($0)) %" } ?? "—",
+                              values: h?.cpu ?? [], format: { "\(Fmt.pct($0)) %" })
+                    SparkTile(title: "Memory", value: Fmt.bytes(p.footprint), values: h?.memory ?? [], fromZero: false,
+                              format: { Fmt.bytes(UInt64($0)) })
+                    SparkTile(title: "Disk read + written", value: diskRate(r), values: h?.disk ?? [], format: bytesPerSecFormat)
+                    SparkTile(title: "Power", value: r?.watts.map(wattsFormat) ?? "—", values: h?.power ?? [], format: wattsFormat)
                     Spacer(minLength: 0)
                 }
                 FactGrid(rows: facts(p))
@@ -325,7 +327,7 @@ struct OverviewTab: View {
             ("Started", .text(Fmt.shownStart(p.start) == p.start
                 ? "\(Fmt.date.string(from: p.start))  (\(Fmt.age(p.start)) ago)"
                 : "at boot, before the clock was set (\(Fmt.date.string(from: Fmt.shownStart(p.start))))")),
-            ("State", .text(Column.byID["state"]!.value(p, store).display)),
+            ("State", .text(Column.byID["state"]!.value(p, store).display.ifEmpty("live"))),
             ("Architecture", .text(Column.byID["arch"]!.value(p, store).display)),
             ("Sandbox", .text(p.sandboxed.map { $0 ? "sandboxed" : "not sandboxed" } ?? "unknown")),
             ("Signed", .text(TrustVerdict(sign).long)),
@@ -335,6 +337,211 @@ struct OverviewTab: View {
         if let l = p.launchdLabel { rows.append(("launchd label", .text(l))) }
         if let e = p.extensionPoint { rows.append(("Extension point", .text("\(ExtensionInfo.title(e))  (\(e))"))) }
         return rows
+    }
+}
+
+// MARK: - Sparklines
+
+/// A line of the last `History.capacity` values, newest at the right edge. Rates are scaled from zero to
+/// their maximum; a level such as memory (`fromZero` false) between its minimum and maximum, or it would
+/// be a flat line at the top. Gaps (no reading for that refresh) break the line.
+struct Sparkline: View {
+    let values: [Double?]
+    var fromZero = true
+    var color: Color = .accentColor
+
+    var body: some View {
+        Canvas { ctx, size in
+            let known = values.compactMap { $0 }
+            let bottom = fromZero ? 0 : (known.min() ?? 0)
+            let top = (known.max() ?? 0) - bottom
+            let step = size.width / CGFloat(History.capacity - 1)
+            var line = Path(), area = Path()
+            var runStart: CGPoint?, last: CGPoint?
+            func close() {
+                if let s = runStart, let l = last {
+                    area.addLine(to: CGPoint(x: l.x, y: size.height))
+                    area.addLine(to: CGPoint(x: s.x, y: size.height))
+                    area.closeSubpath()
+                }
+                runStart = nil; last = nil
+            }
+            for (i, v) in values.enumerated() {
+                guard let v else { close(); continue }
+                let x = size.width - CGFloat(values.count - 1 - i) * step
+                // A flat level (top 0) sits mid-height; a flat zero rate sits on the baseline.
+                let y = top > 0 ? size.height - CGFloat((v - bottom) / top) * (size.height - 1) - 0.5
+                                : (fromZero ? size.height - 0.5 : size.height / 2)
+                let pt = CGPoint(x: x, y: y)
+                if runStart == nil { line.move(to: pt); area.move(to: pt); runStart = pt } else { line.addLine(to: pt); area.addLine(to: pt) }
+                last = pt
+            }
+            close()
+            ctx.fill(area, with: .color(color.opacity(0.15)))
+            ctx.stroke(line, with: .color(color), lineWidth: 1.2)
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// A stat tile with a sparkline under the value; the tooltip gives the range shown.
+struct SparkTile: View {
+    let title: String
+    let value: String
+    let values: [Double?]
+    var fromZero = true
+    let format: (Double) -> String
+
+    var body: some View {
+        let known = values.compactMap { $0 }
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(verbatim: value).font(.system(size: 18, weight: .semibold, design: .rounded)).monospacedDigit()
+            Sparkline(values: values, fromZero: fromZero).frame(height: 24)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .frame(width: 150, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+        .help(known.isEmpty ? "No history yet"
+              : "Last \(values.count) refreshes: \(format(known.min()!)) to \(format(known.max()!)); the line spans "
+                + (fromZero ? "zero to the maximum." : "the minimum to the maximum."))
+    }
+}
+
+// MARK: - Resources
+
+/// What the process is costing: each value now (over the last refresh) beside its total since start.
+struct UsageTab: View {
+    @Environment(Store.self) var store
+    let proc: ProcInfo
+    var exited = false
+    @State private var extra: (key: String, files: Int?, qos: [(String, UInt64)]?, assertions: [(String, String)])?
+
+    private typealias Row = (String, String, String)   // metric, now, since start
+
+    var body: some View {
+        let p = proc, r = p.rates, c = p.counters
+        let h = store.history[p.key]
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if !p.isInspectable {
+                    Text("Task info isn't readable (owned by \(p.user)). Install the privileged helper to read it.")
+                        .foregroundStyle(.secondary)
+                }
+                section("CPU", "cpu", h?.cpu, format: { "\(Fmt.pct($0)) %" }, rows: [
+                    ("CPU", r?.cpuPercent.map { "\(Fmt.pct($0)) %" } ?? "—", Fmt.secs(p.cpuNanos)),
+                    ("On performance cores", r?.pCoreShare.map { String(format: "%.0f %%", $0) } ?? "—",
+                     c?.pCoreNanos.map { pc in Fmt.secs(pc) + (p.cpuNanos.flatMap { $0 > 0 ? String(format: " (%.0f %%)", Double(pc) / Double($0) * 100) : nil } ?? "") } ?? "—"),
+                    ("Waiting for a CPU", r?.waitingPercent.map { String(format: "%.1f %%", $0) } ?? "—", Fmt.secs(c?.waitingNanos)),
+                    // How many threads exist. (No "running" count: pti_numrunning is one instant, and for a
+                    // process at a few percent CPU it reads 0 almost every time: 95.7 % of 2,000 reads for
+                    // Firefox at 2 %.)
+                    ("Threads", p.threads.map(String.init) ?? "—", ""),
+                    ("Instructions per cycle", r?.ipc.map { String(format: "%.2f", $0) } ?? "—",
+                     c.flatMap { c in c.instructions.flatMap { i in c.cycles.flatMap { $0 > 0 ? String(format: "%.2f", Double(i) / Double($0)) : nil } } } ?? "—"),
+                    ("Context switches", rate(r?.contextSwitches), Fmt.count(c?.contextSwitches)),
+                ])
+                section("Memory", "memorychip", h?.memory, fromZero: false, format: { Fmt.bytes(UInt64($0)) }, rows: [
+                    ("Footprint", Fmt.bytes(p.footprint), c?.peakFootprint.map { "peak " + Fmt.bytes($0) } ?? "—"),
+                    ("Resident", Fmt.bytes(p.rss), ""),
+                    ("Virtual", Fmt.bytes(p.virt), ""),
+                    ("Neural Engine", Fmt.bytes(c?.neuralFootprint), ""),
+                    ("Page faults", rate(r?.faults), c.map { "\(Fmt.count($0.faults)) (\(Fmt.count($0.cowFaults)) copy-on-write)" } ?? "—"),
+                    ("Page-ins", rate(r?.pageins), Fmt.count(c?.pageins)),
+                ])
+                section("Disk", "internaldrive", h?.disk, format: bytesPerSecFormat, rows: [
+                    ("Read", r?.diskRead.map(bytesPerSecFormat) ?? "—", Fmt.bytes(p.diskRead)),
+                    ("Written", r?.diskWrite.map(bytesPerSecFormat) ?? "—", Fmt.bytes(p.diskWrite)),
+                    ("Logical writes", r?.logicalWrites.map(bytesPerSecFormat) ?? "—", Fmt.bytes(c?.logicalWrites)),
+                ])
+                section("Energy and wakeups", "bolt", h?.power, format: wattsFormat, rows: [
+                    ("CPU energy", r?.watts.map(wattsFormat) ?? "—", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
+                    ("Billed energy", "", c?.billedEnergyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
+                    ("Wakeups (idle + interrupt)", rate(r?.wakeups), Fmt.count(p.wakeups)),
+                ])
+                section("System calls and IPC", "arrow.left.arrow.right", nil, format: { _ in "" }, rows: [
+                    ("BSD system calls", rate(r?.unixSyscalls), Fmt.count(c?.unixSyscalls)),
+                    ("Mach system calls", rate(r?.machSyscalls), Fmt.count(c?.machSyscalls)),
+                    ("Mach messages sent", rate(r?.machMsgsSent), Fmt.count(c?.machMsgsSent)),
+                    ("Mach messages received", rate(r?.machMsgsReceived), Fmt.count(c?.machMsgsReceived)),
+                ])
+                other(p)
+                if p.viaHelper { Text("Task metrics read as root through the privileged helper.").font(.caption).foregroundStyle(.secondary) }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        // Each refresh: these are read for the shown process only, not every process.
+        .task(id: "\(p.key)|\(store.dataGen)|\(exited)") {
+            guard !exited else { return }
+            let pid = p.pid, start = p.start, key = p.key
+            let got = await Task.detached { () -> (Int?, [(String, UInt64)]?, [(String, String)])? in
+                let v = (Native.openFileCount(pid), Native.cpuTimeByQoS(pid), Native.powerAssertions(pid))
+                return Native.isSame(pid, start: start) ? v : nil
+            }.value
+            guard !Task.isCancelled, let got else { return }
+            extra = (key, got.0, got.1, got.2)
+        }
+    }
+
+    private func rate(_ v: Double?) -> String { v.map(perSecFormat) ?? "—" }
+    private static let metricWidth: CGFloat = 180, nowWidth: CGFloat = 90, totalWidth: CGFloat = 240
+
+    private func section(_ title: String, _ symbol: String, _ spark: [Double?]?, fromZero: Bool = true,
+                         format: @escaping (Double) -> String, rows: [Row]) -> some View {
+        Card(title: title, systemImage: symbol) {
+            HStack(alignment: .top, spacing: 16) {
+                // Fixed column widths, so every section's columns and sparkline line up with the others'.
+                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 4) {
+                    GridRow {
+                        Text("").frame(width: Self.metricWidth, alignment: .leading)
+                        Text("Now").font(.caption).foregroundStyle(.secondary).frame(width: Self.nowWidth, alignment: .trailing)
+                        Text("Since start").font(.caption).foregroundStyle(.secondary).frame(width: Self.totalWidth, alignment: .trailing)
+                    }
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                        GridRow {
+                            Text(row.0).foregroundStyle(.secondary).frame(width: Self.metricWidth, alignment: .leading)
+                            Text(row.1).monospacedDigit().textSelection(.enabled).frame(width: Self.nowWidth, alignment: .trailing)
+                            Text(row.2).monospacedDigit().textSelection(.enabled).frame(width: Self.totalWidth, alignment: .trailing)
+                        }
+                    }
+                }
+                if let spark {
+                    let known = spark.compactMap { $0 }
+                    Sparkline(values: spark, fromZero: fromZero).frame(width: 200, height: 44)
+                        .help(known.isEmpty ? "No history yet"
+                              : "Last \(spark.count) refreshes: \(format(known.min()!)) to \(format(known.max()!)); the line spans "
+                                + (fromZero ? "zero to the maximum." : "the minimum to the maximum."))
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func other(_ p: ProcInfo) -> some View {
+        let e = extra?.key == p.key ? extra : nil
+        Card(title: "Other", systemImage: "ellipsis.circle") {
+            VStack(alignment: .leading, spacing: 8) {
+                FactGrid(rows: [
+                    ("Open files", .text(e?.files.map { "\($0) descriptors (files, sockets, pipes)" } ?? (exited ? "—" : "not readable"))),
+                    ("Power assertions", .text(e.map { $0.assertions.isEmpty ? "none" : $0.assertions.map { "\($0.0)\($0.1.isEmpty ? "" : ": \($0.1)")" }.joined(separator: "\n") } ?? "—")),
+                ])
+                if let q = e?.qos {
+                    let total = q.reduce(0) { $0 + $1.1 }
+                    Collapsible(title: "CPU time by QoS class", startsOpen: false) {
+                        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 3) {
+                            ForEach(q.filter { $0.1 > 0 }, id: \.0) { name, ns in
+                                GridRow {
+                                    Text(name).foregroundStyle(.secondary)
+                                    Text(Fmt.secs(ns)).monospacedDigit().gridColumnAlignment(.trailing)
+                                    Text(total > 0 ? String(format: "%.0f %%", Double(ns) / Double(total) * 100) : "")
+                                        .monospacedDigit().foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

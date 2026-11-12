@@ -184,9 +184,17 @@ private let bytesFormat: (Double) -> String = { Fmt.bytes(UInt64(max(0, $0))) }
 private let countFormat: (Double) -> String = { Fmt.count(Int64($0)) }
 private let secsFormat: (Double) -> String = { Fmt.secs(UInt64(max(0, $0))) }
 /// Events per second: one decimal below 10, whole numbers above.
-private let perSecFormat: (Double) -> String = { $0 == 0 ? "0" : $0 < 10 ? String(format: "%.1f/s", $0) : "\(Fmt.count(Int64($0.rounded())))/s" }
-private let bytesPerSecFormat: (Double) -> String = { $0 < 1 ? "0" : Fmt.bytes(UInt64($0)) + "/s" }
-private let wattsFormat: (Double) -> String = { $0 == 0 ? "0" : $0 < 0.01 ? "<0.01 W" : String(format: "%.2f W", $0) }
+let perSecFormat: (Double) -> String = { $0 == 0 ? "0" : $0 < 10 ? String(format: "%.1f/s", $0) : "\(Fmt.count(Int64($0.rounded())))/s" }
+let bytesPerSecFormat: (Double) -> String = { $0 < 1 ? "0" : Fmt.bytes(UInt64($0)) + "/s" }
+let wattsFormat: (Double) -> String = { $0 == 0 ? "0" : $0 < 0.01 ? "<0.01 W" : String(format: "%.2f W", $0) }
+/// Large counts in SI units with three significant digits: 950, 12.3 k, 4.56 G.
+let siFormat: (Double) -> String = { v in
+    let units = ["", " k", " M", " G", " T", " P"]
+    var x = v, i = 0
+    while x.magnitude >= 999.5, i < units.count - 1 { x /= 1000; i += 1 }
+    if i == 0 { return String(format: "%.0f", x) }
+    return String(format: x.magnitude < 9.995 ? "%.2f" : x.magnitude < 99.95 ? "%.1f" : "%.0f", x) + units[i]
+}
 private let rateNote = " Over the last refresh; — for a process's first refresh."
 
 /// "all", "none" or "n of m" over the processes whose answer is known.
@@ -210,17 +218,15 @@ private func yesNo(_ b: Bool?) -> CellValue {
     return sign.staticFlags & 0x0001_0000 != 0
 }
 
-/// Running, sleeping, stopped or zombie. macOS reports nearly every live process as runnable in
-/// `p_stat` (measured: 143 of 143 app processes), so running vs sleeping comes from the task's count of
-/// running threads; p_stat still says stopped and zombie.
+/// Stopped, zombie or starting, from the kernel's process state (`p_stat`); empty for a normal live
+/// process. There is no running/sleeping: `p_stat` says runnable for nearly every process (143 of 143 app
+/// processes measured), and the running-thread count is a single instant that reads 0 for most processes.
 private func state(_ p: ProcInfo) -> CellValue {
     switch p.stat {
     case 4: return .text("stopped", .warning)
     case 5: return .text("zombie", .warning)
     case 1: return .text("starting", .secondary)
-    default:
-        guard let r = p.counters?.runningThreads else { return .unknown }
-        return r > 0 ? .text("running") : .text("sleeping", .secondary)
+    default: return .empty
     }
 }
 
@@ -241,6 +247,12 @@ private let catalogue: [Column] = [
            section: .identity, width: 180, rule: .root) { p, s in text(s.bundleID(of: p)) },
     Column(id: "path", title: "Path", tooltip: "Executable path. App rows: the app's.",
            section: .identity, width: 260, truncateMiddle: true, rule: .root) { p, _ in text(p.path) },
+    Column(id: "commandLine", title: "Command line",
+           tooltip: "The arguments the process was started with (argv), read once per process. Other users' processes need the helper; \"—\" means they couldn't be read. App rows: the app's.",
+           section: .identity, minWidth: 120, width: 360, rule: .root) { p, _ in
+        if let c = p.commandLine { return .text(c) }
+        return p.commandLineRead ? .unknown : .empty
+    },
     Column(id: "arch", title: "Architecture", tooltip: "Native, or x86_64 translated by Rosetta.",
            section: .identity, width: 90, rule: .same(noun: "architecture")) { p, _ in
         #if arch(arm64)
@@ -250,11 +262,11 @@ private let catalogue: [Column] = [
         #endif
     },
     Column(id: "state", title: "State",
-           tooltip: "Running (a thread is on or waiting for a CPU), sleeping, stopped or zombie. Group rows: how many aren't sleeping.",
+           tooltip: "Stopped (by a signal such as SIGSTOP), zombie (exited, waiting for its parent) or starting, from the kernel's process state. Empty for a normal live process. Group rows: how many are stopped, zombie or starting.",
            section: .identity, width: 76,
            rule: .custom { ms, _ in
-               let n = ms.filter { state($0).display != "sleeping" && state($0).hasValue }.count
-               return n == 0 ? .empty : .number(Double(n), "\(n) not sleeping", .secondary)
+               let n = ms.filter { state($0).hasValue }.count
+               return n == 0 ? .empty : .number(Double(n), "\(n) stopped or zombie", .warning)
            }) { p, _ in state(p) },
 
     // Ownership
@@ -317,8 +329,6 @@ private let catalogue: [Column] = [
             section: .cpu, width: 90, format: perSecFormat) { $0.rates?.contextSwitches },
     .amount(id: "threads", title: "Threads", tooltip: "Number of threads. Group rows: the sum.",
             section: .cpu, minWidth: 44, width: 56, format: countFormat) { $0.threads.map { Double($0) } },
-    .amount(id: "running", title: "Running threads", tooltip: "Threads running or ready to run right now. Group rows: the sum.",
-            section: .cpu, width: 70, format: countFormat) { $0.counters?.runningThreads.map { Double($0) } },
     Column(id: "pcore", title: "P-core share",
            tooltip: "Share of the process's CPU time spent on performance cores. Group rows: weighted by CPU time.",
            section: .cpu, width: 70, numeric: true,
@@ -339,6 +349,17 @@ private let catalogue: [Column] = [
         let v = Double(i) / Double(c)
         return .number(v, String(format: "%.2f", v))
     },
+    .amount(id: "cycles", title: "Cycles", tooltip: "CPU cycles the process has used since it started (rusage ri_cycles). Group rows: the sum.",
+            section: .cpu, width: 70, format: siFormat) { $0.counters?.cycles.map { Double($0) } },
+    .amount(id: "cycleRate", title: "Cycles/s",
+            tooltip: "CPU cycles per second: like CPU %, but weighted by clock speed. Group rows: the sum." + rateNote,
+            section: .cpu, width: 70, format: { siFormat($0) + "/s" }) { $0.rates?.cycles },
+    .amount(id: "instructions", title: "Instructions",
+            tooltip: "Instructions the process has retired since it started (rusage ri_instructions). Group rows: the sum.",
+            section: .cpu, width: 76, format: siFormat) { $0.counters?.instructions.map { Double($0) } },
+    .amount(id: "instructionRate", title: "Instructions/s",
+            tooltip: "Instructions retired per second. Group rows: the sum." + rateNote,
+            section: .cpu, width: 76, format: { siFormat($0) + "/s" }) { $0.rates?.instructions },
 
     // Memory
     .amount(id: "mem", title: "Memory",

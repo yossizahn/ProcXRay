@@ -95,6 +95,7 @@ enum Bench {
             guard let p = b.procs[pid], let r = p.rates else { print("\(pid): no rates"); continue }
             func f(_ v: Double?) -> String { v.map { String(format: "%.1f", $0) } ?? "—" }
             print("\(pid) \(p.name): cpu% \(f(r.cpuPercent)) waiting% \(f(r.waitingPercent)) csw/s \(f(r.contextSwitches)) faults/s \(f(r.faults)) pageins/s \(f(r.pageins)) read B/s \(f(r.diskRead)) write B/s \(f(r.diskWrite)) W \(r.watts.map { String(format: "%.3f", $0) } ?? "—") wakeups/s \(f(r.wakeups)) syscalls/s \(f(r.syscalls)) machmsgs/s \(f(r.machMsgs))")
+            print("    pcore% \(f(r.pCoreShare)) ipc \(r.ipc.map { String(format: "%.2f", $0) } ?? "—") cycles/s \(r.cycles.map(siFormat) ?? "—") instrs/s \(r.instructions.map(siFormat) ?? "—") bsd/s \(f(r.unixSyscalls)) mach/s \(f(r.machSyscalls)) sent/s \(f(r.machMsgsSent)) recv/s \(f(r.machMsgsReceived)) logical B/s \(f(r.logicalWrites)) fds \(Native.openFileCount(pid).map(String.init) ?? "—") assertions \(Native.powerAssertions(pid))")
         }
     }
 

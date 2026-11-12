@@ -51,6 +51,10 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var lsTags: [String] = []
     var signer: String?
     var signID: String?
+    /// argv joined for display (see Store.argvCache); nil until read, or when it couldn't be read.
+    var commandLine: String?
+    /// Set once reading argv was tried, so the cell can tell "not read yet" from "unreadable".
+    var commandLineRead = false
     var viaHelper = false              // metrics came from the root helper
     /// Set when this process outlived the app that launched it (see Store.ghosts): the Left Behind
     /// group's id, and the app's name and pid where known.
@@ -182,7 +186,8 @@ struct ProcNode: Identifiable, Sendable {
         // "ttys003": a shell shown without a terminal row of its own (see SmartTree.roleGroups).
         if let t = p.tty, q.lowercased().hasPrefix("tty"),
            SmartTree.ttyName(t).localizedCaseInsensitiveContains(q) { return true }
-        return [p.path, p.signer, p.signID, p.launchdLabel, p.lsAppName, p.user, p.extensionPoint.map(ExtensionInfo.title)]
+        return [p.path, p.signer, p.signID, p.launchdLabel, p.lsAppName, p.user, p.extensionPoint.map(ExtensionInfo.title),
+                p.commandLine]
             .compactMap { $0 }.contains { $0.localizedCaseInsensitiveContains(q) }
     }
 }
@@ -221,9 +226,15 @@ final class Store {
                                                  columns: Set<String>, nodes: [ProcNode])?
 
     private(set) var signCache: [String: SignInfo] = [:]
+    /// Each process's command line, by codeKey: read once per process (and again after it execs), since
+    /// argv doesn't change while the same code runs. nil: tried and couldn't be read.
+    @ObservationIgnored private var argvCache: [String: String?] = [:]
+    @ObservationIgnored private var readingArgv = false
     /// Each process's counters at the last refresh, by key: CPU % and the rate columns divide the change
     /// by the time between the two readings.
     @ObservationIgnored private var prevSamples: [String: Sample] = [:]
+    /// Recent values per process key, for sparklines (see History).
+    @ObservationIgnored private(set) var history: [String: History] = [:]
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var refreshing = false
     @ObservationIgnored private var signing = false
@@ -295,7 +306,11 @@ final class Store {
             let s = HelperClient.shared.probe()
             await MainActor.run {
                 guard gen == self.probeGen else { return }
-                if self.helperState != s { self.helperState = s }
+                if self.helperState != s {
+                    // Other users' processes the app couldn't read: the helper can, so try them again.
+                    if s.isRunning { self.argvCache = self.argvCache.filter { $0.value != nil } }
+                    self.helperState = s
+                }
             }
         }
     }
@@ -357,6 +372,7 @@ final class Store {
         refreshing = true
         let prev = prevSamples
         let cache = signCache
+        let argv = argvCache
         let useHelper = helperState.isRunning
         let readSlow = full || ticksSinceSlow + 1 >= Self.slowEvery || lsApps.isEmpty
         ticksSinceSlow = readSlow ? 0 : ticksSinceSlow + 1
@@ -368,7 +384,7 @@ final class Store {
             // Ask the helper first, but collect local data while it answers; the snapshot waits for the
             // helper only after that, and never longer than helperBudget (it normally takes ~10 ms).
             let priv = useHelper ? Pending { HelperClient.shared.allMetrics(timeout: Self.helperBudget) } : nil
-            var marked = Self.snapshot(prev: prev, signCache: cache, priv: { priv?.wait() }, ls: ls, jobs: jobs, otherJobs: otherJobs)
+            var marked = Self.snapshot(prev: prev, signCache: cache, argvCache: argv, priv: { priv?.wait() }, ls: ls, jobs: jobs, otherJobs: otherJobs)
             Self.markLeftBehind(&marked.procs, lsApps: marked.ls)
             let snap = marked
             let ms = Int((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
@@ -386,14 +402,28 @@ final class Store {
                     self.otherJobs = snap.otherJobs
                 }
                 self.prevSamples = snap.samples
+                self.recordHistory(snap.procs)
                 if full { self.fullRefreshGen &+= 1 }
                 self.updateGhostCount()
                 self.lastRefresh = Date()
                 self.refreshMillis = ms
                 self.refreshing = false
                 self.fillSignatures()
+                self.fillCommandLines()
             }
         }
+    }
+
+    /// Appends this refresh to each process's history and forgets processes that are gone.
+    private func recordHistory(_ procs: [pid_t: ProcInfo]) {
+        var next: [String: History] = [:]
+        next.reserveCapacity(procs.count)
+        for p in procs.values {
+            var h = history[p.key] ?? History()
+            h.append(p)
+            next[p.key] = h
+        }
+        history = next
     }
 
     /// Code-signing lookups are the slow part; do the missing ones in the background and merge.
@@ -430,6 +460,50 @@ final class Store {
                 self.signing = false
             }
         }
+    }
+
+    /// Reads argv for processes not in argvCache yet, in the background, and merges it like signatures.
+    private func fillCommandLines() {
+        guard !readingArgv else { return }
+        let missing = procs.values.filter { argvCache[$0.codeKey] == nil }.map { ($0.codeKey, $0.pid, $0.start, $0.cdhash) }
+        guard !missing.isEmpty else { return }
+        readingArgv = true
+        let helper = helperState.isRunning
+        Task.detached(priority: .utility) {
+            var acc: [String: String?] = [:]
+            var buf: [UInt8] = []
+            for (k, pid, start, expected) in missing {
+                let args = Native.argsEnv(pid, buffer: &buf)?.args
+                    ?? (helper ? HelperClient.shared.argsEnv(pid)?.args : nil)
+                // Read from another process (the pid was reused) or other code (it exec'd since the
+                // snapshot): leave it for the next refresh, whose key matches what's running.
+                guard Native.isSame(pid, start: start), Native.cdhash(pid) == expected else { continue }
+                acc[k] = args.map(Self.joinArgs)
+            }
+            let found = acc
+            await MainActor.run {
+                self.argvCache.merge(found) { a, _ in a }
+                let live = Set(self.procs.values.map(\.codeKey))
+                self.argvCache = self.argvCache.filter { live.contains($0.key) }
+                var procs = self.procs
+                var changed = false
+                for (pid, p) in procs {
+                    guard let c = found[p.codeKey] else { continue }
+                    procs[pid]!.commandLine = c; procs[pid]!.commandLineRead = true
+                    changed = true
+                }
+                if changed { self.procs = procs }
+                self.readingArgv = false
+            }
+        }
+    }
+
+    /// argv as one line: arguments with spaces, quotes or nothing in them are single-quoted, as a shell would.
+    nonisolated static func joinArgs(_ args: [String]) -> String {
+        args.map { a in
+            let plain = !a.isEmpty && !a.contains { $0.isWhitespace || "'\"\\$`;&|<>()*?!#~".contains($0) }
+            return plain ? a : "'" + a.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }.joined(separator: " ")
     }
 
     func loadBTM() {
@@ -480,6 +554,7 @@ final class Store {
 
     /// `priv`: helper metrics, asked for only after the local pass so a slow helper delays just the merge.
     nonisolated static func snapshot(prev: [String: Sample], signCache: [String: SignInfo],
+                                     argvCache: [String: String?] = [:],
                                      priv privSource: () -> [Int32: PrivMetrics]? = { nil },
                                      ls: [LSApp]? = nil, jobs: [LaunchdJob]? = nil,
                                      otherJobs: [LaunchdJob]? = nil) -> Snapshot {
@@ -515,6 +590,7 @@ final class Store {
             if k.tty != -1 { p.tty = k.tty }   // NODEV: no controlling terminal
             if let path = p.path { p.extensionPoint = ExtensionInfo.point(forExecutable: path) }
             if let s = signCache[p.codeKey] { p.signer = s.shortSigner; p.signID = s.identifier }
+            if let c = argvCache[p.codeKey] { p.commandLine = c; p.commandLineRead = true }
             out[k.pid] = p
         }
         let priv = privSource()
@@ -884,6 +960,7 @@ final class ColumnMemo {
 struct Sample: Sendable {
     var at: UInt64                    // uptime nanoseconds
     var cpu, waiting, diskRead, diskWrite, energy, wakeups: UInt64?
+    var pCore, instructions, cycles, logicalWrites: UInt64?
     var contextSwitches, faults, pageins, machMsgsSent, machMsgsReceived, unixSyscalls, machSyscalls: UInt32?
 
     init(_ p: ProcInfo, at: UInt64) {
@@ -894,6 +971,7 @@ struct Sample: Sendable {
         contextSwitches = c?.contextSwitches; faults = c?.faults; pageins = c?.pageins
         machMsgsSent = c?.machMsgsSent; machMsgsReceived = c?.machMsgsReceived
         unixSyscalls = c?.unixSyscalls; machSyscalls = c?.machSyscalls
+        pCore = c?.pCoreNanos; instructions = c?.instructions; cycles = c?.cycles; logicalWrites = c?.logicalWrites
     }
 }
 
@@ -906,6 +984,16 @@ struct Rates: Hashable, Sendable {
     var diskRead, diskWrite: Double?          // bytes per second
     var watts: Double?
     var wakeups, syscalls, machMsgs: Double?
+    var unixSyscalls, machSyscalls, machMsgsSent, machMsgsReceived: Double?
+    var logicalWrites: Double?               // bytes per second
+    /// Share of the interval's CPU time spent on performance cores, in percent (nil when it used none).
+    var pCoreShare: Double?
+    /// Instructions per cycle over the interval.
+    var ipc: Double?
+    /// CPU cycles per second.
+    var cycles: Double?
+    /// Instructions retired per second.
+    var instructions: Double?
 
     init(from a: Sample, to b: Sample) {
         let secs = Double(b.at - a.at) / 1e9
@@ -933,5 +1021,35 @@ struct Rates: Hashable, Sendable {
         wakeups = d64(a.wakeups, b.wakeups).map { $0 / secs }
         syscalls = sum(d32(a.unixSyscalls, b.unixSyscalls), d32(a.machSyscalls, b.machSyscalls)).map { $0 / secs }
         machMsgs = sum(d32(a.machMsgsSent, b.machMsgsSent), d32(a.machMsgsReceived, b.machMsgsReceived)).map { $0 / secs }
+        unixSyscalls = d32(a.unixSyscalls, b.unixSyscalls).map { $0 / secs }
+        machSyscalls = d32(a.machSyscalls, b.machSyscalls).map { $0 / secs }
+        machMsgsSent = d32(a.machMsgsSent, b.machMsgsSent).map { $0 / secs }
+        machMsgsReceived = d32(a.machMsgsReceived, b.machMsgsReceived).map { $0 / secs }
+        logicalWrites = d64(a.logicalWrites, b.logicalWrites).map { $0 / secs }
+        if let pc = d64(a.pCore, b.pCore), let c = d64(a.cpu, b.cpu), c > 0 { pCoreShare = min(100, pc / c * 100) }
+        if let i = d64(a.instructions, b.instructions), let c = d64(a.cycles, b.cycles), c > 0 { ipc = i / c }
+        cycles = d64(a.cycles, b.cycles).map { $0 / secs }
+        instructions = d64(a.instructions, b.instructions).map { $0 / secs }
+    }
+}
+
+/// The last few minutes of one process, for sparklines: one entry per refresh, oldest first.
+struct History: Sendable {
+    static let capacity = 120             // four minutes at the 2 s refresh
+    var cpu: [Double?] = []               // percent of one core
+    var memory: [Double?] = []            // footprint, bytes
+    var disk: [Double?] = []              // read + written, bytes per second
+    var power: [Double?] = []             // watts
+
+    mutating func append(_ p: ProcInfo) {
+        let r = p.rates
+        func push(_ a: inout [Double?], _ v: Double?) {
+            a.append(v)
+            if a.count > Self.capacity { a.removeFirst(a.count - Self.capacity) }
+        }
+        push(&cpu, r?.cpuPercent)
+        push(&memory, p.footprint.map { Double($0) })
+        push(&disk, r.flatMap { r in r.diskRead.flatMap { a in r.diskWrite.map { a + $0 } } })
+        push(&power, r?.watts)
     }
 }

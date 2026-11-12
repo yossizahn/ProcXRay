@@ -17,8 +17,8 @@ struct InspectorView: View {
         Binding(get: { windowTab.flatMap(InspectorTab.init(rawValue:)) ?? lastTab },
                 set: { windowTab = $0.rawValue; lastTab = $0 })
     }
-    /// Which pane Resources and Activity show; each holds two of the old tabs until steps 8 and 12.
-    @AppStorage("inspector.resourcesPane") private var resourcesPane = "Counters"
+    /// Which pane Resources and Activity show (Resources: usage or the memory map; Activity: logs or a sample).
+    @AppStorage("inspector.resourcesView") private var resourcesPane = "Usage"
     @AppStorage("inspector.activityPane") private var activityPane = "Logs"
 
     private var sign: SignInfo? { store.signInfo(for: proc) ?? lastSign }
@@ -35,12 +35,12 @@ struct InspectorView: View {
                 case .origin: OriginTab(proc: proc, exited: exited)
                 case .trust: TrustTab(proc: proc, sign: sign, exited: exited)
                 case .resources:
-                    SubPanes(selection: $resourcesPane, names: ["Counters", "Memory map"]) {
+                    SubPanes(selection: $resourcesPane, names: ["Usage", "Memory map"]) {
                         if resourcesPane == "Memory map" {
                             toolTab(.vmmap, auto: false, title: "vmmap --summary \(proc.pid)",
                                     parse: VmmapParser.parse, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
                         } else {
-                            CountersTab(proc: proc)
+                            UsageTab(proc: proc, exited: exited)
                         }
                     }
                 case .connections:
@@ -185,55 +185,6 @@ struct KV: View {
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-}
-
-/// What the process has used: memory, CPU and I/O counters, lifetime totals. (Step 8 turns this into
-/// the Resources tab proper, with rates beside the totals.)
-struct CountersTab: View {
-    let proc: ProcInfo
-
-    var body: some View {
-        let p = proc
-        var rows: [(String, String)] = []
-        if p.isInspectable {
-            let c = p.counters
-            rows += [
-                ("Footprint", Fmt.bytes(p.footprint)),
-                ("Resident", Fmt.bytes(p.rss)),
-                ("Virtual", Fmt.bytes(p.virt)),
-                ("CPU time", Fmt.secs(p.cpuNanos)),
-                ("CPU now", p.cpuPercent.map { String(format: "%.1f %%", $0) } ?? "—"),
-                ("Threads", p.threads.map { t in c?.runningThreads.map { "\(t) (\($0) running)" } ?? "\(t)" } ?? "—"),
-                ("Disk read / written", "\(Fmt.bytes(p.diskRead)) / \(Fmt.bytes(p.diskWrite))"),
-                ("Energy", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
-                ("Billed energy", c?.billedEnergyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
-                ("Wakeups (idle + interrupt)", p.wakeups.map(String.init) ?? "—"),
-            ]
-            if let c {
-                rows += [
-                    ("Performance cores", c.pCoreNanos.map { pc in
-                        let share = p.cpuNanos.flatMap { $0 > 0 ? Double(pc) / Double($0) * 100 : nil }
-                        return Fmt.secs(pc) + (share.map { String(format: "  (%.0f %% of CPU time)", $0) } ?? "")
-                    } ?? "—"),
-                    ("Waiting for a CPU", Fmt.secs(c.waitingNanos)),
-                    ("Instructions / cycles", "\(Fmt.count(c.instructions)) / \(Fmt.count(c.cycles))"
-                        + (c.instructions.flatMap { i in c.cycles.flatMap { $0 > 0 ? String(format: "  (%.2f per cycle)", Double(i) / Double($0)) : nil } } ?? "")),
-                    ("Context switches", Fmt.count(c.contextSwitches)),
-                    ("Page faults", "\(Fmt.count(c.faults)) (\(Fmt.count(c.cowFaults)) copy-on-write)"),
-                    ("Page-ins", Fmt.count(c.pageins)),
-                    ("Mach messages sent / received", "\(Fmt.count(c.machMsgsSent)) / \(Fmt.count(c.machMsgsReceived))"),
-                    ("System calls", "\(Fmt.count(c.unixSyscalls)) BSD · \(Fmt.count(c.machSyscalls)) Mach"),
-                    ("Peak footprint", Fmt.bytes(c.peakFootprint)),
-                    ("Neural Engine memory", Fmt.bytes(c.neuralFootprint)),
-                    ("Logical writes", Fmt.bytes(c.logicalWrites)),
-                ]
-            }
-        } else {
-            rows.append(("Task info", "not accessible (owned by \(p.user)) — install the privileged helper to read it"))
-        }
-        if p.viaHelper { rows.append(("Source", "task metrics read as root via the privileged helper")) }
-        return KV(rows: rows)
     }
 }
 
