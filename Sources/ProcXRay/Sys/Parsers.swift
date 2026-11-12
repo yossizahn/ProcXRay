@@ -369,24 +369,109 @@ struct LogEntry: Identifiable, Sendable {
 }
 
 enum LogParser {
-    private static let re = try! NSRegularExpression(
-        pattern: #"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\s+(\S+)\s+(.+?)\[(\d+):([0-9a-fA-F]+)\]\s+(?:\[([^\]]*)\]\s+)?(.*)$"#)
-    private static let df: DateFormatter = {
-        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"; return f
-    }()
-
+    /// Parses `log show --style compact` lines:
+    /// `2026-11-12 10:06:06.817 I  runningboardd[685:bd318d] [com.apple.runningboard:assertion] message`
+    /// A hand-written byte scanner: the regex + DateFormatter + NSString copies it replaces cost ~60 µs a
+    /// line, 6 s for a 100,000-event result. Same grammar as that regex:
+    /// `^(date)\s+(\S+)\s+(.+?)\[(\d+):([0-9a-f]+)\]\s+(?:\[([^\]]*)\]\s+)?(.*)$`, each field trimmed.
     static func parse(_ text: String) -> [LogEntry] {
         var out: [LogEntry] = []
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
-            if let g = groups(re, line), g.count == 7 {
-                out.append(LogEntry(id: out.count, date: df.date(from: g[0]), time: String(g[0].dropFirst(11)),
-                                    level: .init(code: g[1]), process: g[2], pid: g[3], thread: g[4],
-                                    subsystem: g[5], message: g[6]))
+        var minute: (key: Substring, date: Date?)?
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if var e = scan(line) {
+                // A log spans a few minutes: resolve each "yyyy-MM-dd HH:mm" once, then add the seconds.
+                let key = line.prefix(16)
+                if minute?.key != key { minute = (key, minuteFormatter.date(from: String(key))) }
+                e.date = minute!.date.map { $0.addingTimeInterval(e.secondsInMinute) }
+                out.append(LogEntry(id: out.count, date: e.date, time: e.time, level: .init(code: e.level),
+                                    process: e.process, pid: e.pid, thread: e.thread,
+                                    subsystem: e.subsystem, message: e.message))
             } else if !out.isEmpty, !line.hasPrefix("Timestamp"), !line.isEmpty {
                 out[out.count - 1].message += "\n" + line   // multi-line message continuation
             }
         }
         return out
+    }
+
+    private static let minuteFormatter: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd HH:mm"; return f
+    }()
+
+    private struct Fields {
+        var date: Date?
+        var secondsInMinute: Double
+        var time, level, process, pid, thread, subsystem, message: String
+    }
+
+    private static func scan(_ line: Substring) -> Fields? {
+        let r: Fields?? = line.utf8.withContiguousStorageIfAvailable { b -> Fields? in
+            let n = b.count
+            func digit(_ i: Int) -> Bool { i < n && b[i] >= 0x30 && b[i] <= 0x39 }
+            func space(_ i: Int) -> Bool { i < n && (b[i] == 0x20 || b[i] == 0x09) }
+            func str(_ lo: Int, _ hi: Int) -> String {   // trimmed like the regex groups were
+                var lo = lo, hi = hi
+                while lo < hi, space(lo) { lo += 1 }
+                while hi > lo, space(hi - 1) { hi -= 1 }
+                return String(decoding: UnsafeBufferPointer(rebasing: b[lo..<hi]), as: UTF8.self)
+            }
+            // yyyy-MM-dd HH:mm:ss.f+
+            let shape: [UInt8?] = [nil, nil, nil, nil, 0x2D, nil, nil, 0x2D, nil, nil, 0x20,
+                                   nil, nil, 0x3A, nil, nil, 0x3A, nil, nil, 0x2E]
+            guard n > shape.count else { return nil }
+            for (i, c) in shape.enumerated() {
+                if let c { guard b[i] == c else { return nil } } else { guard digit(i) else { return nil } }
+            }
+            var i = shape.count
+            guard digit(i) else { return nil }
+            while digit(i) { i += 1 }
+            let dateEnd = i
+            var secs = Double((b[17] - 0x30) * 10 + (b[18] - 0x30))
+            var scale = 0.1
+            for k in 20..<dateEnd { secs += Double(b[k] - 0x30) * scale; scale /= 10 }
+            // \s+ (\S+) \s+
+            guard space(i) else { return nil }
+            while space(i) { i += 1 }
+            let levelStart = i
+            while i < n, !space(i) { i += 1 }
+            guard i > levelStart, space(i) else { return nil }
+            let levelEnd = i
+            while space(i) { i += 1 }
+            // (.+?)\[(\d+):([0-9a-f]+)\]\s+ : the first such bracket after at least one character of name
+            let procStart = i
+            var k = procStart + 1
+            var found: (open: Int, colon: Int, close: Int)?
+            while k < n {
+                if b[k] == 0x5B {
+                    var j = k + 1
+                    while digit(j) { j += 1 }
+                    if j > k + 1, j < n, b[j] == 0x3A {
+                        var h = j + 1
+                        while h < n, (digit(h) || (b[h] | 0x20 >= 0x61 && b[h] | 0x20 <= 0x66)) { h += 1 }
+                        if h > j + 1, h < n, b[h] == 0x5D, space(h + 1) { found = (k, j, h); break }
+                    }
+                }
+                k += 1
+            }
+            guard let f = found else { return nil }
+            i = f.close + 1
+            while space(i) { i += 1 }
+            // (?:\[([^\]]*)\]\s+)?
+            var subsystem = ""
+            if i < n, b[i] == 0x5B {
+                var j = i + 1
+                while j < n, b[j] != 0x5D { j += 1 }
+                if j < n, space(j + 1) {
+                    subsystem = str(i + 1, j)
+                    i = j + 1
+                    while space(i) { i += 1 }
+                }
+            }
+            return Fields(date: nil, secondsInMinute: secs, time: str(11, dateEnd), level: str(levelStart, levelEnd),
+                          process: str(procStart, f.open), pid: str(f.open + 1, f.colon),
+                          thread: str(f.colon + 1, f.close), subsystem: subsystem, message: str(i, n))
+        }
+        if let r { return r }
+        return scan(Substring(String(line)))   // not contiguous (bridged text): copy once and retry
     }
 }
 

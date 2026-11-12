@@ -534,6 +534,9 @@ struct SampleView: View {
     let filter: String
     @State private var expanded: Set<Int>
     @State private var hideIdle: Bool
+    /// The filter's match set, computed once per filter change. As a computed property it walked the
+    /// whole call tree on every read, once more for every rendered row.
+    @State private var matchCache: (filter: String, set: Set<Int>?) = ("", nil)
 
     init(report: SampleReport, filter: String) {
         self.report = report
@@ -554,6 +557,11 @@ struct SampleView: View {
     }
 
     private var matches: Set<Int>? {
+        if matchCache.filter == filter { return matchCache.set }
+        return Self.matches(report, filter)   // first render after a change, before onChange caches it
+    }
+
+    private static func matches(_ report: SampleReport, _ filter: String) -> Set<Int>? {
         guard !filter.isEmpty else { return nil }
         var keep: Set<Int> = []
         @discardableResult func walk(_ n: CallNode) -> Bool {
@@ -606,6 +614,7 @@ struct SampleView: View {
                 .padding(.vertical, 4)
             }
         }
+        .onChange(of: filter, initial: true) { _, f in matchCache = (f, Self.matches(report, f)) }
     }
 
     private var heaviest: some View {
@@ -629,7 +638,7 @@ struct SampleView: View {
     @ViewBuilder
     private func row(_ r: Row) -> some View {
         let n = r.node
-        let open = expanded.contains(n.id) || matches != nil
+        let open = expanded.contains(n.id) || !filter.isEmpty
         let frac = Double(n.count) / Double(r.total)
         HStack(spacing: 6) {
             Color.clear.frame(width: CGFloat(r.depth) * 12, height: 1)
@@ -696,14 +705,71 @@ struct LogView: View {
     let entries: [LogEntry]
     let filter: String
     @State private var levels: Set<LogEntry.Level> = []
+    /// Filtered rows, level counts and histogram, computed off the main thread once per filter/level
+    /// change. Recomputing them in `body` cost ~150 ms per render for 100,000 events: every keystroke,
+    /// resize or parent update blocked the UI.
+    @State private var view: Filtered?
+
+    struct Filtered: Sendable {
+        var key: String
+        var rows: [LogEntry]
+        var counts: [LogEntry.Level: Int]
+        var hist: Histogram?
+    }
+
+    struct Histogram: Sendable {
+        static let buckets = 60
+        var lo: Date, hi: Date, step: Double, peak: Int
+        var bins: [[LogEntry.Level: Int]]
+    }
+
+    private var key: String { "\(filter)\u{0}\(levels.map(\.rawValue).sorted())" }
 
     var body: some View {
-        let rows = entries.filter {
+        Group {
+            if let v = view {
+                content(v)
+            } else {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .task(id: key) {
+            let key = key, entries = entries, filter = filter, levels = levels
+            // Typing: wait for a pause before filtering 100,000 rows (the first pass runs right away).
+            if view != nil { try? await Task.sleep(for: .milliseconds(150)) }
+            guard !Task.isCancelled else { return }
+            let v = await Task.detached(priority: .userInitiated) { Self.compute(key, entries, filter, levels) }.value
+            guard !Task.isCancelled else { return }
+            view = v
+        }
+    }
+
+    nonisolated static func compute(_ key: String, _ entries: [LogEntry], _ filter: String,
+                                    _ levels: Set<LogEntry.Level>) -> Filtered {
+        var counts: [LogEntry.Level: Int] = [:]
+        for e in entries { counts[e.level, default: 0] += 1 }
+        let rows = filter.isEmpty && levels.isEmpty ? entries : entries.filter {
             (levels.isEmpty || levels.contains($0.level)) &&
             (filter.isEmpty || $0.message.localizedCaseInsensitiveContains(filter) || $0.subsystem.localizedCaseInsensitiveContains(filter))
         }
-        let counts = Dictionary(grouping: entries, by: \.level).mapValues(\.count)
-        VStack(spacing: 0) {
+        var lo = Date.distantFuture, hi = Date.distantPast
+        for e in rows { if let d = e.date { if d < lo { lo = d }; if d > hi { hi = d } } }
+        var hist: Histogram?
+        if lo <= hi {
+            let nb = Histogram.buckets
+            let step = max(hi.timeIntervalSince(lo), 1) / Double(nb)
+            var bins = Array(repeating: [LogEntry.Level: Int](), count: nb)
+            for e in rows { guard let d = e.date else { continue }
+                bins[min(nb - 1, Int(d.timeIntervalSince(lo) / step))][e.level, default: 0] += 1 }
+            let peak = max(bins.map { $0.values.reduce(0, +) }.max() ?? 1, 1)
+            hist = Histogram(lo: lo, hi: hi, step: step, peak: peak, bins: bins)
+        }
+        return Filtered(key: key, rows: rows, counts: counts, hist: hist)
+    }
+
+    private func content(_ v: Filtered) -> some View {
+        let rows = v.rows, counts = v.counts
+        return VStack(spacing: 0) {
             HStack(spacing: 6) {
                 ForEach(LogEntry.Level.allCases.filter { counts[$0] != nil }, id: \.self) { l in
                     let on = levels.contains(l)
@@ -716,10 +782,11 @@ struct LogView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
+                if v.key != key { ProgressView().controlSize(.small) }   // a newer filter is being applied
                 Text(verbatim: "\(rows.count) of \(entries.count) events").font(.caption).foregroundStyle(.secondary)
             }
             .padding(8)
-            histogram(rows).frame(height: 70).padding(.horizontal, 8).padding(.bottom, 6)
+            histogram(v.hist).frame(height: 70).padding(.horizontal, 8).padding(.bottom, 6)
             Table(rows) {
                 TableColumn("Time") { e in Text(e.time).monospacedDigit().foregroundStyle(.secondary) }.width(min: 80, ideal: 90, max: 110)
                 TableColumn("Level") { e in Pill(text: e.level.rawValue, color: e.level.color) }.width(min: 54, ideal: 60, max: 70)
@@ -737,18 +804,14 @@ struct LogView: View {
         }
     }
 
+    private static let timeFormatter: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f }()
+
     /// Event-rate histogram: 60 time buckets, each a column stacked by level (severest on top).
-    private func histogram(_ rows: [LogEntry]) -> some View {
-        let dates = rows.compactMap(\.date)
-        guard let lo = dates.min(), let hi = dates.max() else { return AnyView(Color.clear) }
-        let nb = 60
-        let step = max(hi.timeIntervalSince(lo), 1) / Double(nb)
-        var bins = Array(repeating: [LogEntry.Level: Int](), count: nb)
-        for e in rows { guard let d = e.date else { continue }
-            bins[min(nb - 1, Int(d.timeIntervalSince(lo) / step))][e.level, default: 0] += 1 }
-        let peak = max(bins.map { $0.values.reduce(0, +) }.max() ?? 1, 1)
+    private func histogram(_ h: Histogram?) -> some View {
+        guard let h else { return AnyView(Color.clear) }
+        let nb = Histogram.buckets, bins = h.bins, peak = h.peak, lo = h.lo, step = h.step
         let order: [LogEntry.Level] = [.fault, .error, .activity, .info, .default, .debug]
-        let tf = DateFormatter(); tf.dateFormat = "HH:mm:ss"
+        let tf = Self.timeFormatter
         return AnyView(VStack(spacing: 2) {
             HStack(alignment: .bottom, spacing: 0) {
                 Text(verbatim: "\(peak)").font(.caption2).foregroundStyle(.secondary).frame(width: 34, alignment: .trailing)
@@ -773,7 +836,7 @@ struct LogView: View {
                 .padding(.leading, 6)
             }
             HStack {
-                Text(tf.string(from: lo)); Spacer(); Text(tf.string(from: hi))
+                Text(tf.string(from: lo)); Spacer(); Text(tf.string(from: h.hi))
             }
             .font(.caption2).foregroundStyle(.secondary).padding(.leading, 40)
         })
@@ -1017,17 +1080,27 @@ struct ArgsEnvView: View {
 struct EnvValue: View {
     let key: String
     let value: String
+    /// Any process sets its own environment: a value of 100,000 colons used to become 100,001 rows.
+    static let maxPathRows = 50
+    static let maxTextLength = 4_000
     var body: some View {
-        let parts = value.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
-        if parts.count > 1, parts.allSatisfy({ $0.hasPrefix("/") || $0.isEmpty }) {
+        let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+        // A path list needs at least one real path; "::::" is not one.
+        if parts.count > 1, parts.contains(where: { $0.hasPrefix("/") }),
+           parts.allSatisfy({ $0.hasPrefix("/") || $0.isEmpty }) {
             VStack(alignment: .leading, spacing: 1) {
-                ForEach(Array(parts.enumerated()), id: \.offset) { _, p in
-                    Label(p, systemImage: "folder").font(.system(.body, design: .monospaced)).labelStyle(.titleAndIcon)
+                ForEach(Array(parts.prefix(Self.maxPathRows).enumerated()), id: \.offset) { _, p in
+                    Label(String(p), systemImage: "folder").font(.system(.body, design: .monospaced)).labelStyle(.titleAndIcon)
+                }
+                if parts.count > Self.maxPathRows {
+                    Text(verbatim: "… \(parts.count - Self.maxPathRows) more (see Raw)").foregroundStyle(.secondary)
                 }
             }
             .textSelection(.enabled)
         } else {
-            Text(value).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+            let long = value.count > Self.maxTextLength
+            Text(long ? String(value.prefix(Self.maxTextLength)) + "… (\(value.count) characters, see Raw)" : value)
+                .font(.system(.body, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
         }
     }
 }
