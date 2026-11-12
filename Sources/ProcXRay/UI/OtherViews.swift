@@ -119,7 +119,7 @@ struct BackgroundItemsView: View {
     @Environment(Store.self) var store
     @State private var selection: BTMItem.ID?
     @State private var search = ""
-    @State private var onlyEnabled = false
+    @AppStorage("background.onlyEnabled") private var onlyEnabled = false
 
     var body: some View {
         let items = store.btm.filter { i in
@@ -203,7 +203,7 @@ struct LaunchdView: View {
     @Environment(Store.self) var store
     @State private var selection: LaunchdJob.ID?
     @State private var search = ""
-    @State private var runningOnly = true
+    @AppStorage("launchd.runningOnly") private var runningOnly = true
     @State private var detail = ""
     @State private var sort = [KeyPathComparator(\LaunchdJob.label)]
 

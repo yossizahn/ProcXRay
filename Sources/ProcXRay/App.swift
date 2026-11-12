@@ -48,10 +48,12 @@ struct ProcXRayApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("ProcXRay") {
+        // The explicit id keeps the saved window frame ("main-AppWindow-1") stable across builds.
+        WindowGroup("ProcXRay", id: "main") {
             ContentView()
                 .environment(store)
                 .frame(minWidth: 1100, minHeight: 650)
+                .background(RestoreWindowScreen(sceneID: "main"))
         }
         .defaultSize(width: 1500, height: 900)
         .commands {
@@ -119,11 +121,19 @@ enum Section: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @Environment(Store.self) var store
-    @State private var section: Section? = .processes
+    @AppStorage("section") private var savedSection: Section = .processes
+    @AppStorage("sidebarHidden") private var sidebarHidden = false
+
+    private var section: Binding<Section?> {
+        Binding(get: { savedSection }, set: { if let s = $0 { savedSection = s } })
+    }
+    private var columnVisibility: Binding<NavigationSplitViewVisibility> {
+        Binding(get: { sidebarHidden ? .detailOnly : .all }, set: { sidebarHidden = $0 == .detailOnly })
+    }
 
     var body: some View {
-        NavigationSplitView {
-            List(Section.allCases, selection: $section) { s in
+        NavigationSplitView(columnVisibility: columnVisibility) {
+            List(Section.allCases, selection: section) { s in
                 HStack {
                     Label(s.rawValue, systemImage: s.icon)
                     Spacer()
@@ -143,7 +153,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         } detail: {
-            switch section ?? .processes {
+            switch savedSection {
             case .processes: ProcessesView()
             case .ghosts: GhostsView()
             case .apps: AppsView()
