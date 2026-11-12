@@ -13,6 +13,8 @@ struct ProcessOutline: NSViewRepresentable {
     let filter: String
     @Binding var selection: ProcNode.ID?
     @Binding var sort: [KeyPathComparator<ProcNode>]
+    /// Column ids the user hid (ColumnPrefs); shared by every window and View ▸ Columns.
+    var hiddenColumns: Set<String> = []
     let onOpen: (ProcInfo) -> Void
     let onSignal: (ProcInfo, Int32, String) -> Void
 
@@ -36,8 +38,9 @@ struct ProcessOutline: NSViewRepresentable {
             let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(c.rawValue))
             col.title = c.title
             col.minWidth = c.widths.min
-            col.width = c.widths.ideal
+            col.width = max(c.widths.ideal, Column.sortedHeaderWidth(col))
             col.headerCell.alignment = c.numeric ? .right : .left
+            col.headerToolTip = c.tooltip
             if c.comparator(.forward) != nil {
                 col.sortDescriptorPrototype = NSSortDescriptor(key: c.rawValue, ascending: true)
             }
@@ -59,6 +62,11 @@ struct ProcessOutline: NSViewRepresentable {
         let menu = NSMenu()
         menu.delegate = co
         outline.menu = menu
+        let headerMenu = NSMenu()
+        headerMenu.delegate = co
+        outline.headerView?.menu = headerMenu
+        co.headerMenu = headerMenu
+        co.listenForColumnCommands()
 
         let scroll = NSScrollView()
         scroll.documentView = outline
@@ -85,11 +93,11 @@ struct ProcessOutline: NSViewRepresentable {
             case .pid: "PID"
             case .cpu: "CPU %"
             case .mem: "Memory"
-            case .threads: "Thr"
+            case .threads: "Threads"
             case .user: "User"
             case .responsible: "Responsible"
-            case .coalition: "Res. coal."
-            case .jetsam: "Jetsam"
+            case .coalition: "Res. coalition"
+            case .jetsam: "Jetsam coalition"
             case .signer: "Signer"
             case .disk: "Disk I/O"
             case .started: "Started"
@@ -103,14 +111,40 @@ struct ProcessOutline: NSViewRepresentable {
             case .pid: (44, 56)
             case .cpu: (44, 52)
             case .mem: (60, 76)
-            case .threads: (30, 36)
+            case .threads: (44, 56)
             case .user: (50, 70)
             case .responsible: (80, 130)
-            case .coalition, .jetsam: (50, 64)
+            case .coalition, .jetsam: (50, 100)
             case .signer: (70, 110)
             case .disk: (56, 70)
             case .started: (50, 70)
             case .context: (120, 300)
+            }
+        }
+
+        /// Width of the header as it looks when sorted: a bold title plus the sort arrow, so sorting by
+        /// the column doesn't truncate its title.
+        static func sortedHeaderWidth(_ col: NSTableColumn) -> CGFloat {
+            let font = NSFont.boldSystemFont(ofSize: col.headerCell.font?.pointSize ?? NSFont.smallSystemFontSize)
+            return ceil((col.title as NSString).size(withAttributes: [.font: font]).width) + 30
+        }
+
+        /// Header tooltip: what the column shows and in which unit.
+        var tooltip: String {
+            switch self {
+            case .name: "Process name, or the title of a group row. Badges: LEFT (outlived its app), ZOMBIE, ROSETTA, SBX (sandboxed), EXITED."
+            case .pid: "Process ID."
+            case .cpu: "CPU use over the last refresh, as a percentage of one core (can pass 100). Group rows: the sum of their processes."
+            case .mem: "Physical footprint: the memory macOS charges to the process, as in Activity Monitor. Group rows: the sum."
+            case .threads: "Number of threads."
+            case .user: "User the process runs as."
+            case .responsible: "The process macOS holds responsible for this one (for privacy prompts and energy). † marks one that has exited."
+            case .coalition: "Resource coalition id: processes macOS accounts for together, usually an app and its helpers."
+            case .jetsam: "Jetsam coalition id: processes macOS frees memory from together, such as a host app and its extensions."
+            case .signer: "Who signed the running code: Apple, a Developer ID team, ad hoc, or unsigned."
+            case .disk: "Bytes read plus written since the process started. — when neither could be read. Group rows: the sum."
+            case .started: "Time since the process started."
+            case .context: "launchd label, LaunchServices name, extension point, terminal, or the path. Group rows: process counts."
             }
         }
 
@@ -156,6 +190,115 @@ struct ProcessOutline: NSViewRepresentable {
 
         /// Re-apply whenever the store's process data changes, without going through SwiftUI.
         /// withObservationTracking fires once, before the change, so re-register and read after it lands.
+        var headerMenu: NSMenu?
+        private var hiddenApplied: Set<String>?
+        private var commandObservers: [NSObjectProtocol] = []
+
+        /// View ▸ Columns acts on the outline in the key window (several main windows can be open).
+        func listenForColumnCommands() {
+            let nc = NotificationCenter.default
+            commandObservers = [
+                nc.addObserver(forName: ColumnPrefs.sizeAllToFit, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { if let self, self.isInKeyWindow { self.sizeAllToFit() } }
+                },
+                nc.addObserver(forName: ColumnPrefs.reset, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { if let self, self.isInKeyWindow { self.resetColumns() } }
+                },
+            ]
+        }
+        deinit { commandObservers.forEach(NotificationCenter.default.removeObserver) }
+
+        private var isInKeyWindow: Bool {
+            guard let w = outline?.window else { return false }
+            return w == (NSApp.keyWindow ?? NSApp.mainWindow)
+        }
+
+        private func syncHidden(_ outline: NSOutlineView) {
+            guard parent.hiddenColumns != hiddenApplied else { return }
+            hiddenApplied = parent.hiddenColumns
+            for col in outline.tableColumns {
+                let hide = col.identifier.rawValue != Column.name.rawValue && parent.hiddenColumns.contains(col.identifier.rawValue)
+                if col.isHidden != hide { col.isHidden = hide }
+            }
+            // Sorting by a column nobody can see: back to the default (PID).
+            // Next turn: this runs inside a SwiftUI update, which mustn't change state.
+            if let key = outline.sortDescriptors.first?.key, parent.hiddenColumns.contains(key) {
+                DispatchQueue.main.async { [weak self] in self?.parent.sort = [KeyPathComparator(\.pidKey)] }
+            }
+        }
+
+        // MARK: Column sizing
+
+        /// Width that shows `col`'s header and every visible cell in it untruncated.
+        private func fittingWidth(_ col: NSTableColumn) -> CGFloat {
+            guard let o = outline, let c = Column(rawValue: col.identifier.rawValue) else { return col.width }
+            let ci = o.column(withIdentifier: col.identifier)
+            var w = Column.sortedHeaderWidth(col)
+            let rows = o.rows(in: o.visibleRect)
+            guard ci >= 0, rows.length > 0 else { return max(col.minWidth, w) }
+            let probe = Cell(column: c)
+            for r in rows.location..<rows.location + rows.length {
+                guard let it = o.item(atRow: r) as? Item else { continue }
+                probe.show(it.node, column: c, procs: procs)
+                // The outline column's cells start after the row's indentation and disclosure triangle.
+                let inset = o.frameOfCell(atColumn: ci, row: r).minX - o.rect(ofColumn: ci).minX
+                w = max(w, inset + probe.fittingWidth)
+            }
+            return max(col.minWidth, min(w, 1200))
+        }
+
+        func outlineView(_ o: NSOutlineView, sizeToFitWidthOfColumn ci: Int) -> CGFloat {
+            fittingWidth(o.tableColumns[ci])
+        }
+
+        private func sizeToFit(_ col: NSTableColumn) { col.width = fittingWidth(col) }
+        func sizeAllToFit() { outline?.tableColumns.filter { !$0.isHidden }.forEach(sizeToFit) }
+
+        /// Catalogue order, default widths, default visibility.
+        func resetColumns() {
+            guard let o = outline else { return }
+            for (i, c) in Column.allCases.enumerated() {
+                let at = o.column(withIdentifier: NSUserInterfaceItemIdentifier(c.rawValue))
+                guard at >= 0 else { continue }
+                if at != i { o.moveColumn(at, toColumn: i) }
+                o.tableColumns[i].width = max(c.widths.ideal, Column.sortedHeaderWidth(o.tableColumns[i]))
+            }
+            ColumnPrefs.setHidden(ColumnPrefs.defaultHidden)
+        }
+
+        private func buildHeaderMenu(_ menu: NSMenu) {
+            guard let o = outline, let header = o.headerView else { return }
+            func item(_ title: String, state: Bool? = nil, _ action: @escaping () -> Void) {
+                let mi = NSMenuItem(title: title, action: #selector(MenuAction.fire), keyEquivalent: "")
+                let a = MenuAction(action)
+                mi.target = a
+                mi.representedObject = a
+                if let state { mi.state = state ? .on : .off }
+                menu.addItem(mi)
+            }
+            // The column under the pointer when the menu opened.
+            var clicked: NSTableColumn?
+            if let e = NSApp.currentEvent, e.window == header.window {
+                let ci = header.column(at: header.convert(e.locationInWindow, from: nil))
+                if ci >= 0 { clicked = o.tableColumns[ci] }
+            }
+            if let col = clicked {
+                if col.identifier.rawValue != Column.name.rawValue {
+                    let id = col.identifier.rawValue
+                    item("Hide \(col.title)") { ColumnPrefs.toggle(id) }
+                }
+                item("Size Column to Fit") { [weak self] in self?.sizeToFit(col) }
+            }
+            item("Size All Columns to Fit") { [weak self] in self?.sizeAllToFit() }
+            menu.addItem(.separator())
+            let hidden = parent.hiddenColumns
+            for c in Column.allCases where c != .name {
+                item(c.title, state: !hidden.contains(c.rawValue)) { ColumnPrefs.toggle(c.rawValue) }
+            }
+            menu.addItem(.separator())
+            item("Reset Columns") { [weak self] in self?.resetColumns() }
+        }
+
         func observeStore() {
             guard let store = parent?.store else { return }
             withObservationTracking {
@@ -186,6 +329,7 @@ struct ProcessOutline: NSViewRepresentable {
             updating = true
             defer { updating = false }
             syncSortIndicators(outline)
+            syncHidden(outline)
             let nodes = parent.store.nodes(grouping: parent.grouping, filter: parent.filter, sort: parent.sort)
             procs = parent.store.procs
             if parent.store.nodesVersion != appliedVersion {
@@ -434,6 +578,7 @@ struct ProcessOutline: NSViewRepresentable {
 
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
+            if menu === headerMenu { buildHeaderMenu(menu); return }
             // A unit row (Smart tree) acts as the app or job it stands for.
             guard let o = outline, o.clickedRow >= 0, let n = (o.item(atRow: o.clickedRow) as? Item)?.node,
                   let p = n.proc ?? n.rootPid.flatMap({ procs[$0] }) else { return }
@@ -539,6 +684,11 @@ struct ProcessOutline: NSViewRepresentable {
                 x = 22
             }
             label.frame = NSRect(x: x, y: (h - lh) / 2, width: max(0, bounds.width - x - 2), height: lh)
+        }
+
+        /// Width this cell needs to show its content untruncated.
+        var fittingWidth: CGFloat {
+            (hasIcon ? 22 : 2) + ceil(label.attributedStringValue.size().width) + 6
         }
 
         // Assign only on change, so unchanged cells cause no redraw at all.
@@ -654,6 +804,45 @@ struct ProcessOutline: NSViewRepresentable {
             if !p.lsTags.isEmpty { parts.append(p.lsTags.joined(separator: " ")) }
             if parts.isEmpty, let path = p.path { parts.append(path) }
             return parts.joined(separator: " · ")
+        }
+    }
+}
+
+/// Which process table columns are hidden: one app-wide list, so the header menu, View ▸ Columns and
+/// every window agree. Order and widths stay in AppKit's column autosave.
+enum ColumnPrefs {
+    static let key = "hiddenColumns"
+    /// The coalition ids matter in one grouping, whose group rows already show them.
+    static let defaultHidden = "coalition,jetsam"
+    static let sizeAllToFit = Notification.Name("ProcXRay.sizeAllColumnsToFit")
+    static let reset = Notification.Name("ProcXRay.resetColumns")
+
+    static func parse(_ raw: String) -> Set<String> { Set(raw.split(separator: ",").map(String.init)) }
+    static var hidden: Set<String> { parse(UserDefaults.standard.string(forKey: key) ?? defaultHidden) }
+    static func setHidden(_ raw: String) { UserDefaults.standard.set(raw, forKey: key) }
+    static func toggle(_ id: String) {
+        var h = hidden
+        if h.contains(id) { h.remove(id) } else { h.insert(id) }
+        setHidden(h.sorted().joined(separator: ","))
+    }
+}
+
+/// View ▸ Columns: the header menu's toggles, reachable from the keyboard.
+struct ColumnsCommands: Commands {
+    @AppStorage(ColumnPrefs.key) private var hiddenRaw = ColumnPrefs.defaultHidden
+
+    var body: some Commands {
+        CommandGroup(after: .toolbar) {
+            Menu("Columns") {
+                let hidden = ColumnPrefs.parse(hiddenRaw)
+                ForEach(ProcessOutline.Column.allCases.filter { $0 != .name }, id: \.self) { c in
+                    Toggle(c.title, isOn: Binding(get: { !hidden.contains(c.rawValue) },
+                                                  set: { _ in ColumnPrefs.toggle(c.rawValue) }))
+                }
+                Divider()
+                Button("Size All Columns to Fit") { NotificationCenter.default.post(name: ColumnPrefs.sizeAllToFit, object: nil) }
+                Button("Reset Columns") { NotificationCenter.default.post(name: ColumnPrefs.reset, object: nil) }
+            }
         }
     }
 }

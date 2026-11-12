@@ -55,6 +55,7 @@ struct ProcXRayApp: App {
         .defaultSize(width: 1500, height: 900)
         .commands {
             InspectCommand()
+            ColumnsCommands()
             CommandGroup(after: .toolbar) {
                 Button("Refresh Now") { store.refresh() }.keyboardShortcut("r")
                 Button(store.paused ? "Resume Updates" : "Pause Updates") { store.paused.toggle() }

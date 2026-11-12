@@ -19,6 +19,7 @@ struct ProcessesView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("grouping") private var grouping: Grouping = .smart
     @AppStorage(InspectorPaneKey.name) private var showPane = false
+    @AppStorage(ColumnPrefs.key) private var hiddenColumns = ColumnPrefs.defaultHidden
     @State private var search = ""
     @State private var selection: ProcNode.ID?
     @State private var sort = [KeyPathComparator(\ProcNode.pidKey)]
@@ -42,7 +43,7 @@ struct ProcessesView: View {
     var body: some View {
         SplitPane(id: "processes", defaultFraction: 0.6, showsBottom: showPane) {
             ProcessOutline(store: store, grouping: grouping, filter: search,
-                           selection: $selection, sort: $sort,
+                           selection: $selection, sort: $sort, hiddenColumns: ColumnPrefs.parse(hiddenColumns),
                            onOpen: { p in inspect(p) },
                            onSignal: { p, sig, label in
                                // Resume is harmless: send it at once. The rest are confirmed first.
