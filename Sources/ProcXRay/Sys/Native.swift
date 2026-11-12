@@ -148,10 +148,16 @@ enum Native {
 
     // MARK: Per-pid info
 
+    /// The executable's path. proc_pidpath fails (ENOENT) once the file the process runs was deleted or
+    /// replaced — an app that updated itself while its helpers kept running — so fall back to the path
+    /// the process was exec'd with: that is what it runs, even if the file there is now a newer version.
+    /// The fallback is rare (a handful of pids), so its ARG_MAX buffer costs nothing per snapshot.
     static func path(_ pid: pid_t) -> String? {
         var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         let n = proc_pidpath(pid, &buf, UInt32(buf.count))
-        return n > 0 ? String(cString: buf) : nil
+        if n > 0 { return String(cString: buf) }
+        guard pid > 0, let exec = argsEnv(pid)?.execPath, exec.hasPrefix("/") else { return nil }
+        return exec
     }
 
     static func taskInfo(_ pid: pid_t) -> proc_taskinfo? {
