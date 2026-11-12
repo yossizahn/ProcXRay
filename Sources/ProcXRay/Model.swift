@@ -34,6 +34,19 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var energyNJ: UInt64?
     var wakeups: UInt64?
     var counters: Counters?
+    /// Scheduling priority (proc_taskinfo).
+    var priority: Int32?
+    // Read only while a column shows them (ExtraReads); nil otherwise.
+    var nice: Int32?
+    var openFiles: Int?
+    var compressed: UInt64?
+    /// Power assertion types held (IOPMCopyAssertionsByProcess); empty when it holds none.
+    var assertions: [String]?
+    /// GPU time since the process started, nanoseconds; nil when it has never used the GPU.
+    var gpuNanos: UInt64?
+    /// Network bytes per second from nettop's latest pair of samples (NetSampler).
+    var netIn: Double?
+    var netOut: Double?
     /// Per-second rates over the last refresh interval (nil on a process's first sample).
     var rates: Rates?
 
@@ -97,6 +110,8 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
         fill(\.footprint, m.footprint); fill(\.diskRead, m.diskRead); fill(\.diskWrite, m.diskWrite)
         // Counters as a whole: a local read that got only one of the two calls keeps its partial set.
         fill(\.energyNJ, m.energyNJ); fill(\.wakeups, m.wakeups); fill(\.counters, m.counters)
+        fill(\.priority, m.priority); fill(\.nice, m.nice); fill(\.openFiles, m.openFiles)
+        fill(\.compressed, m.compressed)
         return took
     }
 
@@ -259,6 +274,8 @@ final class Store {
     /// Inverse of domainReads: child key → host key. Applied by every snapshot.
     @ObservationIgnored private var domainHostOf: [String: String] = [:]
     @ObservationIgnored private var readingDomains = false
+    /// The extra reads the shown columns need (see Column.reads); set by the process table.
+    @ObservationIgnored var extraReads: ExtraReads = []
     /// Each process's counters at the last refresh, by key: CPU % and the rate columns divide the change
     /// by the time between the two readings.
     @ObservationIgnored private var prevSamples: [String: Sample] = [:]
@@ -406,6 +423,7 @@ final class Store {
         let cache = signCache
         let argv = argvCache
         let hosts = domainHostOf
+        let extras = extraReads
         let useHelper = helperState.isRunning
         let readSlow = full || ticksSinceSlow + 1 >= Self.slowEvery || lsApps.isEmpty
         ticksSinceSlow = readSlow ? 0 : ticksSinceSlow + 1
@@ -416,8 +434,8 @@ final class Store {
             let t0 = DispatchTime.now().uptimeNanoseconds
             // Ask the helper first, but collect local data while it answers; the snapshot waits for the
             // helper only after that, and never longer than helperBudget (it normally takes ~10 ms).
-            let priv = useHelper ? Pending { HelperClient.shared.allMetrics(timeout: Self.helperBudget) } : nil
-            var marked = Self.snapshot(prev: prev, signCache: cache, argvCache: argv, domainHosts: hosts, priv: { priv?.wait() },
+            let priv = useHelper ? Pending { HelperClient.shared.allMetrics(extras: extras, timeout: Self.helperBudget) } : nil
+            var marked = Self.snapshot(prev: prev, signCache: cache, argvCache: argv, domainHosts: hosts, extras: extras, priv: { priv?.wait() },
                                        ls: ls, jobs: jobs, otherJobs: otherJobs)
             Self.markLeftBehind(&marked.procs, lsApps: marked.ls)
             let snap = marked
@@ -644,6 +662,7 @@ final class Store {
     nonisolated static func snapshot(prev: [String: Sample], signCache: [String: SignInfo],
                                      argvCache: [String: String?] = [:],
                                      domainHosts: [String: String] = [:],
+                                     extras: ExtraReads = [],
                                      priv privSource: () -> [Int32: PrivMetrics]? = { nil },
                                      ls: [LSApp]? = nil, jobs: [LaunchdJob]? = nil,
                                      otherJobs: [LaunchdJob]? = nil) -> Snapshot {
@@ -655,6 +674,12 @@ final class Store {
         for j in jobs + otherJobs { if let p = j.pid, labelByPid[p] == nil { labelByPid[p] = j } }
         var lsByPid: [pid_t: LSApp] = [:]
         for a in ls { if let p = a.pid { lsByPid[p] = a } }
+
+        // Whole-system reads, one call each, only when a shown column needs them.
+        let assertions = extras.contains(.assertions) ? ExtraRead.assertionsByPid() : nil
+        let gpu = extras.contains(.gpu) ? ExtraRead.gpuNanosByPid() : nil
+        NetSampler.shared.want(extras.contains(.network))
+        let net = extras.contains(.network) ? NetSampler.shared.current() : nil
 
         let now = DispatchTime.now().uptimeNanoseconds
         var users: [uid_t: String] = [:]
@@ -680,6 +705,13 @@ final class Store {
             if let path = p.path { p.extensionPoint = ExtensionInfo.point(forExecutable: path) }
             if let s = signCache[p.codeKey] { p.signer = s.shortSigner; p.signID = s.identifier }
             if let c = argvCache[p.codeKey] { p.commandLine = c; p.commandLineRead = true }
+            if extras.contains(.openFiles) { p.openFiles = ExtraRead.openFiles(k.pid) }
+            if extras.contains(.nice) { p.nice = ExtraRead.nice(k.pid) }
+            if extras.contains(.compressed) { p.compressed = ExtraRead.compressed(k.pid) }
+            if let assertions { p.assertions = assertions[k.pid] ?? [] }
+            // A process with no GPU clients has used no GPU time, and one nettop didn't list had no sockets.
+            if let gpu { p.gpuNanos = gpu[k.pid] ?? 0 }
+            if let net { p.netIn = net[k.pid]?.inPerSec ?? 0; p.netOut = net[k.pid]?.outPerSec ?? 0 }
             out[k.pid] = p
         }
         let priv = privSource()
@@ -1045,7 +1077,7 @@ final class ColumnMemo {
 struct Sample: Sendable {
     var at: UInt64                    // uptime nanoseconds
     var cpu, waiting, diskRead, diskWrite, energy, wakeups: UInt64?
-    var pCore, instructions, cycles, logicalWrites: UInt64?
+    var pCore, instructions, cycles, logicalWrites, gpu: UInt64?
     var contextSwitches, faults, pageins, machMsgsSent, machMsgsReceived, unixSyscalls, machSyscalls: UInt32?
 
     init(_ p: ProcInfo, at: UInt64) {
@@ -1057,6 +1089,7 @@ struct Sample: Sendable {
         machMsgsSent = c?.machMsgsSent; machMsgsReceived = c?.machMsgsReceived
         unixSyscalls = c?.unixSyscalls; machSyscalls = c?.machSyscalls
         pCore = c?.pCoreNanos; instructions = c?.instructions; cycles = c?.cycles; logicalWrites = c?.logicalWrites
+        gpu = p.gpuNanos
     }
 }
 
@@ -1079,6 +1112,8 @@ struct Rates: Hashable, Sendable {
     var cycles: Double?
     /// Instructions retired per second.
     var instructions: Double?
+    /// GPU time over the interval, as a percentage of the interval.
+    var gpuPercent: Double?
 
     init(from a: Sample, to b: Sample) {
         let secs = Double(b.at - a.at) / 1e9
@@ -1114,6 +1149,8 @@ struct Rates: Hashable, Sendable {
         if let pc = d64(a.pCore, b.pCore), let c = d64(a.cpu, b.cpu), c > 0 { pCoreShare = min(100, pc / c * 100) }
         if let i = d64(a.instructions, b.instructions), let c = d64(a.cycles, b.cycles), c > 0 { ipc = i / c }
         cycles = d64(a.cycles, b.cycles).map { $0 / secs }
+        // A process that starts using the GPU has no earlier reading: count it from zero.
+        if b.gpu != nil { gpuPercent = d64(a.gpu ?? 0, b.gpu).map { $0 / 1e9 / secs * 100 } }
         instructions = d64(a.instructions, b.instructions).map { $0 / secs }
     }
 }

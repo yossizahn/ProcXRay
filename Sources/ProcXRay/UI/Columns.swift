@@ -56,7 +56,7 @@ struct ColumnSort: Hashable, Sendable {
 
 struct Column: Identifiable {
     enum Section: Int, CaseIterable {
-        case identity, ownership, cpu, memory, disk, energy, security, time
+        case identity, ownership, cpu, memory, disk, network, energy, security, time
         var title: String {
             switch self {
             case .identity: "Identity"
@@ -64,6 +64,7 @@ struct Column: Identifiable {
             case .cpu: "CPU"
             case .memory: "Memory"
             case .disk: "Disk"
+            case .network: "Network"
             case .energy: "Energy and activity"
             case .security: "Security"
             case .time: "Time"
@@ -102,14 +103,22 @@ struct Column: Identifiable {
     /// The value as a plain number, for columns that add up: sums and sorting use it without
     /// formatting a string per process.
     var amount: (@MainActor (ProcInfo) -> Double?)? = nil
+    /// Reads the snapshot makes only while this column is shown.
+    var reads: ExtraReads = []
     let value: @MainActor (ProcInfo, Store) -> CellValue
 
     /// A column of numbers that add up: the value is `amount`, formatted.
     static func amount(id: String, title: String, tooltip: String, section: Section, minWidth: CGFloat = 50,
-                       width: CGFloat = 76, rule: GroupRule = .sum, format: @escaping (Double) -> String,
+                       width: CGFloat = 76, rule: GroupRule = .sum, reads: ExtraReads = [],
+                       format: @escaping (Double) -> String,
                        _ amount: @escaping @MainActor (ProcInfo) -> Double?) -> Column {
         Column(id: id, title: title, tooltip: tooltip, section: section, minWidth: minWidth, width: width, numeric: true,
-               rule: rule, format: format, amount: amount) { p, _ in amount(p).map { .number($0, format($0)) } ?? .unknown }
+               rule: rule, format: format, amount: amount, reads: reads) { p, _ in amount(p).map { .number($0, format($0)) } ?? .unknown }
+    }
+
+    /// The extra reads the given columns need.
+    static func reads(for shown: Set<String>) -> ExtraReads {
+        all.reduce(into: ExtraReads()) { if shown.contains($1.id) { $0.formUnion($1.reads) } }
     }
 
     /// What the row sorts by: the plain number when there is one.
@@ -329,6 +338,16 @@ private let catalogue: [Column] = [
             section: .cpu, width: 90, format: perSecFormat) { $0.rates?.contextSwitches },
     .amount(id: "threads", title: "Threads", tooltip: "Number of threads. Group rows: the sum.",
             section: .cpu, minWidth: 44, width: 56, format: countFormat) { $0.threads.map { Double($0) } },
+    Column(id: "priority", title: "Priority",
+           tooltip: "Scheduling priority of the process's main thread (proc_taskinfo; 31 is the default, higher runs first).",
+           section: .cpu, width: 56, numeric: true, rule: .same(noun: "priority")) { p, _ in
+        p.priority.map { .number(Double($0), String($0)) } ?? .unknown
+    },
+    Column(id: "nice", title: "Nice",
+           tooltip: "Nice value (proc_bsdinfo): 0 is normal, positive yields the CPU to others. Other users' processes need the helper.",
+           section: .cpu, width: 48, numeric: true, rule: .same(noun: "nice value"), reads: .nice) { p, _ in
+        p.nice.map { .number(Double($0), String($0), $0 > 0 ? .secondary : $0 < 0 ? .warning : .normal) } ?? .unknown
+    },
     Column(id: "pcore", title: "P-core share",
            tooltip: "Share of the process's CPU time spent on performance cores. Group rows: weighted by CPU time.",
            section: .cpu, width: 70, numeric: true,
@@ -374,6 +393,9 @@ private let catalogue: [Column] = [
             section: .memory, width: 80, rule: .blank, format: bytesFormat) { $0.virt.map { Double($0) } },
     .amount(id: "neural", title: "Neural Engine", tooltip: "Memory charged to the process for the Neural Engine. Group rows: the sum.",
             section: .memory, width: 76, format: bytesFormat) { $0.counters?.neuralFootprint.map { Double($0) } },
+    .amount(id: "compressed", title: "Compressed",
+            tooltip: "Memory the system has compressed for this process (TASK_VM_INFO). Your own processes; other users' need the helper. Group rows: the sum.",
+            section: .memory, width: 80, reads: .compressed, format: bytesFormat) { $0.compressed.map { Double($0) } },
 
     .amount(id: "faultRate", title: "Page faults/s", tooltip: "Page faults per second. Group rows: the sum." + rateNote,
             section: .memory, width: 80, format: perSecFormat) { $0.rates?.faults },
@@ -398,6 +420,17 @@ private let catalogue: [Column] = [
     .amount(id: "logicalWrites", title: "Logical writes",
             tooltip: "Bytes the process asked to write, before caching and compression. Group rows: the sum.",
             section: .disk, width: 80, format: bytesFormat) { $0.counters?.logicalWrites.map { Double($0) } },
+    .amount(id: "openFiles", title: "Open files",
+            tooltip: "Open file descriptors: files, sockets, pipes (PROC_PIDLISTFDS). Other users' processes need the helper. Group rows: the sum.",
+            section: .disk, width: 66, reads: .openFiles, format: countFormat) { $0.openFiles.map { Double($0) } },
+
+    // Network
+    .amount(id: "netIn", title: "Received/s",
+            tooltip: "Network bytes received per second, from nettop, which is sampled about every 5 s while this column is shown. Covers the sockets open at each sample. Group rows: the sum.",
+            section: .network, width: 80, reads: .network, format: bytesPerSecFormat) { $0.netIn },
+    .amount(id: "netOut", title: "Sent/s",
+            tooltip: "Network bytes sent per second, from nettop, which is sampled about every 5 s while this column is shown. Covers the sockets open at each sample. Group rows: the sum.",
+            section: .network, width: 80, reads: .network, format: bytesPerSecFormat) { $0.netOut },
 
     // Energy
     .amount(id: "power", title: "Power",
@@ -412,6 +445,21 @@ private let catalogue: [Column] = [
             section: .energy, width: 90, format: perSecFormat) { $0.rates?.machMsgs },
     .amount(id: "energy", title: "Energy", tooltip: "Energy the process's threads used on the CPU since it started, in joules (rusage ri_energy_nj). Group rows: the sum.",
             section: .energy, width: 80, format: { String(format: "%.1f J", $0) }) { $0.energyNJ.map { Double($0) / 1e9 } },
+    .amount(id: "gpu", title: "% GPU",
+            tooltip: "GPU time over the last refresh, as a percentage of the interval (IORegistry accelerator clients). Group rows: the sum." + rateNote,
+            section: .energy, width: 56, reads: .gpu, format: { $0 < 0.05 ? "0" : String(format: "%.1f", $0) }) { $0.rates?.gpuPercent },
+    .amount(id: "gpuTime", title: "GPU time",
+            tooltip: "GPU time since the process started (IORegistry accelerator clients); 0 for a process that never used the GPU. Group rows: the sum.",
+            section: .energy, width: 76, reads: .gpu, format: secsFormat) { $0.gpuNanos.map { Double($0) } },
+    Column(id: "preventingSleep", title: "Preventing sleep",
+           tooltip: "Power assertions that keep the Mac (system) or the display awake (IOPMCopyAssertionsByProcess). Group rows: how many processes hold one.",
+           section: .energy, width: 90, rule: .custom { ms, _ in
+               let n = ms.filter { ExtraRead.preventing($0.assertions ?? []) != nil }.count
+               return n == 0 ? .empty : .number(Double(n), "\(n) process\(n == 1 ? "" : "es")", .warning)
+           }, reads: .assertions) { p, _ in
+        guard let a = p.assertions else { return .unknown }
+        return ExtraRead.preventing(a).map { .text($0, .warning) } ?? .empty
+    },
 
     // Security
     Column(id: "signer", title: "Signer", tooltip: "Who signed the running code: Apple, a Developer ID team, ad hoc, or unsigned.",

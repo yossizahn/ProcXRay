@@ -136,6 +136,7 @@ struct ProcessOutline: NSViewRepresentable {
         private func syncShown(_ outline: NSOutlineView) {
             let shown = parent.shownColumns
             guard shown != shownApplied else { return }
+            parent.store.extraReads = Column.reads(for: shown)
             let first = shownApplied == nil
             shownApplied = shown
             for col in outline.tableColumns {

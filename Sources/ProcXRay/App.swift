@@ -41,6 +41,10 @@ struct ProcXRayApp: App {
             Bench.rates(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
         }
+        if CommandLine.arguments.contains("--extras") {
+            Bench.extras(root: CommandLine.arguments.contains("--root"))
+            exit(0)
+        }
         if CommandLine.arguments.contains("--tree-stats") {
             Bench.treeStats()
             exit(0)

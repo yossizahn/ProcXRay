@@ -63,12 +63,14 @@ enum HelperDaemon {
 
         func version(reply: @escaping (Int, Int32) -> Void) { reply(HelperConfig.protocolVersion, getpid()) }
 
-        func allMetrics(reply: @escaping (Data) -> Void) {
+        func allMetrics(extras: Int, reply: @escaping (Data) -> Void) {
+            let extras = ExtraReads(rawValue: extras).intersection(.viaHelper)
             var out: [PrivMetrics] = []
             for k in Native.allProcesses() where k.pid > 0 {
                 // Usage of another user's process is root-only in the kernel (proc_pid_rusage checks
                 // same-user): a standard user gets it for their own processes only, as without the helper.
                 var m = mayInspect(k.pid) ? PrivMetrics.read(k.pid) : PrivMetrics(pid: k.pid)
+                if mayInspect(k.pid) { m.readExtras(extras) }
                 m.responsible = Native.responsible(k.pid)
                 m.sandboxed = Native.sandboxed(k.pid, start: k.start)
                 out.append(m)

@@ -321,6 +321,15 @@ Group-row rules:
 
 **Later, each needing a new read** (sources are in `process-info-sources.md`): Open files (`PROC_PIDLISTFDS`), Preventing sleep (`IOPMCopyAssertionsByProcess`), % GPU and GPU time (IORegistry), Priority and nice (`proc_bsdinfo`, `pti_priority`), Ports and Compressed memory (task port, helper only), Network bytes (`nettop` or NetworkStatistics).
 
+Implemented (step 17, 2026-11-12). Each column names the reads it needs, and the snapshot makes them only while such a column is shown. Measured over ~730 processes, each adds 3 ms or less to a refresh as the user, and the helper's call grows from 22 ms to 31 ms with open files, nice and compressed memory together.
+
+- **Open files**, **Nice**, **Compressed**: the user's own processes (503 of 727) without the helper, all with it. Compressed memory comes through a task *name* port, which the kernel gives for the user's own processes.
+- **Priority**: `pti_priority`, from the `proc_taskinfo` call already made.
+- **Preventing sleep**: "system", "display" or both, from the assertion types; 3 holders measured.
+- **% GPU** and **GPU time**: the sum of `accumulatedGPUTime` over each process's IOAccelerator user clients (84 processes have one); % GPU is the change per refresh.
+- **Received/s**, **Sent/s** (a new Network section): `nettop` takes ~5.3 s per run whatever its options and holds its output back when writing to a pipe, so one-sample runs follow each other in the background while a network column is shown, and rates come from consecutive runs (about every 5 s). It sees every user's sockets without the helper. It stops when no network column is shown.
+- **Ports**: dropped. Even as root, `task_inspect_for_pid` succeeded for 13 of 727 processes, and asking cost the helper ~11 ms per refresh.
+
 That is 52 columns from data the app already holds, 10 of them rates, and 9 more behind new reads.
 
 Rate columns share one mechanism with the inspector's Resources tab (step 8): keep the previous `Counters` per process key and divide the difference by the interval. The `proc_taskinfo` counters are 32-bit and wrap, so a negative difference is a wrap and shows as "—" for that tick.

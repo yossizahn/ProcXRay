@@ -255,4 +255,59 @@ enum Bench {
             print("chip \(c.title): \(n) processes; Smart tree keeps \(rows(shown)) rows")
         }
     }
+
+    /// `ProcXRay --extras [--root]`: what each extra read adds to a snapshot, and how many processes get a value.
+    static func extras(root: Bool) {
+        let ls = LSAppInfo.list(), jobs = Launchd.list(), other = Launchd.otherDomains()
+        func snap(_ e: ExtraReads, prev: [String: Sample] = [:]) -> (Store.Snapshot, Double) {
+            let priv = root ? HelperClient.shared.allMetrics(extras: e) : nil
+            let t = Date()
+            // LaunchServices and launchd passed in: their tool runs would swamp the difference being measured.
+            let s = Store.snapshot(prev: prev, signCache: [:], extras: e, priv: { priv }, ls: ls, jobs: jobs, otherJobs: other)
+            return (s, -t.timeIntervalSinceNow * 1000)
+        }
+        _ = snap([])
+        var base = 0.0
+        for _ in 0..<5 { base += snap([]).1 }
+        base /= 5
+        print(String(format: "snapshot without extras: %.1f ms%@", base, root ? " (helper metrics fetched before timing)" : ""))
+        if root {
+            for (name, e) in [("none", ExtraReads()), ("files+nice+compressed", [.openFiles, .nice, .compressed] as ExtraReads),
+                              ] {
+                _ = HelperClient.shared.allMetrics(extras: e)
+                let t = Date()
+                for _ in 0..<5 { _ = HelperClient.shared.allMetrics(extras: e) }
+                print(String(format: "helper allMetrics, extras %@: %.1f ms", name as NSString, -t.timeIntervalSinceNow * 200))
+            }
+        }
+        let cases: [(String, ExtraReads, (ProcInfo) -> Bool)] = [
+            ("open files", .openFiles, { $0.openFiles != nil }),
+            ("nice", .nice, { $0.nice != nil }),
+            ("compressed", .compressed, { $0.compressed != nil }),
+            ("assertions", .assertions, { ExtraRead.preventing($0.assertions ?? []) != nil }),
+            ("gpu", .gpu, { $0.gpuNanos != nil }),
+        ]
+        for (name, e, has) in cases {
+            var ms = 0.0
+            var last: Store.Snapshot?
+            for _ in 0..<5 { let (s, t) = snap(e); ms += t; last = s }
+            let procs = last!.procs.values
+            print(String(format: "%-11@ +%5.1f ms   %d of %d processes have a value", name as NSString, ms / 5 - base,
+                         procs.filter(has).count, procs.count))
+        }
+        let (a, _) = snap(.gpu)
+        Thread.sleep(forTimeInterval: 2)
+        let (b, _) = snap(.gpu, prev: a.samples)
+        let top = b.procs.values.compactMap { p in p.rates?.gpuPercent.map { (p.name, $0) } }.sorted { $0.1 > $1.1 }.prefix(5)
+        print("GPU % over 2 s: " + top.map { String(format: "%@ %.1f", $0.0, $0.1) }.joined(separator: ", "))
+        let prio = Dictionary(grouping: b.procs.values.compactMap(\.priority), by: { $0 }).mapValues(\.count).sorted { $0.value > $1.value }.prefix(5)
+        print("priority values: " + prio.map { "\($0.key)×\($0.value)" }.joined(separator: ", "))
+        NetSampler.shared.want(true)
+        Thread.sleep(forTimeInterval: 12)
+        let net = NetSampler.shared.current() ?? [:]
+        NetSampler.shared.want(false)
+        let names = b.procs.mapValues(\.name)
+        let busiest = net.sorted { $0.value.inPerSec + $0.value.outPerSec > $1.value.inPerSec + $1.value.outPerSec }.prefix(5)
+        print("network: \(net.count) processes with rates; " + busiest.map { "\(names[$0.key] ?? "?") in \(Int($0.value.inPerSec)) B/s out \(Int($0.value.outPerSec)) B/s" }.joined(separator: "; "))
+    }
 }

@@ -177,10 +177,10 @@ Column and inspector labels taken from Activity Monitor's bundled strings (`Acti
 | Open Files and Ports, Sample | yes (`lsof`, `sample`) |
 | Context Switches, Faults, Page Ins, Mach Messages In / Out, Mach / UNIX System Calls | yes |
 | Neural footprint | yes |
-| % GPU, GPU Time | no — IORegistry `AppUsage` |
-| Preventing Sleep, Assertions | no — `IOPMCopyAssertionsByProcess` |
+| % GPU, GPU Time | yes — IORegistry `AppUsage` |
+| Preventing Sleep, Assertions | yes — `IOPMCopyAssertionsByProcess` |
 | Ports, Compressed Memory, Purgeable Memory, Private / Shared Memory, Real Private (RPRVT) / Real Shared (RSHRD) | no — task port (root) |
-| Sent / Received Bytes, Sent / Received Packets | no — NetworkStatistics / `nettop` |
+| Sent / Received Bytes, Sent / Received Packets | bytes per second from `nettop`, sampled about every 5 s; packets no |
 | Energy Impact, Avg Energy Impact, 12 hr Power | no — unpublished formula, history kept by the system |
 | App Nap, Requires High Perf GPU, Recent hangs | no — source not identified |
 | Spindump | no |

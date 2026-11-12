@@ -44,13 +44,14 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 1
+    static let protocolVersion = 2
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
 @objc protocol HelperProtocol {
     func version(reply: @escaping (Int, Int32) -> Void)                 // (protocolVersion, helper pid)
-    func allMetrics(reply: @escaping (Data) -> Void)                    // JSON [PrivMetrics]
+    /// `extras`: ExtraReads raw value; only the per-process ones the helper can do (ExtraReads.viaHelper).
+    func allMetrics(extras: Int, reply: @escaping (Data) -> Void)       // JSON [PrivMetrics]
     func argsEnv(pid: Int32, reply: @escaping (Data?) -> Void)          // JSON PrivArgsEnv
     func runTool(_ tool: Int, pid: Int32, reply: @escaping (String) -> Void)
 }
@@ -102,6 +103,11 @@ struct PrivMetrics: Codable, Sendable {
     var counters: Counters?
     var responsible: Int32?
     var sandboxed: Bool?
+    /// Scheduling priority (proc_taskinfo), always read; the rest only when asked for (ExtraReads).
+    var priority: Int32?
+    var nice: Int32?
+    var openFiles: Int?
+    var compressed: UInt64?
 }
 
 /// Cumulative counters from the same two calls as the metrics above (proc_taskinfo, rusage_info_v6).
@@ -139,6 +145,7 @@ extension PrivMetrics {
         var c = Counters()
         var any = false
         if let ti = Native.taskInfo(pid) {
+            m.priority = ti.pti_priority
             m.rss = ti.pti_resident_size
             m.virt = ti.pti_virtual_size
             m.threads = ti.pti_threadnum
@@ -177,6 +184,13 @@ extension PrivMetrics {
         }
         if any { m.counters = c }
         return m
+    }
+
+    /// The per-process extra reads asked for.
+    mutating func readExtras(_ e: ExtraReads) {
+        if e.contains(.openFiles) { openFiles = ExtraRead.openFiles(pid) }
+        if e.contains(.nice) { nice = ExtraRead.nice(pid) }
+        if e.contains(.compressed) { compressed = ExtraRead.compressed(pid) }
     }
 }
 

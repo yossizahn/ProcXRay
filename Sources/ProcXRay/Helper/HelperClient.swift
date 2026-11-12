@@ -58,8 +58,8 @@ final class HelperClient: @unchecked Sendable {
         return result
     }
 
-    func allMetrics(timeout: Double = 15) -> [Int32: PrivMetrics]? {
-        guard let data = call({ p, done in p.allMetrics { done($0) } }, timeout: timeout) as Data?,
+    func allMetrics(extras: ExtraReads = [], timeout: Double = 15) -> [Int32: PrivMetrics]? {
+        guard let data = call({ p, done in p.allMetrics(extras: extras.rawValue) { done($0) } }, timeout: timeout) as Data?,
               let list = try? JSONDecoder().decode([PrivMetrics].self, from: data) else { return nil }
         return Dictionary(list.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
     }
