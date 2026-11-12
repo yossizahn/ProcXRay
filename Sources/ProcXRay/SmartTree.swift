@@ -52,13 +52,21 @@ enum SmartTree {
     private static let unitBase = -(1 << 40)
     private static let categoryBase = -(1 << 41)
     private static let groupBase = -(1 << 42)
+    /// Rows inside a unit (role groups, terminals, jobs): the unit's root pid times 2^24 plus a hash.
+    private static let roleBase = -(1 << 43)
 
     static func unitID(_ pid: pid_t) -> Int { unitBase - Int(pid) }
     static func categoryID(_ c: ProcCategory) -> Int { categoryBase - c.rawValue }
     static func groupID(_ c: ProcCategory, _ key: String) -> Int {
+        groupBase - (c.rawValue << 32) - Int(fnv(key))
+    }
+    static func roleID(_ root: pid_t, _ key: String) -> Int {
+        roleBase - (Int(root) << 24) - Int(fnv(key) & 0xFF_FFFF)
+    }
+    private static func fnv(_ key: String) -> UInt32 {
         var h: UInt32 = 2_166_136_261   // FNV-1a: deterministic, unlike hashValue
         for b in key.utf8 { h = (h ^ UInt32(b)) &* 16_777_619 }
-        return groupBase - (c.rawValue << 32) - Int(h)
+        return h
     }
 
     /// The process a row stands for: its own pid, or the root of a unit row. nil for other group rows.
@@ -102,6 +110,102 @@ enum SmartTree {
         case .thirdPartyServices: return p.launchdDomain == "system" || p.uid == 0 ? "Daemons" : "Agents"
         default: return nil
         }
+    }
+
+    // MARK: Roles inside a unit
+
+    /// What a helper does for its app, from its bundle name, executable and process type.
+    static func role(of p: ProcInfo) -> ProcRole {
+        if isExtension(p) { return .extensions }
+        let name = p.name
+        if name.hasPrefix("com.apple.WebKit.") { return .webContent }
+        switch p.processType {
+        case "renderer": return .renderers
+        case "tab": return .contentProcesses
+        case "gpu-process", "gpu": return .gpu
+        case "network", "socket": return .network
+        case .some: return .utility   // utility, rdd, plugin, gmplugin, …
+        case nil: break
+        }
+        // argv unreadable (another user's process): the helper bundle's suffix still says most of it.
+        if name.hasSuffix("(Renderer)") { return .renderers }
+        if name.hasSuffix("(GPU)") || name.hasSuffix(" GPU Helper") { return .gpu }
+        if name.hasSuffix("(Plugin)") { return .utility }
+        if name == "plugin-container" { return .contentProcesses }
+        if p.path?.contains("/XPCServices/") == true { return .xpcServices }
+        return .helpers
+    }
+
+    /// The members directly under a unit's root, grouped by role. A role group is made only when it would
+    /// hold two or more processes, and not when every member would land in the same one (it would only
+    /// add a level). Terminal sessions (`sessionRoots`, from anywhere in the unit) are grouped by tty, then
+    /// by process group, so a pipeline is one row.
+    static func roleGroups(_ root: pid_t, direct: [ProcInfo], sessionRoots: [ProcInfo], kids: [pid_t: [ProcInfo]],
+                           node: (ProcInfo) -> ProcNode) -> [ProcNode] {
+        var byRole: [ProcRole: [ProcInfo]] = [:]
+        for d in direct { byRole[role(of: d), default: []].append(d) }
+        var out: [ProcNode] = []
+
+        // A session holds the terminal's process and everything under it, tty or not (a job that
+        // detached from the terminal still belongs to the session that started it).
+        func subtree(_ p: ProcInfo, _ depth: Int) -> [ProcInfo] {
+            [p] + (depth < 64 ? (kids[p.pid] ?? []).flatMap { subtree($0, depth + 1) } : [])
+        }
+        let sessions = Dictionary(grouping: sessionRoots) { $0.tty! }.mapValues { $0.flatMap { subtree($0, 0) } }
+        let sessionCount = sessions.values.reduce(0) { $0 + $1.count }
+        if sessionCount >= 2 {
+            var ttys: [ProcNode] = []
+            for (tty, ps) in sessions {
+                var rows: [ProcNode] = []
+                for (pgid, members) in Dictionary(grouping: ps, by: \.pgid) {
+                    let ordered = members.sorted { $0.pid < $1.pid }
+                    var row: ProcNode
+                    if ordered.count == 1 {
+                        row = ProcNode(id: Int(ordered[0].pid), proc: ordered[0], title: ordered[0].name)
+                    } else {
+                        row = ProcNode(id: roleID(root, "job\(tty):\(pgid)"), proc: nil, title: "job \(pgid)",
+                                       subtitle: ordered.map(\.name).joined(separator: " | "),
+                                       children: ordered.map { ProcNode(id: Int($0.pid), proc: $0, title: $0.name) })
+                        row.kind = .group
+                    }
+                    row.fixedOrder = Int(pgid)   // the shell first, then its jobs in the order they started
+                    rows.append(row)
+                }
+                // A terminal running just its shell needs no row of its own; the Context column names the tty.
+                if rows.count == 1, var only = rows.first, only.proc != nil {
+                    only.fixedOrder = Int(tty)   // in tty order with the terminals that have rows
+                    ttys.append(only)
+                    continue
+                }
+                var t = ProcNode(id: roleID(root, "tty\(tty)"), proc: nil, title: ttyName(tty), children: rows)
+                t.kind = .group
+                t.fixedOrder = Int(tty)
+                ttys.append(t)
+            }
+            var g = ProcNode(id: roleID(root, "role\(ProcRole.terminalSessions.rawValue)"), proc: nil,
+                             title: ProcRole.terminalSessions.title, children: ttys)
+            g.kind = .group
+            g.fixedOrder = 1 + ProcRole.terminalSessions.rawValue
+            out.append(g)
+        } else {
+            out += sessionRoots.map(node)
+        }
+
+        let onlyOneRole = byRole.count == 1 && sessionCount < 2
+        for (r, ps) in byRole {
+            guard ps.count >= 2, !onlyOneRole else { out += ps.map(node); continue }
+            var g = ProcNode(id: roleID(root, "role\(r.rawValue)"), proc: nil, title: r.title, children: ps.map(node))
+            g.kind = .group
+            g.fixedOrder = 1 + r.rawValue
+            g.startsCollapsed = true
+            out.append(g)
+        }
+        return out
+    }
+
+    static func ttyName(_ tty: Int32) -> String {
+        guard let c = devname(dev_t(tty), mode_t(S_IFCHR)) else { return "tty \(tty)" }
+        return String(cString: c)
     }
 
     // MARK: Build
@@ -157,8 +261,12 @@ enum SmartTree {
         func unitNode(_ rootPid: pid_t, _ ms: [ProcInfo]) -> ProcNode {
             let rootProc = procs[rootPid]!
             var kids: [pid_t: [ProcInfo]] = [:]
+            // Where a terminal session starts: a member on a tty whose parent isn't on that tty. Wherever it
+            // sits in the unit (a shell under an Electron app's pty helper, say), it moves to Terminal sessions.
+            var sessionRoots: [ProcInfo] = []
             for m in ms where m.pid != rootPid {
                 let par = m.ppid != m.pid && rootOf[m.ppid] == rootPid && procs[m.ppid] != nil ? m.ppid : rootPid
+                if let t = m.tty, procs[par]?.tty != t { sessionRoots.append(m); continue }
                 kids[par, default: []].append(m)
             }
             func node(_ p: ProcInfo, depth: Int) -> ProcNode {
@@ -166,9 +274,15 @@ enum SmartTree {
                 return ProcNode(id: Int(p.pid), proc: p, title: p.name, children: c.isEmpty ? nil : c)
             }
             guard ms.count > 1 else { return node(rootProc, depth: 0) }
+            // Too few for a Terminal sessions group: back where they were.
+            if sessionRoots.count == 1, (kids[sessionRoots[0].pid] ?? []).isEmpty {
+                let m = sessionRoots.removeFirst()
+                let par = m.ppid != m.pid && rootOf[m.ppid] == rootPid && procs[m.ppid] != nil ? m.ppid : rootPid
+                kids[par, default: []].append(m)
+            }
             var leaf = ProcNode(id: Int(rootPid), proc: rootProc, title: rootProc.name)
             leaf.fixedOrder = 0   // the app's own process stays at the top of its unit
-            let rest = (kids[rootPid] ?? []).map { node($0, depth: 1) }
+            let rest = roleGroups(rootPid, direct: kids[rootPid] ?? [], sessionRoots: sessionRoots, kids: kids) { node($0, depth: 1) }
             var u = ProcNode(id: unitID(rootPid), proc: nil, title: rootProc.lsAppName ?? rootProc.name,
                              children: [leaf] + rest)
             u.kind = .unit
@@ -281,4 +395,69 @@ enum ExtensionInfo {
     ]
 
     static func title(_ point: String) -> String { titles[point] ?? point }
+}
+
+/// Role of a helper inside its app's unit, in display order.
+enum ProcRole: Int, CaseIterable, Sendable {
+    case renderers, contentProcesses, webContent, gpu, network, utility, extensions, xpcServices, terminalSessions, helpers
+
+    var title: String {
+        switch self {
+        case .renderers: "Renderers"
+        case .contentProcesses: "Content processes"
+        case .webContent: "Web content"
+        case .gpu: "GPU"
+        case .network: "Network"
+        case .utility: "Utility"
+        case .extensions: "Extensions"
+        case .xpcServices: "XPC services"
+        case .terminalSessions: "Terminal sessions"
+        case .helpers: "Helpers"
+        }
+    }
+}
+
+/// Chromium, Electron and Firefox helpers say what they are in argv. Read once per process (argv is
+/// fixed until an exec, which a helper doesn't do) and only for executables that look like such helpers.
+enum ProcessType {
+    nonisolated(unsafe) private static var cache: [String: String?] = [:]
+    private static let lock = NSLock()
+
+    static func isCandidate(_ p: ProcInfo) -> Bool {
+        let n = p.name
+        return n == "plugin-container" || n.hasSuffix(" Helper") || n.contains(" Helper (")
+    }
+
+    static func read(_ p: ProcInfo) -> String? {
+        guard isCandidate(p) else { return nil }
+        lock.lock()
+        if let hit = cache[p.key] { lock.unlock(); return hit }
+        lock.unlock()
+        guard let args = Native.argsEnv(p.pid)?.args else { return nil }   // not cached: the helper may come later
+        let t = parse(args, firefox: p.name == "plugin-container")
+        lock.lock(); cache[p.key] = .some(t); lock.unlock()
+        return t
+    }
+
+    static func parse(_ args: [String], firefox: Bool) -> String? {
+        if firefox {
+            // `plugin-container … <type>`: the last argument, a bare word.
+            guard let last = args.last, !last.hasPrefix("-"), last.count <= 24,
+                  last.allSatisfy({ $0.isLetter || $0 == "_" }) else { return nil }
+            return last
+        }
+        guard let t = args.first(where: { $0.hasPrefix("--type=") })?.dropFirst(7) else { return nil }
+        if t == "utility", let sub = args.first(where: { $0.hasPrefix("--utility-sub-type=") }),
+           sub.contains("network.mojom.NetworkService") {
+            return "network"
+        }
+        return String(t)
+    }
+
+    /// Forgets processes that are gone.
+    static func prune(keeping live: Set<String>) {
+        lock.lock(); defer { lock.unlock() }
+        guard cache.count > live.count + 64 else { return }
+        cache = cache.filter { live.contains($0.key) }
+    }
 }

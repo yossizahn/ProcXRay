@@ -648,6 +648,7 @@ struct ProcessOutline: NSViewRepresentable {
             var parts: [String] = []
             if let app = p.containingAppName { parts.append("in \(app)") }
             if let e = p.extensionPoint { parts.append("extension: \(ExtensionInfo.title(e))") }
+            if let t = p.tty { parts.append(SmartTree.ttyName(t)) }
             if let l = p.launchdLabel { parts.append("launchd: \(l)") }
             if let a = p.lsAppName { parts.append("LS: \(a)") }
             if !p.lsTags.isEmpty { parts.append(p.lsTags.joined(separator: " ")) }

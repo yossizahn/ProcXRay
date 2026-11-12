@@ -293,6 +293,23 @@ enum SelfTest {
                     print("  \(c.title): \(c.unitCount) top-level, \(c.totalCount) procs, \(Fmt.pct(c.cpuKey)) %, \(Fmt.bytes(c.memKey))"
                           + (subs.isEmpty ? "" : " — " + subs.joined(separator: ", ")))
                 }
+                // Role groups inside units: the units with any, and their shape.
+                func units(_ n: ProcNode) -> [ProcNode] { n.kind == .unit ? [n] : (n.children ?? []).flatMap(units) }
+                func shape(_ n: ProcNode, _ depth: Int) -> [String] {
+                    guard n.proc == nil, depth < 6 else { return [] }
+                    let line = String(repeating: "  ", count: depth) + "\(n.title) (\(n.totalCount))" + (n.subtitle.isEmpty ? "" : " — \(n.subtitle)")
+                    return [line] + (n.children ?? []).flatMap { shape($0, depth + 1) }
+                }
+                for u in roots.flatMap(units) where (u.children ?? []).contains(where: { $0.proc == nil }) {
+                    let lone = (u.children ?? []).filter { $0.proc != nil }.count
+                    print(shape(u, 2).joined(separator: "\n") + "  [\(lone) rows directly under it]")
+                    if ProcessInfo.processInfo.environment["DUMP_ROLES"] != nil {
+                        for g in u.children ?? [] where g.proc == nil {
+                            let names = Dictionary(grouping: g.children ?? [], by: { $0.title }).map { "\($0.key)×\($0.value.count)" }
+                            print("      \(g.title): \(names.sorted().joined(separator: ", "))")
+                        }
+                    }
+                }
                 let other = roots.first { $0.category == .other }?.children ?? []
                 if !other.isEmpty { print("  other: \(other.prefix(8).map { "\($0.title)(\($0.proc?.path ?? "-"))" })") }
             }
