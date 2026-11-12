@@ -258,6 +258,8 @@ struct OverviewTab: View {
     /// Switches the inspector to another tab (the Related strip's counts lead to Origin).
     let show: (InspectorTab) -> Void
     @State private var cwd: (key: String, path: String?)?
+    /// Arguments and environment, for the process `key` (nil: not readable).
+    @State private var args: (key: String, value: Native.ArgsEnv?)?
 
     var body: some View {
         let p = proc
@@ -292,6 +294,7 @@ struct OverviewTab: View {
                     }
                     .controlSize(.small)
                 }
+                command(p)
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -301,12 +304,50 @@ struct OverviewTab: View {
             guard !exited else { return }
             let pid = p.pid, start = p.start, key = p.key
             let helper = store.helperState.isRunning
-            let c = await Task.detached { () -> String? in
-                let c = Native.cwd(pid) ?? (helper ? HelperClient.shared.argsEnv(pid)?.cwd : nil)
-                return Native.isSame(pid, start: start) ? c : nil
+            let (c, a) = await Task.detached { () -> (String?, Native.ArgsEnv?) in
+                var c = Native.cwd(pid)
+                var a = Native.argsEnv(pid)
+                // The helper (root) only for what couldn't be read locally: another user's process.
+                if helper, c == nil || a == nil, let r = HelperClient.shared.argsEnv(pid) {
+                    c = c ?? r.cwd
+                    a = a ?? Native.ArgsEnv(execPath: r.execPath, args: r.args, env: r.env)
+                }
+                return Native.isSame(pid, start: start) ? (c, a) : (nil, nil)
             }.value
             guard !Task.isCancelled else { return }
             cwd = (key, c)
+            args = (key, a)
+        }
+    }
+
+    /// The command line it was started with and its environment, collapsed.
+    @ViewBuilder private func command(_ p: ProcInfo) -> some View {
+        let loaded = args?.key == p.key ? args : nil
+        Collapsible(title: "Command" + (loaded?.value.map { " (\($0.args.count) arguments, \($0.env.count) environment variables)" } ?? ""),
+                    startsOpen: false) {
+            if let a = loaded?.value {
+                VStack(alignment: .leading, spacing: 6) {
+                    Collapsible(title: "Arguments (\(a.args.count))", startsOpen: a.args.count <= 6) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(Array(a.args.enumerated()), id: \.offset) { i, s in
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text("[\(i)]").foregroundStyle(.secondary).monospacedDigit()
+                                    Text(s).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                                }
+                            }
+                        }
+                    }
+                    Collapsible(title: "Environment (\(a.env.count))", startsOpen: false) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(a.env.sorted(), id: \.self) { Text($0).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
+                        }
+                    }
+                }
+            } else {
+                Text(exited && loaded == nil ? "The process has exited; its arguments can't be read any more."
+                     : loaded != nil ? "Not readable (another user's process; the privileged helper can read it)." : "Reading…")
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -555,8 +596,6 @@ struct OriginTab: View {
     @State private var loadedKey: String?
     @State private var job: (title: String, text: String)?
     @State private var procinfo: (title: String, text: String)?
-    @State private var args: Native.ArgsEnv?
-    @State private var argsLoaded = false
 
     var body: some View {
         let p = proc
@@ -572,7 +611,6 @@ struct OriginTab: View {
                     if let rp = store.responsibleProcess(p) { ProcessChip(proc: rp) }
                     else { Text(store.responsibleDescription(p)).foregroundStyle(.secondary).textSelection(.enabled) }
                 }
-                command(p)
                 relations(p)
             }
             .padding(10)
@@ -581,21 +619,17 @@ struct OriginTab: View {
         // Reload when the process registers with LaunchServices or launchd, execs, or on a manual refresh.
         .task(id: "\(p.codeKey)|\(p.launchdLabel ?? "")|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
             guard !exited else { return }   // keep what was shown; the pid may be someone else's now
-            if loadedKey != p.key { job = nil; procinfo = nil; args = nil; argsLoaded = false }
-            let label = p.launchdLabel, pid = p.pid, start = p.start, key = p.key
+            if loadedKey != p.key { job = nil; procinfo = nil }
+            let label = p.launchdLabel, pid = p.pid, key = p.key
             let helper = store.helperState.isRunning
-            let (j, pi, a) = await Task.detached { () -> ((String, String)?, (String, String)?, Native.ArgsEnv?) in
+            let (j, pi) = await Task.detached { () -> ((String, String)?, (String, String)?) in
                 let j = label.map { ("launchctl print \($0)", Launchd.printJob($0)) }
                 let pi = helper ? ("launchctl procinfo \(pid) (as root via helper)",
                                    HelperClient.shared.run(.launchctlProcinfo, pid: pid) ?? "helper did not answer") : nil
-                let a: Native.ArgsEnv? = Native.argsEnv(pid) ?? {
-                    guard helper, let r = HelperClient.shared.argsEnv(pid) else { return nil }
-                    return Native.ArgsEnv(execPath: r.execPath, args: r.args, env: r.env)
-                }()
-                return (j, pi, Native.isSame(pid, start: start) ? a : nil)
+                return (j, pi)
             }.value
             guard !Task.isCancelled else { return }
-            job = j; procinfo = pi; args = a; argsLoaded = true; loadedKey = key
+            job = j; procinfo = pi; loadedKey = key
         }
     }
 
@@ -687,33 +721,6 @@ struct OriginTab: View {
             out.append(par); seen.insert(par.pid); cur = par
         }
         return out
-    }
-
-    // 5. Command: argv, environment and working directory, collapsed.
-    @ViewBuilder private func command(_ p: ProcInfo) -> some View {
-        Card(title: "Command", systemImage: "terminal") {
-            if let a = args {
-                Collapsible(title: "Arguments (\(a.args.count))", startsOpen: a.args.count <= 6) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(a.args.enumerated()), id: \.offset) { i, s in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text("[\(i)]").foregroundStyle(.secondary).monospacedDigit()
-                                Text(s).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                            }
-                        }
-                    }
-                }
-                Collapsible(title: "Environment (\(a.env.count))", startsOpen: false) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(a.env.sorted(), id: \.self) { Text($0).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
-                    }
-                }
-            } else {
-                Text(exited ? "The process has exited; its arguments can't be read any more."
-                     : argsLoaded ? "Arguments not readable (another user's process; the helper can read them)." : "Reading…")
-                    .foregroundStyle(.secondary)
-            }
-        }
     }
 
     // Below the chain: who is related to it, the other way round.

@@ -456,8 +456,8 @@ A fixed header above six tabs.
 
 | New tab | Replaces | Question it answers |
 |---|---|---|
-| Overview | top of General | What is this? |
-| Origin | Lineage, launchd / LS, Args & Env | Why is it running, and who does it belong to? |
+| Overview | top of General, Args & Env | What is this? |
+| Origin | Lineage, launchd / LS | Why is it running, and who does it belong to? |
 | Trust | Signature, Entitlements | What is it allowed to do? |
 | Resources | rest of General, Memory Map | What is it costing me? |
 | Connections | Files & Sockets | What is it talking to and touching? |
@@ -491,7 +491,7 @@ A vertical chain read top to bottom, each step a card with a link:
 2. **Launched by**: the launchd job: label, domain, plist path with a Reveal button, `RunAtLoad`, `KeepAlive`, last exit status. For a LaunchServices app: launched by the user, with the LS record. For an extension: the extension point, the host daemon (pid-domain owner) and the containing app.
 3. **Parent chain**: the existing ancestors list, as chips.
 4. **Responsible**: the responsible process, or the Left Behind explanation.
-5. **Command**: argv, environment and working directory, collapsed by default (the current `ArgsEnvView`).
+5. ~~**Command**~~: moved to Overview (decided 2026-11-12): the command line and environment say what the process is, not why it runs. Overview ends with a collapsed Command section, beside the path and working directory it already shows.
 
 Below the chain, the reverse relations as collapsible lists, as Lineage has now: children, processes this one is responsible for, same resource coalition, same jetsam coalition. Added: same bundle, same binary (same `cdhash`), and for a host daemon, the extensions running in its pid domain.
 
