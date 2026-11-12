@@ -89,6 +89,28 @@ final class HelperClient: @unchecked Sendable {
         return out
     }
 
+    /// The machine's Mach port links (see MachSnapshot). Its own connection, like `run`, so a closed tab
+    /// stops lsmp in the helper.
+    func machPorts(timeout: Double = 60) -> Swift.Result<MachSnapshot, MachLoader.Failure> {
+        let cancel = Shell.Cancel.current
+        let c = makeConnection()
+        defer { c.invalidate() }
+        let lock = NSLock()
+        var out: (Data?, String?) = (nil, "the helper did not answer")
+        let sem = DispatchSemaphore(value: 0)
+        guard let p = c.remoteObjectProxyWithErrorHandler({ e in
+            lock.lock(); out = (nil, "helper: \(e.localizedDescription)"); lock.unlock(); sem.signal()
+        }) as? HelperProtocol else { return .failure(.init(message: "no helper connection")) }
+        p.machPorts { d, e in lock.lock(); out = (d, e); lock.unlock(); sem.signal() }
+        let deadline = DispatchTime.now() + timeout
+        while sem.wait(timeout: .now() + 0.1) == .timedOut {
+            if cancel?.isCancelled == true || DispatchTime.now() >= deadline { break }
+        }
+        lock.lock(); defer { lock.unlock() }
+        if let d = out.0, let s = try? JSONDecoder().decode(MachSnapshot.self, from: d) { return .success(s) }
+        return .failure(.init(message: out.1 ?? "unreadable reply from the helper"))
+    }
+
     // MARK: plumbing
 
     private func call<T>(_ body: (HelperProtocol, @escaping (T) -> Void) -> Void, timeout: Double = 15) -> T? {

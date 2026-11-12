@@ -206,6 +206,12 @@ extension LsofEntry.Kind: Identifiable {
         case .pipe: .orange
         case .device: .gray
         case .kernel: .brown
+        case .xpc: .pink
+        case .mach: .mint
+        case .iokit: .yellow
+        case .sharedMemory: Color(hue: 0.8, saturation: 0.45, brightness: 0.8)
+        case .taskPort: .red
+        case .kobject: Color(white: 0.55)
         }
     }
 }
@@ -254,6 +260,15 @@ struct PeerInfo {
         }
     }
 
+    /// Rows LsofView adds that aren't descriptors: their other end is a pid kept in `node`, if any.
+    static let linkedKinds: Set<LsofEntry.Kind> = [.xpc, .mach, .iokit, .sharedMemory, .taskPort, .kobject]
+
+    /// An XPC, Mach or kernel object row's other end; needs no lsof run.
+    static func linked(_ e: LsofEntry) -> PeerInfo? {
+        guard linkedKinds.contains(e.kind), let p = Int32(e.node) else { return nil }
+        return PeerInfo(relation: .otherEnd, ends: [.init(pid: p, fd: "")])
+    }
+
     /// Distinct pids, in the order found.
     var pids: [Int32] {
         var seen: Set<Int32> = []
@@ -273,6 +288,8 @@ struct LsofView: View {
     @State private var loading = false
     @State private var locations: Set<String> = []
     @AppStorage("connections.view") private var view = "Table"
+    @State private var mach: MachLoader.Result?
+    @State private var machLoading = false
 
     var body: some View {
         let bundle = store.procs[pid]?.bundlePath
@@ -280,7 +297,8 @@ struct LsofView: View {
             var e = e
             e.location = FileLocation.of(e, ownBundle: bundle)
             return e
-        }
+        } + xpcEntries + machEntries + kernelEntries
+        let resolved = peers(entries)
         let counts = Dictionary(grouping: entries, by: \.kind).mapValues(\.count)
         let locCounts = Dictionary(grouping: entries.filter { !$0.location.isEmpty }, by: \.location).mapValues(\.count)
         let rows = entries.filter {
@@ -331,8 +349,9 @@ struct LsofView: View {
             .padding(.horizontal, 8).padding(.bottom, 4)
             if !locCounts.isEmpty { locationChips(locCounts) }
             peerStatus.padding(.horizontal, 8).padding(.bottom, 4)
+            machStatus.padding(.horizontal, 8).padding(.bottom, 4)
             if view == "Graph" {
-                PeerGraph(center: pid, entries: entries, resolved: resolved).environment(store)
+                PeerGraph(center: pid, entries: entries, resolved: resolved, mach: machSnapshot).environment(store)
             } else {
             Table(rows, sortOrder: $sort) {
                 TableColumn("FD", value: \.fdSort) { e in
@@ -366,10 +385,117 @@ struct LsofView: View {
         }
         // The view is rebuilt for every lsof run (CommandTab's generation), so Re-run resolves again too.
         .task { await loadIndex(fresh: false) }
+        .task { await loadMach(fresh: false) }
+    }
+
+    /// XPC links from launchd pid domains, as rows beside the descriptors: the process hosting this one
+    /// (an app for its XPC service, a host daemon for its extension), and the services this one hosts. Not
+    /// from lsof, so they show without the all-process run. Negative ids keep them apart from lsof's rows.
+    private var xpcEntries: [LsofEntry] {
+        guard let me = store.procs[pid] else { return [] }
+        func row(_ n: Int, type: String, name: String, peer: Int32) -> LsofEntry {
+            LsofEntry(id: -1 - n, fd: "", mode: "", type: type, device: "", sizeOff: "", node: "\(peer)", name: name, kind: .xpc)
+        }
+        var out: [LsofEntry] = []
+        if let o = me.domainOwner, o != pid, store.procs[o] != nil {
+            out.append(row(0, type: "XPC host", name: me.launchdLabel ?? "runs in its pid domain", peer: o))
+        }
+        let hosted = store.procs.values.filter { $0.domainOwner == pid && $0.pid != pid }.sorted { $0.pid < $1.pid }
+        for (i, p) in hosted.enumerated() {
+            out.append(row(i + 1, type: SmartTree.isExtension(p) ? "XPC extension" : "XPC service",
+                           name: p.launchdLabel ?? p.name, peer: p.pid))
+        }
+        return out
+    }
+
+    private var machSnapshot: MachSnapshot? {
+        if case .snapshot(let s) = mach { s } else { nil }
+    }
+
+    /// One row per process this one shares Mach ports with (MachSnapshot.peers). Ids below the XPC rows'.
+    private var machEntries: [LsofEntry] {
+        guard let s = machSnapshot else { return [] }
+        return s.peers(of: pid).enumerated().map { i, m in
+            var m = m
+            if m.sendsTo > 0, let p = store.procs[m.pid] { m.services = LaunchdServices.names(of: p) }
+            return LsofEntry(id: -1_000_000 - i, fd: "", mode: "", type: m.direction, device: "", sizeOff: "",
+                             node: "\(m.pid)", name: m.summary, kind: .mach)
+        }
+    }
+
+    /// Kernel objects this process holds rights to, from the same snapshot: IOKit connections by user client
+    /// class, memory entries shared with few other processes, task ports of other processes (and who holds
+    /// this one's), and a count of everything else by type.
+    private var kernelEntries: [LsofEntry] {
+        guard let s = machSnapshot else { return [] }
+        var out: [LsofEntry] = []
+        func add(_ type: String, _ name: String, peer: Int32? = nil, _ kind: LsofEntry.Kind) {
+            out.append(LsofEntry(id: -2_000_000 - out.count, fd: "", mode: "", type: type, device: "", sizeOff: "",
+                                 node: peer.map { "\($0)" } ?? "", name: name, kind: kind))
+        }
+        func times(_ n: Int) -> String { n > 1 ? " ×\(n)" : "" }
+        for (cls, n) in (s.iokit[pid] ?? [:]).sorted(by: { ($0.value, $1.key) > ($1.value, $0.key) }) {
+            add("IOKit", cls + times(n), .iokit)
+        }
+        for m in s.sharedMemory(of: pid) {
+            add("Memory", "\(m.entries) memory entr\(m.entries == 1 ? "y" : "ies")"
+                + (m.bytes > 0 ? ", \(Fmt.bytes(m.bytes))" : "") + (m.holders > 2 ? " · held by \(m.holders) processes" : ""),
+                peer: m.pid, .sharedMemory)
+        }
+        if let w = s.widelyShared[pid] {
+            add("Memory", "\(w) memory entr\(w == 1 ? "y" : "ies") held by more than \(MachSnapshot.fewHolders) processes", .sharedMemory)
+        }
+        for t in s.taskRights where t.holder == pid { add("Task →", "its \(t.flavor) port", peer: t.target, .taskPort) }
+        for t in s.taskRights where t.target == pid { add("Task ←", "holds our \(t.flavor) port", peer: t.holder, .taskPort) }
+        for (type, n) in (s.kernelObjects[pid] ?? [:]).sorted(by: { ($0.value, $1.key) > ($1.value, $0.key) }) {
+            add("Object", type + times(n), .kobject)
+        }
+        return out
+    }
+
+    /// lsof's resolved other ends, plus each XPC and Mach row's.
+    private func peers(_ entries: [LsofEntry]) -> [Int: PeerInfo] {
+        var r = resolved
+        for e in entries where PeerInfo.linkedKinds.contains(e.kind) { r[e.id] = PeerInfo.linked(e) }
+        return r
+    }
+
+    private func loadMach(fresh: Bool) async {
+        guard store.helperState.isRunning else { mach = .unavailable("Mach ports need the helper: install it to see them."); return }
+        machLoading = true
+        // The MachServices plists are read here too, once, off the main thread.
+        let r = await Task.detached { _ = LaunchdServices.byLabel; return MachLoader.load(fresh: fresh) }.value
+        guard !Task.isCancelled else { return }
+        mach = r
+        machLoading = false
+    }
+
+    private var machStatus: some View {
+        HStack(spacing: 6) {
+            switch mach {
+            case .snapshot(let s)?:
+                let peers = s.peers(of: pid)
+                let common = peers.filter(\.common).count
+                let queued = peers.reduce(0) { $0 + $1.queuedHere }
+                Text("Mach ports: \(peers.count) processes\(common > 0 ? ", \(common) of them common services" : "")\(queued > 0 ? " · \(queued) message\(queued == 1 ? "" : "s") queued here" : "") · snapshot of \(s.processCount) processes at \(s.at.formatted(date: .omitted, time: .standard))")
+                    .help("From lsmp, as root: which processes can send to which. A right to a port means \"can talk\", not traffic. Common services are peers at least \(Int(MachSnapshot.commonShare * 100)) % of processes can send to; the graph leaves them out.")
+            case .unavailable(let why)?:
+                Text(why)
+            case nil:
+                Text("Reading Mach ports…")
+            }
+            if machLoading { ProgressView().controlSize(.mini) }
+            Spacer(minLength: 0)
+            Button("Refresh Mach") { Task { await loadMach(fresh: true) } }
+                .controlSize(.small).disabled(machLoading || !store.helperState.isRunning)
+                .help("Take a new Mach port snapshot (about 3 s of work for the helper)")
+        }
+        .font(.caption).foregroundStyle(.secondary)
+        .frame(height: 18)
     }
 
     private func peerMatches(_ e: LsofEntry, _ f: String) -> Bool {
-        guard let info = resolved[e.id] else { return false }
+        guard let info = resolved[e.id] ?? PeerInfo.linked(e) else { return false }
         return info.pids.contains { store.procs[$0]?.name.localizedCaseInsensitiveContains(f) == true || "\($0)" == f }
     }
 
@@ -404,7 +530,7 @@ struct LsofView: View {
                 Text("Graph").tag("Graph")
             }
             .pickerStyle(.segmented).labelsHidden().fixedSize().controlSize(.small)
-            .help("Graph: this process in the middle and the processes on the other end of its pipes and sockets around it")
+            .help("Graph: this process in the middle and the processes on the other end of its pipes and sockets around it, plus its XPC host and the XPC services it hosts (dashed)")
             Button("Refresh") { Task { await loadIndex(fresh: true) } }
                 .controlSize(.small).disabled(loading)
                 .help("Run lsof over every process again")
@@ -536,6 +662,7 @@ struct LsofView: View {
                 }
             default:
                 Text(e.name.isEmpty ? "—" : e.name).foregroundStyle(.secondary).lineLimit(1)
+                    .help(e.name)
             }
         }
     }
@@ -1266,20 +1393,42 @@ enum FileLocation {
 // MARK: - Peer graph
 
 /// This process in the middle, the processes on the other end of its pipes, unix sockets and TCP
-/// connections around it, one edge each, labelled with how many of each kind.
+/// connections around it, one edge each, labelled with how many of each kind. XPC links (the `.xpc` rows
+/// from LsofView.xpcEntries) are drawn dashed: a registration means "can talk", not an open connection.
 struct PeerGraph: View {
     @Environment(Store.self) private var store
     let center: Int32
     let entries: [LsofEntry]
     let resolved: [Int: PeerInfo]
+    /// To leave out common services (MachSnapshot.isCommon) the center only shares Mach ports with.
+    var mach: MachSnapshot?
     private let maxPeers = 24
 
     private struct Peer: Identifiable {
         let id: Int32
         var kinds: [LsofEntry.Kind: Int] = [:]
-        var total: Int { kinds.values.reduce(0, +) }
+        /// "XPC host", "XPC service" or "XPC extension" when the two share a launchd pid domain link.
+        var xpc: String?
+        /// Mach ports shared, both directions.
+        var machPorts = 0
+        /// Task port flavors held, either way ("control", "read"…), and memory entries shared with few others.
+        var taskPorts: [String] = []
+        var sharedMemory = 0
+        /// Counts each Mach or XPC link once, so a peer with 40 ports doesn't outweigh real connections.
+        var total: Int { kinds.values.reduce(0, +) + (xpc == nil ? 0 : 1) + (machPorts > 0 ? 1 : 0) }
         var label: String {
-            LsofEntry.Kind.allCases.compactMap { k in kinds[k].map { "\(Self.short(k)) \($0)" } }.joined(separator: " · ")
+            ([xpc].compactMap { $0 } + LsofEntry.Kind.allCases.compactMap { k in kinds[k].map { "\(Self.short(k)) \($0)" } }
+             + taskPorts.map { "task \($0)" } + (sharedMemory > 0 ? ["shm \(sharedMemory)"] : [])
+             + (machPorts > 0 ? ["mach \(machPorts)"] : []))
+                .joined(separator: " · ")
+        }
+        /// No descriptor, only rights (XPC, Mach): "can talk", so the edge is dashed.
+        var canTalkOnly: Bool { kinds.isEmpty }
+        /// Which peers make the cut: open descriptors first, then XPC, then Mach ports by count.
+        var rank: (Int, Int, Int, Int, Int) { (kinds.values.reduce(0, +), xpc == nil ? 0 : 1, taskPorts.count, sharedMemory, machPorts) }
+        var edgeColor: Color {
+            !kinds.isEmpty ? main.color : xpc != nil ? LsofEntry.Kind.xpc.color : !taskPorts.isEmpty ? LsofEntry.Kind.taskPort.color
+                : sharedMemory > 0 ? LsofEntry.Kind.sharedMemory.color : LsofEntry.Kind.mach.color
         }
         var main: LsofEntry.Kind { kinds.max { $0.value < $1.value }?.key ?? .unix }
         static func short(_ k: LsofEntry.Kind) -> String {
@@ -1287,19 +1436,44 @@ struct PeerGraph: View {
         }
     }
 
-    private var peers: [Peer] {
+    /// The peers drawn, and how many common services were left out: a peer only linked by Mach ports that
+    /// most processes can send to (launchd, logd…) would be on every map.
+    private var peers: (shown: [Peer], commonHidden: Int) {
+        let machPeers = Dictionary((mach?.peers(of: center) ?? []).map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
         var by: [Int32: Peer] = [:]
         for e in entries {
             guard let info = resolved[e.id], info.relation != .alsoOpen else { continue }
+            if e.kind == .xpc {
+                for pid in info.pids where pid != center { by[pid, default: Peer(id: pid)].xpc = e.type }
+                continue
+            }
+            if e.kind == .mach {
+                guard let pid = info.pids.first, pid != center, let p = machPeers[pid] else { continue }
+                by[pid, default: Peer(id: pid)].machPorts = p.sendsTo + p.receivesFrom
+                continue
+            }
+            // Task ports and shared memory come from the snapshot below.
+            if PeerInfo.linkedKinds.contains(e.kind) { continue }
             for pid in info.pids where pid != center {
                 by[pid, default: Peer(id: pid)].kinds[e.kind, default: 0] += 1
             }
         }
-        return by.values.sorted { $0.total != $1.total ? $0.total > $1.total : $0.id < $1.id }
+        for t in mach?.taskRights ?? [] where t.holder == center || t.target == center {
+            // Its port held here: "task control"; ours held there: "task ← control".
+            let other = t.holder == center ? t.target : t.holder
+            guard other != center else { continue }
+            by[other, default: Peer(id: other)].taskPorts.append(t.holder == center ? t.flavor : "← \(t.flavor)")
+        }
+        for m in mach?.sharedMemory(of: center) ?? [] { by[m.pid, default: Peer(id: m.pid)].sharedMemory += m.entries }
+        let common = by.values.filter {
+            $0.kinds.isEmpty && $0.xpc == nil && $0.taskPorts.isEmpty && $0.sharedMemory == 0 && machPeers[$0.id]?.common == true
+        }.map(\.id)
+        for c in common { by[c] = nil }
+        return (by.values.sorted { $0.rank != $1.rank ? $0.rank > $1.rank : $0.id < $1.id }, common.count)
     }
 
     var body: some View {
-        let all = peers
+        let (all, commonHidden) = peers
         let shown = Array(all.prefix(maxPeers))
         GeometryReader { g in
             let mid = CGPoint(x: g.size.width / 2, y: g.size.height / 2)
@@ -1311,7 +1485,9 @@ struct PeerGraph: View {
             ZStack {
                 ForEach(Array(shown.enumerated()), id: \.element.id) { i, p in
                     Path { path in path.move(to: mid); path.addLine(to: spots[i]) }
-                        .stroke(p.main.color.opacity(0.55), lineWidth: min(1 + Double(p.total) / 2, 5))
+                        .stroke(p.edgeColor.opacity(p.canTalkOnly ? 0.75 : 0.55),
+                                style: StrokeStyle(lineWidth: p.canTalkOnly ? 1.5 : min(1 + Double(p.total) / 2, 5),
+                                                   dash: p.canTalkOnly ? [5, 3] : []))
                     Text(p.label)
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                         .padding(.horizontal, 3)
@@ -1322,15 +1498,18 @@ struct PeerGraph: View {
                     node(p.id).position(spots[i])
                 }
                 node(center).scaleEffect(1.15).position(mid)
-                if all.count > shown.count {
-                    Text("+\(all.count - shown.count) more, in the table").font(.caption).foregroundStyle(.secondary)
-                        .position(x: g.size.width - 90, y: g.size.height - 12)
+                let notes = (all.count > shown.count ? ["+\(all.count - shown.count) more"] : [])
+                    + (commonHidden > 0 ? ["\(commonHidden) common service\(commonHidden == 1 ? "" : "s") left out (Mach only), in the table"] : [])
+                if !notes.isEmpty {
+                    Text(notes.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize().frame(maxWidth: .infinity, alignment: .trailing).padding(.trailing, 10)
+                        .position(x: g.size.width / 2, y: g.size.height - 12)
                 }
                 if all.isEmpty {
                     let hidden = resolved.values.filter(\.unresolved).count
                     Text(resolved.isEmpty ? "Finding other ends…"
                          : hidden > 0 ? "\(hidden) other end\(hidden == 1 ? "" : "s") not visible: in processes lsof can't see from here."
-                         : "No other process on the end of its pipes or sockets.")
+                         : "No other process on the end of its pipes or sockets, and no XPC host or services.")
                         .foregroundStyle(.secondary).position(x: mid.x, y: mid.y + 40)
                 }
             }

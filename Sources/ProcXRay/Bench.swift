@@ -110,6 +110,14 @@ enum Bench {
         let pid = args.dropFirst().first.flatMap { Int32($0) } ?? 0
         let tools: [String: HelperTool] = ["lsof": .lsof, "vmmap": .vmmap, "sample": .sample,
                                            "procinfo": .launchctlProcinfo, "btm": .btmDump, "lsofall": .lsofAll]
+        if what == "mach" {
+            let t0 = Date()
+            switch c.machPorts() {
+            case .success(let s): machSummary(s, seconds: -t0.timeIntervalSinceNow, pids: args.dropFirst().compactMap { Int32($0) })
+            case .failure(let e): print("mach: \(e.message)")
+            }
+            return
+        }
         if what == "argsenv" {
             guard let r = c.argsEnv(pid) else { print("argsEnv: nil"); return }
             print("argsEnv: exec=\(r.execPath) args=\(r.args.count) env=\(r.env.count) cwd=\(r.cwd ?? "nil")")
@@ -117,6 +125,50 @@ enum Bench {
             let out = c.run(t, pid: pid) ?? "helper did not answer"
             print("\(what): \(out.utf8.count) bytes")
             print(out.prefix(400))
+        }
+    }
+
+    /// `ProcXRay --mach-file <lsmp.json> [pid…]`: pairs a saved `lsmp -a -j` file as the helper does.
+    static func machFile(_ args: [String]) {
+        guard let path = args.first, let data = FileManager.default.contents(atPath: path) else { print("no file"); return }
+        let t0 = Date()
+        guard let s = MachSnapshot.parse(data) else { print("not lsmp JSON"); return }
+        machSummary(s, seconds: -t0.timeIntervalSinceNow, pids: args.dropFirst().compactMap { Int32($0) })
+    }
+
+    static func machSummary(_ s: MachSnapshot, seconds: Double, pids: [Int32]) {
+        let pairs = Set(s.links.map { [min($0.from, $0.to), max($0.from, $0.to)] })
+        print(String(format: "mach: %d processes, %d directed links, %d pairs, %d ports, %d queued, %.2f s",
+                     s.processCount, s.links.count, pairs.count, s.links.reduce(0) { $0 + $1.ports },
+                     s.links.reduce(0) { $0 + $1.queued }, seconds))
+        let hubs = s.senders.filter { s.isCommon($0.key) }.sorted { $0.value > $1.value }
+        print("common services (≥ \(Int(MachSnapshot.commonShare * 100)) %): \(hubs.count): "
+              + hubs.prefix(12).map { "\(Native.process($0.key)?.comm ?? "\($0.key)") \(Int((s.share($0.key) * 100).rounded()))%" }.joined(separator: ", "))
+        var types: [String: Int] = [:]
+        for d in s.kernelObjects.values { for (t, n) in d { types[t, default: 0] += n } }
+        print("kernel objects: " + types.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+        var classes: [String: Int] = [:]
+        for d in s.iokit.values { for (c, n) in d { classes[c, default: 0] += n } }
+        print("iokit connections: \(classes.values.reduce(0, +)): " + classes.sorted { $0.value > $1.value }.prefix(6).map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+        let pairs2 = Set(s.sharedMemory.flatMap { m in m.holders.flatMap { a in m.holders.filter { $0 > a }.map { [a, $0] } } })
+        print("shared memory: \(s.sharedMemory.count) entries with ≤ \(MachSnapshot.fewHolders) holders (\(pairs2.count) pairs), \(s.widelyShared.count) processes hold widely shared ones; sized \(s.sharedMemory.filter { $0.bytes != nil }.count)")
+        var flavors: [String: Int] = [:]
+        for t in s.taskRights { flavors[t.flavor, default: 0] += 1 }
+        print("task ports of other processes: \(s.taskRights.count): \(flavors)")
+        for t in s.taskRights.filter({ $0.flavor == "control" }).prefix(8) {
+            print("  \(Native.process(t.holder)?.comm ?? "\(t.holder)") holds \(Native.process(t.target)?.comm ?? "\(t.target)")'s control port")
+        }
+        for pid in pids {
+            let ps = s.peers(of: pid)
+            print("pid \(pid): \(ps.count) peers, \(ps.filter(\.common).count) common")
+            for p in ps.prefix(15) {
+                var p = p
+                if let l = Launchd.otherDomains().first(where: { $0.pid == p.pid })?.label { p.services = LaunchdServices.byLabel[l] ?? [] }
+                print("  \(p.pid) \(Native.process(p.pid)?.comm ?? "?"): \(p.direction) · \(p.summary)")
+            }
+            print("  iokit: \(s.iokit[pid] ?? [:])")
+            print("  shared: \(s.sharedMemory(of: pid).prefix(5).map { "\($0.pid)×\($0.entries) \($0.bytes)B" })")
+            print("  kernel: \(s.kernelObjects[pid] ?? [:])")
         }
     }
 

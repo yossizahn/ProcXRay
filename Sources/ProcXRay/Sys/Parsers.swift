@@ -35,7 +35,12 @@ enum SizeText {
 struct LsofEntry: Identifiable, Hashable, Sendable {
     enum Kind: String, CaseIterable, Sendable {
         case image = "Mapped", file = "Files", dir = "Directories", tcp = "TCP", udp = "UDP",
-             unix = "Unix sockets", pipe = "Pipes", device = "Devices", kernel = "Kernel"
+             unix = "Unix sockets", pipe = "Pipes", device = "Devices", kernel = "Kernel",
+             /// Not from lsof: a launchd pid domain link (LsofView.xpcEntries), a Mach port link (machEntries).
+             xpc = "XPC", mach = "Mach ports",
+             /// Kernel objects from the same lsmp snapshot (MachSnapshot): driver connections, memory entries
+             /// shared with few processes, other processes' task ports, and everything else by type.
+             iokit = "IOKit", sharedMemory = "Shared memory", taskPort = "Task ports", kobject = "Kernel objects"
         var symbol: String {
             switch self {
             case .image: "memorychip"
@@ -47,6 +52,12 @@ struct LsofEntry: Identifiable, Hashable, Sendable {
             case .pipe: "arrow.left.arrow.right"
             case .device: "cpu"
             case .kernel: "gearshape.2"
+            case .xpc: "app.connected.to.app.below.fill"
+            case .mach: "envelope"
+            case .iokit: "externaldrive.connected.to.line.below"
+            case .sharedMemory: "square.on.square"
+            case .taskPort: "key"
+            case .kobject: "shippingbox"
             }
         }
     }

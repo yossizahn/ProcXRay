@@ -68,6 +68,10 @@ struct ProcXRayApp: App {
             Bench.peers(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--mach-file") {
+            Bench.machFile(Array(CommandLine.arguments[(i + 1)...]))
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--helper-call") {
             Bench.helperCall(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
