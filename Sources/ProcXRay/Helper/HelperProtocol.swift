@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 2
+    static let protocolVersion = 3
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -54,6 +54,29 @@ enum HelperConfig {
     func allMetrics(extras: Int, reply: @escaping (Data) -> Void)       // JSON [PrivMetrics]
     func argsEnv(pid: Int32, reply: @escaping (Data?) -> Void)          // JSON PrivArgsEnv
     func runTool(_ tool: Int, pid: Int32, reply: @escaping (String) -> Void)
+
+    /// Syscall trace of one process (kdebug through `ktrace trace`), at most one per connection. The trace
+    /// stops when the connection ends, so the app gives each trace a connection of its own.
+    /// Reply: nil when started, else why not.
+    func traceStart(pid: Int32, reply: @escaping (String?) -> Void)
+    /// Complete ndjson lines written since the last read (up to `SyscallTraceConfig.maxRead`), whether
+    /// ktrace is still running, and anything it wrote to stderr or the helper has to say (drops, exit).
+    func traceRead(reply: @escaping (Data, Bool, String) -> Void)
+    func traceStop(reply: @escaping () -> Void)
+}
+
+/// The one ktrace command line the helper runs for a trace.
+enum SyscallTraceConfig {
+    /// BSD syscalls (class 4, subclass 0x0c), Mach traps (1/0x0c) and VFS path lookups (3/0x01).
+    static let filter = "S0x040c,S0x010c,S0x0301"
+    /// A forgotten trace ends on its own.
+    static let maxSeconds = 15 * 60
+    static func argv(pid: Int32) -> (String, [String])? {
+        pid > 0 ? ("/usr/bin/ktrace", ["trace", "-p", "\(pid)", "-f", filter, "--ndjson", "-T", "\(maxSeconds)"]) : nil
+    }
+    /// Unread output the helper keeps; beyond it, output is dropped (and counted) until the app catches up.
+    static let maxPending = 32 << 20
+    static let maxRead = 4 << 20
 }
 
 /// Allowlisted tools; the helper builds the argv itself.

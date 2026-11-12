@@ -47,10 +47,13 @@ struct InspectorView: View {
                     toolTab(.lsof, auto: true, title: "lsof -n -P -p \(proc.pid)",
                             parse: LsofParser.parse, isEmpty: \.isEmpty) { [pid = proc.pid] in LsofView(entries: $0, filter: $1, pid: pid) }
                 case .activity:
-                    SubPanes(selection: $activityPane, names: ["Logs", "Sample"]) {
+                    SubPanes(selection: $activityPane, names: ["Logs", "Sample", "Syscalls"]) {
                         if activityPane == "Sample" {
                             toolTab(.sample, auto: false, title: "sample \(proc.pid) 1 (all thread stacks for 1s)",
                                     parse: SampleParser.parse, isEmpty: \.threads.isEmpty) { SampleView(report: $0, filter: $1) }
+                        } else if activityPane == "Syscalls" {
+                            // A new process gets a new tracer (and the old one's trace stops).
+                            SyscallTraceView(proc: proc, exited: exited).id(proc.key)
                         } else {
                             logs
                         }

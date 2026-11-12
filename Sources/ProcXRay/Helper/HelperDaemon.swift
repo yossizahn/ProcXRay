@@ -25,7 +25,11 @@ enum HelperDaemon {
             c.exportedObject = service
             q.sync { live += 1 }
             // The app drops a tool's connection when nobody waits for the result any more: stop the tool.
-            c.invalidationHandler = { [weak self] in service.cancel.cancel(); self?.connectionEnded() }
+            c.invalidationHandler = { [weak self] in
+                service.cancel.cancel()
+                service.endTrace()
+                self?.connectionEnded()
+            }
             c.resume()
             return true
         }
@@ -102,6 +106,40 @@ enum HelperDaemon {
                 }
                 reply(r.annotated)
             }
+        }
+
+        // MARK: syscall trace
+
+        private let traceLock = NSLock()
+        private var trace: TraceProcess?
+
+        func traceStart(pid: Int32, reply: @escaping (String?) -> Void) {
+            guard let (path, args) = SyscallTraceConfig.argv(pid: pid) else { reply("helper: rejected pid \(pid)"); return }
+            guard mayInspect(pid) else { reply("Only an admin user can trace another user's processes."); return }
+            traceLock.lock(); defer { traceLock.unlock() }
+            if let t = trace, t.read(max: 0).1 { reply("A trace is already running on this connection."); return }
+            let t = TraceProcess(maxPending: SyscallTraceConfig.maxPending)
+            if let err = t.start(path, args) { reply(err); return }
+            trace = t
+            reply(nil)
+        }
+
+        func traceRead(reply: @escaping (Data, Bool, String) -> Void) {
+            traceLock.lock(); let t = trace; traceLock.unlock()
+            guard let t else { reply(Data(), false, ""); return }
+            let (d, running, notes) = t.read(max: SyscallTraceConfig.maxRead)
+            reply(d, running, notes)
+        }
+
+        func traceStop(reply: @escaping () -> Void) {
+            endTrace()
+            reply()
+        }
+
+        /// Also called when the connection ends: a trace never outlives the app that asked for it.
+        func endTrace() {
+            traceLock.lock(); let t = trace; traceLock.unlock()
+            t?.stop()
         }
     }
 }
