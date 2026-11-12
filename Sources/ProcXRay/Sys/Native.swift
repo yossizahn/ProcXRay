@@ -160,10 +160,11 @@ enum Native {
         return proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &ti, sz) == sz ? ti : nil
     }
 
-    static func rusage(_ pid: pid_t) -> rusage_info_v4? {
-        var ri = rusage_info_v4()
+    /// V6: a kernel older than the SDK fills only the fields it knows and leaves the rest zero.
+    static func rusage(_ pid: pid_t) -> rusage_info_v6? {
+        var ri = rusage_info_v6()
         let rc = withUnsafeMutablePointer(to: &ri) { p in
-            p.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
+            p.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V6, $0) }
         }
         return rc == 0 ? ri : nil
     }

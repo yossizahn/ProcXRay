@@ -66,27 +66,12 @@ enum HelperDaemon {
         func allMetrics(reply: @escaping (Data) -> Void) {
             var out: [PrivMetrics] = []
             for k in Native.allProcesses() where k.pid > 0 {
-                var m = PrivMetrics(pid: k.pid)
-                defer { out.append(m) }
-                m.responsible = Native.responsible(k.pid)
-                m.sandboxed = Native.sandboxed(k.pid, start: k.start)
                 // Usage of another user's process is root-only in the kernel (proc_pid_rusage checks
                 // same-user): a standard user gets it for their own processes only, as without the helper.
-                guard mayInspect(k.pid) else { continue }
-                if let ti = Native.taskInfo(k.pid) {
-                    m.rss = ti.pti_resident_size
-                    m.virt = ti.pti_virtual_size
-                    m.threads = ti.pti_threadnum
-                    m.cpuNanos = Native.machToNanos(ti.pti_total_user &+ ti.pti_total_system)
-                }
-                if let ru = Native.rusage(k.pid) {
-                    m.footprint = ru.ri_phys_footprint
-                    m.diskRead = ru.ri_diskio_bytesread
-                    m.diskWrite = ru.ri_diskio_byteswritten
-                    m.energyNJ = ru.ri_billed_energy
-                    m.wakeups = ru.ri_pkg_idle_wkups &+ ru.ri_interrupt_wkups
-                    if m.cpuNanos == nil { m.cpuNanos = Native.machToNanos(ru.ri_user_time &+ ru.ri_system_time) }
-                }
+                var m = mayInspect(k.pid) ? PrivMetrics.read(k.pid) : PrivMetrics(pid: k.pid)
+                m.responsible = Native.responsible(k.pid)
+                m.sandboxed = Native.sandboxed(k.pid, start: k.start)
+                out.append(m)
             }
             reply((try? JSONEncoder().encode(out)) ?? Data())
         }

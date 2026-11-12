@@ -32,6 +32,7 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var diskWrite: UInt64?
     var energyNJ: UInt64?
     var wakeups: UInt64?
+    var counters: Counters?
 
     // joined from other sources
     var launchdLabel: String?
@@ -64,6 +65,21 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var isTranslated: Bool { pflags & 0x20000 != 0 }   // P_TRANSLATED (Rosetta)
     var isInspectable: Bool { rss != nil }
     var respIsOther: Bool { responsible != nil && responsible != pid }
+
+    /// Copies the metrics this process doesn't have yet; true if it took any.
+    mutating func fill(from m: PrivMetrics) -> Bool {
+        var took = false
+        func fill<T>(_ kp: WritableKeyPath<ProcInfo, T?>, _ v: T?) {
+            guard self[keyPath: kp] == nil, let v else { return }
+            self[keyPath: kp] = v
+            took = true
+        }
+        fill(\.rss, m.rss); fill(\.virt, m.virt); fill(\.threads, m.threads); fill(\.cpuNanos, m.cpuNanos)
+        fill(\.footprint, m.footprint); fill(\.diskRead, m.diskRead); fill(\.diskWrite, m.diskWrite)
+        // Counters as a whole: a local read that got only one of the two calls keeps its partial set.
+        fill(\.energyNJ, m.energyNJ); fill(\.wakeups, m.wakeups); fill(\.counters, m.counters)
+        return took
+    }
 
     /// Bundle (.app) that owns the executable, if any.
     var bundlePath: String? {
@@ -440,20 +456,7 @@ final class Store {
             p.cdhash = Native.cdhash(k.pid)
             p.responsible = Native.responsible(k.pid)
             if let c = Native.coalition(k.pid) { p.coalition = c.0; p.jetsamCoalition = c.1 }
-            if let ti = Native.taskInfo(k.pid) {
-                p.rss = ti.pti_resident_size
-                p.virt = ti.pti_virtual_size
-                p.threads = ti.pti_threadnum
-                p.cpuNanos = Native.machToNanos(ti.pti_total_user &+ ti.pti_total_system)
-            }
-            if let ru = Native.rusage(k.pid) {
-                p.footprint = ru.ri_phys_footprint
-                p.diskRead = ru.ri_diskio_bytesread
-                p.diskWrite = ru.ri_diskio_byteswritten
-                p.energyNJ = ru.ri_billed_energy
-                p.wakeups = ru.ri_pkg_idle_wkups &+ ru.ri_interrupt_wkups
-                if p.cpuNanos == nil { p.cpuNanos = Native.machToNanos(ru.ri_user_time &+ ru.ri_system_time) }
-            }
+            _ = p.fill(from: .read(k.pid))
             p.launchdLabel = labelByPid[k.pid]
             if let a = lsByPid[k.pid] { p.lsAppName = a.name; p.lsTags = a.stateTags }
             if let s = signCache[p.codeKey] { p.signer = s.shortSigner; p.signID = s.identifier }
@@ -464,16 +467,7 @@ final class Store {
             if let m = priv?[pid] {
                 // Field by field: a value read locally stays, and the helper fills only what's missing.
                 // (task info and rusage can fail independently, and the helper's own entry may be empty.)
-                var took = false
-                func fill<T>(_ kp: WritableKeyPath<ProcInfo, T?>, _ v: T?) {
-                    guard p[keyPath: kp] == nil, let v else { return }
-                    p[keyPath: kp] = v
-                    took = true
-                }
-                fill(\.rss, m.rss); fill(\.virt, m.virt); fill(\.threads, m.threads); fill(\.cpuNanos, m.cpuNanos)
-                fill(\.footprint, m.footprint); fill(\.diskRead, m.diskRead); fill(\.diskWrite, m.diskWrite)
-                fill(\.energyNJ, m.energyNJ); fill(\.wakeups, m.wakeups)
-                p.viaHelper = took
+                p.viaHelper = p.fill(from: m)
                 if p.responsible == nil { p.responsible = m.responsible }
             }
             if let c = p.cpuNanos {
@@ -725,6 +719,16 @@ enum Fmt {
         guard let v else { return "—" }
         return ByteCountFormatter.string(fromByteCount: Int64(clamping: v), countStyle: .memory)
     }
+    /// A count with thousands separators, or "—".
+    static func count<T: BinaryInteger>(_ v: T?) -> String {
+        guard let v else { return "—" }
+        return Int64(clamping: v).formatted()
+    }
+
+    static func secs(_ nanos: UInt64?) -> String {
+        nanos.map { String(format: "%.2f s", Double($0) / 1e9) } ?? "—"
+    }
+
     static func pct(_ v: Double?) -> String {
         guard let v else { return "—" }
         return String(format: "%.1f", v)

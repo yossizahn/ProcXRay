@@ -216,17 +216,37 @@ struct GeneralTab: View {
             ("Rosetta", p.isTranslated ? "yes (x86_64 translated)" : "no"),
         ]
         if p.isInspectable {
+            let c = p.counters
             rows += [
                 ("Footprint", Fmt.bytes(p.footprint)),
                 ("Resident", Fmt.bytes(p.rss)),
                 ("Virtual", Fmt.bytes(p.virt)),
-                ("CPU time", p.cpuNanos.map { String(format: "%.2f s", Double($0) / 1e9) } ?? "—"),
+                ("CPU time", Fmt.secs(p.cpuNanos)),
                 ("CPU now", p.cpuPercent.map { String(format: "%.1f %%", $0) } ?? "—"),
-                ("Threads", p.threads.map(String.init) ?? "—"),
+                ("Threads", p.threads.map { t in c?.runningThreads.map { "\(t) (\($0) running)" } ?? "\(t)" } ?? "—"),
                 ("Disk read / written", "\(Fmt.bytes(p.diskRead)) / \(Fmt.bytes(p.diskWrite))"),
                 ("Billed energy", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
                 ("Idle wakeups", p.wakeups.map(String.init) ?? "—"),
             ]
+            if let c {
+                rows += [
+                    ("Performance cores", c.pCoreNanos.map { pc in
+                        let share = p.cpuNanos.flatMap { $0 > 0 ? Double(pc) / Double($0) * 100 : nil }
+                        return Fmt.secs(pc) + (share.map { String(format: "  (%.0f %% of CPU time)", $0) } ?? "")
+                    } ?? "—"),
+                    ("Waiting for a CPU", Fmt.secs(c.waitingNanos)),
+                    ("Instructions / cycles", "\(Fmt.count(c.instructions)) / \(Fmt.count(c.cycles))"
+                        + (c.instructions.flatMap { i in c.cycles.flatMap { $0 > 0 ? String(format: "  (%.2f per cycle)", Double(i) / Double($0)) : nil } } ?? "")),
+                    ("Context switches", Fmt.count(c.contextSwitches)),
+                    ("Page faults", "\(Fmt.count(c.faults)) (\(Fmt.count(c.cowFaults)) copy-on-write)"),
+                    ("Page-ins", Fmt.count(c.pageins)),
+                    ("Mach messages sent / received", "\(Fmt.count(c.machMsgsSent)) / \(Fmt.count(c.machMsgsReceived))"),
+                    ("System calls", "\(Fmt.count(c.unixSyscalls)) BSD · \(Fmt.count(c.machSyscalls)) Mach"),
+                    ("Peak footprint", Fmt.bytes(c.peakFootprint)),
+                    ("Neural Engine memory", Fmt.bytes(c.neuralFootprint)),
+                    ("Logical writes", Fmt.bytes(c.logicalWrites)),
+                ]
+            }
         } else {
             rows.append(("Task info", "not accessible (owned by \(p.user)) — install the privileged helper to read it"))
         }

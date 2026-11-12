@@ -94,8 +94,80 @@ struct PrivMetrics: Codable, Sendable {
     var diskWrite: UInt64?
     var energyNJ: UInt64?
     var wakeups: UInt64?
+    var counters: Counters?
     var responsible: Int32?
     var sandboxed: Bool?
+}
+
+/// Cumulative counters from the same two calls as the metrics above (proc_taskinfo, rusage_info_v6).
+/// Times are nanoseconds.
+struct Counters: Codable, Hashable, Sendable {
+    // proc_taskinfo. The kernel stores these as 32-bit ints; read as unsigned they wrap at 2^32.
+    var runningThreads: UInt32?
+    var contextSwitches: UInt32?
+    var faults: UInt32?
+    var cowFaults: UInt32?
+    var pageins: UInt32?
+    var machMsgsSent: UInt32?
+    var machMsgsReceived: UInt32?
+    var machSyscalls: UInt32?
+    var unixSyscalls: UInt32?
+    // rusage_info_v6
+    var instructions: UInt64?
+    var cycles: UInt64?
+    var pCoreNanos: UInt64?
+    /// Time the threads were runnable but not running. The kernel's runnable time includes running time
+    /// (measured: a CPU-bound process on an oversubscribed machine got 1.69 s of CPU and 3.95 s of
+    /// runnable time in 4 s), so this is runnable minus CPU time.
+    var waitingNanos: UInt64?
+    var logicalWrites: UInt64?
+    var peakFootprint: UInt64?
+    var neuralFootprint: UInt64?
+}
+
+extension PrivMetrics {
+    /// Everything proc_taskinfo and rusage give for `pid`; fields stay nil when a call fails.
+    static func read(_ pid: Int32) -> PrivMetrics {
+        var m = PrivMetrics(pid: pid)
+        var c = Counters()
+        var any = false
+        if let ti = Native.taskInfo(pid) {
+            m.rss = ti.pti_resident_size
+            m.virt = ti.pti_virtual_size
+            m.threads = ti.pti_threadnum
+            m.cpuNanos = Native.machToNanos(ti.pti_total_user &+ ti.pti_total_system)
+            func u(_ v: Int32) -> UInt32 { UInt32(bitPattern: v) }
+            c.runningThreads = u(ti.pti_numrunning)
+            c.contextSwitches = u(ti.pti_csw)
+            c.faults = u(ti.pti_faults)
+            c.cowFaults = u(ti.pti_cow_faults)
+            c.pageins = u(ti.pti_pageins)
+            c.machMsgsSent = u(ti.pti_messages_sent)
+            c.machMsgsReceived = u(ti.pti_messages_received)
+            c.machSyscalls = u(ti.pti_syscalls_mach)
+            c.unixSyscalls = u(ti.pti_syscalls_unix)
+            any = true
+        }
+        if let ru = Native.rusage(pid) {
+            m.footprint = ru.ri_phys_footprint
+            m.diskRead = ru.ri_diskio_bytesread
+            m.diskWrite = ru.ri_diskio_byteswritten
+            m.energyNJ = ru.ri_billed_energy
+            m.wakeups = ru.ri_pkg_idle_wkups &+ ru.ri_interrupt_wkups
+            let cpu = ru.ri_user_time &+ ru.ri_system_time
+            if m.cpuNanos == nil { m.cpuNanos = Native.machToNanos(cpu) }
+            c.instructions = ru.ri_instructions
+            c.cycles = ru.ri_cycles
+            c.pCoreNanos = Native.machToNanos(ru.ri_user_ptime &+ ru.ri_system_ptime)
+            c.waitingNanos = Native.machToNanos(ru.ri_runnable_time > cpu ? ru.ri_runnable_time - cpu : 0)
+            c.logicalWrites = ru.ri_logical_writes
+            c.peakFootprint = ru.ri_lifetime_max_phys_footprint
+            c.neuralFootprint = ru.ri_neural_footprint
+            any = true
+        }
+        if any { m.counters = c }
+        return m
+    }
 }
 
 struct PrivArgsEnv: Codable, Sendable {

@@ -310,6 +310,10 @@ enum SelfTest {
             print("  sign: \(s.shortSigner) team=\(s.teamID ?? "-") id=\(s.identifier ?? "-") ents=\(s.entitlementKeys.count) status=\(s.runtimeFlagNames)")
             if let a = Native.argsEnv(pid) { print("  argv: \(a.args) env count: \(a.env.count)") }
             print("  cwd: \(Native.cwd(pid) ?? "-")")
+            if let c = p.counters {
+                print("  counters: running=\(c.runningThreads ?? 0) csw=\(c.contextSwitches ?? 0) faults=\(c.faults ?? 0) cow=\(c.cowFaults ?? 0) pageins=\(c.pageins ?? 0) msgsent=\(c.machMsgsSent ?? 0) msgrecv=\(c.machMsgsReceived ?? 0) sysbsd=\(c.unixSyscalls ?? 0) sysmach=\(c.machSyscalls ?? 0)")
+                print("  counters: instrs=\(c.instructions ?? 0) cycles=\(c.cycles ?? 0) cpu=\(p.cpuNanos ?? 0)ns pcore=\(c.pCoreNanos ?? 0)ns waiting=\(c.waitingNanos ?? 0)ns peak=\(c.peakFootprint ?? 0) neural=\(c.neuralFootprint ?? 0) logical=\(c.logicalWrites ?? 0)")
+            }
         }
         // `sfltool dumpbtm` prompts for an admin password, so only run it when explicitly asked.
         if args.contains("--btm") {
