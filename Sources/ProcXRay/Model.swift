@@ -36,7 +36,15 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
 
     // joined from other sources
     var launchdLabel: String?
+    /// Domain of the launchd job (`launchdLabel`): "gui", "system" or "user".
+    var launchdDomain: String?
     var lsAppName: String?
+    /// LaunchServices application type: "Foreground", "UIElement" or "BackgroundOnly".
+    var lsType: String?
+    /// Controlling terminal device, nil when the process has none.
+    var tty: Int32?
+    /// NSExtensionPointIdentifier of the app extension this process runs (see ExtensionInfo).
+    var extensionPoint: String?
     var lsTags: [String] = []
     var signer: String?
     var signID: String?
@@ -86,6 +94,12 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
         guard let p = path, let r = p.range(of: ".app/", options: .backwards) else { return nil }
         return String(p[..<r.lowerBound]) + ".app"
     }
+
+    /// For an app extension inside an app: that app's name.
+    var containingAppName: String? {
+        guard path?.contains(".appex/") == true, let b = bundlePath else { return nil }
+        return ((b as NSString).lastPathComponent as NSString).deletingPathExtension
+    }
 }
 
 struct Ghost: Identifiable, Sendable {
@@ -101,6 +115,7 @@ struct Ghost: Identifiable, Sendable {
 }
 
 enum Grouping: String, CaseIterable, Identifiable {
+    case smart = "Smart"
     case parent = "Parent tree"
     case responsible = "Responsible tree"
     case coalition = "Coalition"   // raw value kept stable: it's persisted in @AppStorage("grouping")
@@ -112,12 +127,32 @@ enum Grouping: String, CaseIterable, Identifiable {
 
 /// A row in the process table: a real process, or a synthetic group (dead responsible app / coalition).
 struct ProcNode: Identifiable, Sendable {
+    enum Kind: UInt8, Sendable {
+        case process
+        case group      // coalition, sub-group of a Smart category
+        case ghost      // Left Behind group
+        case category   // Smart tree top level
+        case unit       // Smart tree: an app or job with its helpers; stands for `rootPid`
+    }
+
     var id: Int
     var proc: ProcInfo?
     var title: String
     var subtitle: String = ""
     var isGhost = false
     var children: [ProcNode]?
+    var kind: Kind = .process
+    var category: ProcCategory?
+    /// The process a unit row stands for (selecting the row selects it).
+    var rootPid: pid_t?
+    /// Rows with a fixed order sort before their siblings, in this order, whatever the sort column.
+    var fixedOrder: Int?
+    /// Starts collapsed in the outline until the user opens it (or a search is active).
+    var startsCollapsed = false
+    /// Processes in the subtree before / after the search filter; and for a category, its top-level units.
+    var totalCount = 0
+    var shownCount = 0
+    var unitCount = 0
 
     var nameKey: String { title.lowercased() }
     var pidKey: Int { proc.map { Int($0.pid) } ?? Int(Int32.max) }
@@ -125,6 +160,9 @@ struct ProcNode: Identifiable, Sendable {
     /// computing it on read re-walked the whole subtree on every sort comparison.
     var cpuKey: Double = 0
     var memKey: UInt64 = 0
+    /// -1 when neither counter could be read (anywhere in the subtree, for group rows), so unknown
+    /// sorts apart from (and below) a real zero.
+    var diskKey: Int64 = -1
     var userKey: String { proc?.user ?? "" }
     var signerKey: String { proc?.signer ?? "" }
     var threadsKey: Int32 { proc?.threads ?? 0 }
@@ -132,9 +170,8 @@ struct ProcNode: Identifiable, Sendable {
     var coalKey: UInt64 { proc?.coalition ?? 0 }
     var jetsamKey: UInt64 { proc?.jetsamCoalition ?? 0 }
     var startKey: Date { proc?.start ?? .distantPast }
-    /// -1 when neither counter could be read, so unknown sorts apart from (and below) a real zero.
-    var diskKey: Int64 {
-        guard let p = proc, p.diskRead != nil || p.diskWrite != nil else { return -1 }
+    static func disk(_ p: ProcInfo) -> Int64 {
+        guard p.diskRead != nil || p.diskWrite != nil else { return -1 }
         return Int64(clamping: (p.diskRead ?? 0) &+ (p.diskWrite ?? 0))
     }
 
@@ -153,6 +190,8 @@ final class Store {
     var procs: [pid_t: ProcInfo] = [:] { didSet { dataGen &+= 1 } }
     var lsApps: [LSApp] = [] { didSet { dataGen &+= 1 } }
     var jobs: [LaunchdJob] = []
+    /// Running jobs of the system and user domains; they only label processes.
+    @ObservationIgnored var otherJobs: [LaunchdJob] = []
     var btm: [BTMItem] = []
     var btmLoading = false
     /// Set once a load finished and produced a record list (possibly empty), so "nothing loaded yet",
@@ -315,12 +354,13 @@ final class Store {
         ticksSinceSlow = readSlow ? 0 : ticksSinceSlow + 1
         let ls = readSlow ? nil : lsApps
         let jobs = readSlow ? nil : self.jobs
+        let otherJobs = readSlow ? nil : self.otherJobs
         Task.detached(priority: .userInitiated) {
             let t0 = DispatchTime.now().uptimeNanoseconds
             // Ask the helper first, but collect local data while it answers; the snapshot waits for the
             // helper only after that, and never longer than helperBudget (it normally takes ~10 ms).
             let priv = useHelper ? Pending { HelperClient.shared.allMetrics(timeout: Self.helperBudget) } : nil
-            var marked = Self.snapshot(prevCPU: prev, signCache: cache, priv: { priv?.wait() }, ls: ls, jobs: jobs)
+            var marked = Self.snapshot(prevCPU: prev, signCache: cache, priv: { priv?.wait() }, ls: ls, jobs: jobs, otherJobs: otherJobs)
             Self.markLeftBehind(&marked.procs, lsApps: marked.ls)
             let snap = marked
             let ms = Int((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
@@ -335,6 +375,7 @@ final class Store {
                 if readSlow {
                     self.lsApps = snap.ls
                     self.jobs = snap.jobs
+                    self.otherJobs = snap.otherJobs
                 }
                 self.prevCPU = snap.cpu
                 if full { self.fullRefreshGen &+= 1 }
@@ -419,6 +460,7 @@ final class Store {
         var procs: [pid_t: ProcInfo]
         var ls: [LSApp]
         var jobs: [LaunchdJob]
+        var otherJobs: [LaunchdJob] = []
         var cpu: [String: (UInt64, UInt64)]
         /// Set when the process list couldn't be read; `procs` is then empty and must not be published.
         var error: String?
@@ -431,11 +473,14 @@ final class Store {
     /// `priv`: helper metrics, asked for only after the local pass so a slow helper delays just the merge.
     nonisolated static func snapshot(prevCPU: [String: (UInt64, UInt64)], signCache: [String: SignInfo],
                                      priv privSource: () -> [Int32: PrivMetrics]? = { nil },
-                                     ls: [LSApp]? = nil, jobs: [LaunchdJob]? = nil) -> Snapshot {
+                                     ls: [LSApp]? = nil, jobs: [LaunchdJob]? = nil,
+                                     otherJobs: [LaunchdJob]? = nil) -> Snapshot {
         let ls = ls ?? LSAppInfo.list()
         let jobs = jobs ?? Launchd.list()
-        var labelByPid: [pid_t: String] = [:]
-        for j in jobs { if let p = j.pid { labelByPid[p] = j.label } }
+        let otherJobs = otherJobs ?? Launchd.otherDomains()
+        var labelByPid: [pid_t: LaunchdJob] = [:]
+        // gui first: a pid listed in more than one domain keeps its gui label.
+        for j in jobs + otherJobs { if let p = j.pid, labelByPid[p] == nil { labelByPid[p] = j } }
         var lsByPid: [pid_t: LSApp] = [:]
         for a in ls { if let p = a.pid { lsByPid[p] = a } }
 
@@ -447,7 +492,7 @@ final class Store {
         let list: [Native.KProc]
         switch Native.listProcesses() {
         case .success(let l): list = l
-        case .failure(let e): return Snapshot(procs: [:], ls: ls, jobs: jobs, cpu: prevCPU, error: e.message)
+        case .failure(let e): return Snapshot(procs: [:], ls: ls, jobs: jobs, otherJobs: otherJobs, cpu: prevCPU, error: e.message)
         }
         for k in list where k.pid >= 0 {
             let user = users[k.uid] ?? { let u = Native.userName(k.uid); users[k.uid] = u; return u }()
@@ -457,8 +502,10 @@ final class Store {
             p.responsible = Native.responsible(k.pid)
             if let c = Native.coalition(k.pid) { p.coalition = c.0; p.jetsamCoalition = c.1 }
             _ = p.fill(from: .read(k.pid))
-            p.launchdLabel = labelByPid[k.pid]
-            if let a = lsByPid[k.pid] { p.lsAppName = a.name; p.lsTags = a.stateTags }
+            if let j = labelByPid[k.pid] { p.launchdLabel = j.label; p.launchdDomain = j.domain }
+            if let a = lsByPid[k.pid] { p.lsAppName = a.name; p.lsTags = a.stateTags; p.lsType = a.type }
+            if k.tty != -1 { p.tty = k.tty }   // NODEV: no controlling terminal
+            if let path = p.path { p.extensionPoint = ExtensionInfo.point(forExecutable: path) }
             if let s = signCache[p.codeKey] { p.signer = s.shortSigner; p.signID = s.identifier }
             out[k.pid] = p
         }
@@ -480,7 +527,7 @@ final class Store {
             if !p.isZombie { p.sandboxed = Native.sandboxed(pid, start: p.start) ?? priv?[pid]?.sandboxed }
             out[pid] = p
         }
-        return Snapshot(procs: out, ls: ls, jobs: jobs, cpu: cpu)
+        return Snapshot(procs: out, ls: ls, jobs: jobs, otherJobs: otherJobs, cpu: cpu)
     }
 
     // MARK: Derived views
@@ -568,6 +615,8 @@ final class Store {
         let all = Array(procs.values)
         var roots: [ProcNode]
         switch grouping {
+        case .smart:
+            roots = SmartTree.build(.init(procs: procs, lsApps: lsApps))
         case .flat:
             roots = all.map { ProcNode(id: Int($0.pid), proc: $0, title: $0.name) }
         case .parent:
@@ -636,8 +685,17 @@ final class Store {
                                 title: "\(title)  [jetsam \(jet)]", subtitle: sub, children: children)
             }
         }
+        roots = roots.map(Self.counted)
         if !filter.isEmpty { roots = prune(roots, filter) }
         return sorted(roots, sort)
+    }
+
+    /// Sets totalCount (processes in the subtree) before the search filter prunes anything.
+    private static func counted(_ n: ProcNode) -> ProcNode {
+        var m = n
+        m.children = n.children?.map(counted)
+        m.totalCount = (n.proc == nil ? 0 : 1) + (m.children?.reduce(0) { $0 + $1.totalCount } ?? 0)
+        return m
     }
 
     /// Row id for a synthetic coalition group. Below every ghost id (-pid - 1); nested resource
@@ -683,10 +741,24 @@ final class Store {
         nodes.map { n in
             var m = n
             m.children = n.children.map { sorted($0, sort) }
-            m.cpuKey = n.proc?.cpuPercent ?? m.children?.reduce(0) { $0 + $1.cpuKey } ?? 0
-            m.memKey = n.proc?.footprint ?? m.children?.reduce(0) { $0 + $1.memKey } ?? 0
+            let kids = m.children ?? []
+            if let p = n.proc {
+                m.cpuKey = p.cpuPercent ?? 0
+                m.memKey = p.footprint ?? 0
+                m.diskKey = ProcNode.disk(p)
+            } else {
+                m.cpuKey = kids.reduce(0) { $0 + $1.cpuKey }
+                m.memKey = kids.reduce(0) { $0 + $1.memKey }
+                let known = kids.map(\.diskKey).filter { $0 >= 0 }
+                m.diskKey = known.isEmpty ? -1 : known.reduce(0, &+)
+            }
+            m.shownCount = (n.proc == nil ? 0 : 1) + kids.reduce(0) { $0 + $1.shownCount }
+            m.unitCount = kids.reduce(0) { $0 + ($1.kind == .group ? $1.unitCount : 1) }
             return m
         }.sorted { a, b in
+            if a.fixedOrder != nil || b.fixedOrder != nil, a.fixedOrder != b.fixedOrder {
+                return (a.fixedOrder ?? .max) < (b.fixedOrder ?? .max)
+            }
             for c in sort {
                 switch c.compare(a, b) {
                 case .orderedAscending: return true

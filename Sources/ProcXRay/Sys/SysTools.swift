@@ -207,9 +207,36 @@ struct LaunchdJob: Identifiable, Hashable, Sendable {
     var label: String
     var pid: pid_t?
     var lastExit: String
+    /// launchd domain the job lives in: "gui", "system" or "user".
+    var domain = "gui"
 }
 
 enum Launchd {
+    /// Running jobs of the system and user domains, which `launchctl list` (gui domain only) leaves out.
+    /// Both are readable without root; together the three calls take ~25 ms.
+    static func otherDomains() -> [LaunchdJob] {
+        services("system", domain: "system") + services("user/\(getuid())", domain: "user")
+    }
+
+    /// The `services = { … }` block of `launchctl print <target>`: `<pid> <last exit> <label>` per line,
+    /// pid 0 when not running. Only running jobs are returned: the result labels processes.
+    static func services(_ target: String, domain: String) -> [LaunchdJob] {
+        parseServices(Shell.run("/bin/launchctl", ["print", target], mergeStderr: false, timeout: 10), domain: domain)
+    }
+
+    static func parseServices(_ text: String, domain: String) -> [LaunchdJob] {
+        var out: [LaunchdJob] = []
+        var inside = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if !inside { inside = line == "\tservices = {"; continue }
+            if line.hasPrefix("\t}") { break }
+            let f = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard f.count >= 3, let pid = pid_t(f[0]), pid > 0 else { continue }
+            out.append(LaunchdJob(label: f[2...].joined(separator: " "), pid: pid, lastExit: String(f[1]), domain: domain))
+        }
+        return out
+    }
+
     static func list() -> [LaunchdJob] {
         Shell.run("/bin/launchctl", ["list"], mergeStderr: false, timeout: 10)
             .split(separator: "\n").dropFirst().compactMap { line in

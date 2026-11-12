@@ -170,6 +170,11 @@ struct ProcessOutline: NSViewRepresentable {
             }
         }
         private var collapsed: Set<Int> = []    // rows the user collapsed; everything else starts expanded
+        /// Rows that start collapsed (ProcNode.startsCollapsed) and the user hasn't opened or closed
+        /// yet. They stay shut unless a search is active; `seeded` keeps them from being re-added.
+        private var defaultCollapsed: Set<Int> = []
+        private var seeded: Set<Int> = []
+        private var appliedFilter = ""
         private var updating = false
         private var pushedSort: [KeyPathComparator<ProcNode>] = []
 
@@ -190,6 +195,7 @@ struct ProcessOutline: NSViewRepresentable {
                     let it = byID[n.id] ?? Item(n)
                     it.node = n
                     seen[n.id] = it
+                    if n.startsCollapsed, seeded.insert(n.id).inserted { defaultCollapsed.insert(n.id) }
                     it.children = (n.children ?? []).map(build)
                     return it
                 }
@@ -204,6 +210,17 @@ struct ProcessOutline: NSViewRepresentable {
                     expand(roots, in: outline)
                 } else {
                     sync(outline)
+                }
+            }
+            if parent.filter != appliedFilter {
+                let wasEmpty = appliedFilter.isEmpty
+                appliedFilter = parent.filter
+                // A search opens every group that has a match; clearing it shuts the default-collapsed
+                // ones again, unless the user has touched them since.
+                if parent.filter.isEmpty {
+                    for id in defaultCollapsed { if let it = byID[id] { outline.collapseItem(it) } }
+                } else if wasEmpty {
+                    expand(shownRoots, in: outline)
                 }
             }
             syncSelection(outline)
@@ -296,6 +313,7 @@ struct ProcessOutline: NSViewRepresentable {
         private func expand(_ items: [Item], in outline: NSOutlineView) {
             for it in items where !it.shown.isEmpty {
                 if collapsed.contains(it.id) { continue }
+                if parent.filter.isEmpty, defaultCollapsed.contains(it.id) { continue }
                 outline.expandItem(it)
                 expand(it.shown, in: outline)
             }
@@ -309,7 +327,7 @@ struct ProcessOutline: NSViewRepresentable {
                 var chain: [Item] = []
                 var p = outline.parent(forItem: it) as? Item
                 while let x = p { chain.append(x); p = outline.parent(forItem: x) as? Item }
-                for x in chain.reversed() { collapsed.remove(x.id); outline.expandItem(x) }
+                for x in chain.reversed() { collapsed.remove(x.id); defaultCollapsed.remove(x.id); outline.expandItem(x) }
                 let row = outline.row(forItem: it)
                 if row >= 0 {
                     outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -363,10 +381,10 @@ struct ProcessOutline: NSViewRepresentable {
         // MARK: Delegate
 
         func outlineViewItemDidCollapse(_ n: Notification) {
-            if !updating, let it = n.userInfo?["NSObject"] as? Item { collapsed.insert(it.id) }
+            if !updating, let it = n.userInfo?["NSObject"] as? Item { collapsed.insert(it.id); defaultCollapsed.remove(it.id) }
         }
         func outlineViewItemDidExpand(_ n: Notification) {
-            if !updating, let it = n.userInfo?["NSObject"] as? Item { collapsed.remove(it.id) }
+            if !updating, let it = n.userInfo?["NSObject"] as? Item { collapsed.remove(it.id); defaultCollapsed.remove(it.id) }
         }
 
         func outlineViewSelectionDidChange(_ n: Notification) {
@@ -396,14 +414,16 @@ struct ProcessOutline: NSViewRepresentable {
 
         private func open(_ it: Item?) {
             guard let it, let o = outline else { return }
-            if let p = it.node.proc { parent.onOpen(p); return }
+            if let p = it.node.proc ?? it.node.rootPid.flatMap({ procs[$0] }) { parent.onOpen(p); return }
             // Group rows toggle, like a disclosure triangle.
             if o.isItemExpanded(it) { o.collapseItem(it) } else { o.expandItem(it) }
         }
 
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
-            guard let o = outline, o.clickedRow >= 0, let p = (o.item(atRow: o.clickedRow) as? Item)?.node.proc else { return }
+            // A unit row (Smart tree) acts as the app or job it stands for.
+            guard let o = outline, o.clickedRow >= 0, let n = (o.item(atRow: o.clickedRow) as? Item)?.node,
+                  let p = n.proc ?? n.rootPid.flatMap({ procs[$0] }) else { return }
             let parent = self.parent!
             func add(_ title: String, _ action: @escaping () -> Void) {
                 let mi = NSMenuItem(title: title, action: #selector(MenuAction.fire), keyEquivalent: "")
@@ -466,6 +486,7 @@ struct ProcessOutline: NSViewRepresentable {
         private static let mono = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
         private static let body = NSFont.systemFont(ofSize: NSFont.systemFontSize)
         private static let bold = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+        private static let semibold = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
         private static let ghostIcon = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil)
         private static let groupIcon = NSImage(systemSymbolName: "square.stack.3d.up", accessibilityDescription: nil)
         private static let terminalIcon = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
@@ -524,6 +545,7 @@ struct ProcessOutline: NSViewRepresentable {
                 showName(n, procs: procs)
                 return
             case .pid: set(p.map { String($0.pid) } ?? "")
+            // Group rows show their subtree's totals (Store.sorted fills them in).
             case .cpu: set(Fmt.pct(p?.cpuPercent ?? (p == nil ? n.cpuKey : nil)))
             case .mem: set(p == nil ? Fmt.bytes(n.memKey) : Fmt.bytes(p?.footprint))
             case .threads: set(p?.threads.map(String.init) ?? "")
@@ -542,9 +564,7 @@ struct ProcessOutline: NSViewRepresentable {
                 set(p?.signer ?? "")
                 if p?.signer == "unsigned" { color = .systemRed }
             // "—" when neither counter could be read: not the same as no I/O.
-            case .disk: set(p.map { q in
-                Fmt.bytes(q.diskRead == nil && q.diskWrite == nil ? nil : (q.diskRead ?? 0) &+ (q.diskWrite ?? 0))
-            } ?? "")
+            case .disk: set(Fmt.bytes(n.diskKey < 0 ? nil : UInt64(n.diskKey)))
             case .started: set(p.map { Fmt.age($0.start) } ?? "")
             case .context:
                 set(Self.context(n))
@@ -553,11 +573,31 @@ struct ProcessOutline: NSViewRepresentable {
             set(color: color)
         }
 
+        private static var symbols: [String: NSImage] = [:]
+        private static func symbol(_ name: String) -> NSImage? {
+            if let i = symbols[name] { return i }
+            let i = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+            symbols[name] = i
+            return i
+        }
+
         private func showName(_ n: ProcNode, procs: [pid_t: ProcInfo]) {
             guard let p = n.proc else {
-                set(image: n.isGhost ? Self.ghostIcon : Self.groupIcon, tint: n.isGhost ? .systemOrange : .secondaryLabelColor)
+                if n.kind == .unit, let r = n.rootPid.flatMap({ procs[$0] }) {
+                    // An app with its helpers: the app's icon and name, in regular weight.
+                    set(image: IconCache.icon(for: r) ?? Self.terminalIcon, tint: nil)
+                    set(NSAttributedString(string: n.title, attributes: [
+                        .font: Self.body, .foregroundColor: NSColor.labelColor, .paragraphStyle: Self.truncating,
+                    ]))
+                    return
+                }
+                let image = n.isGhost ? Self.ghostIcon
+                    : n.kind == .category ? n.category.flatMap { Self.symbol($0.symbol) } : Self.groupIcon
+                let ghostly = n.isGhost || n.category == .leftBehind
+                set(image: image, tint: ghostly ? .systemOrange : .secondaryLabelColor)
                 set(NSAttributedString(string: n.title, attributes: [
-                    .font: Self.bold, .foregroundColor: n.isGhost ? NSColor.systemOrange : NSColor.labelColor,
+                    .font: n.kind == .group ? Self.semibold : Self.bold,
+                    .foregroundColor: ghostly ? NSColor.systemOrange : NSColor.labelColor,
                     .paragraphStyle: Self.truncating,
                 ]))
                 return
@@ -583,8 +623,18 @@ struct ProcessOutline: NSViewRepresentable {
         }
 
         static func context(_ n: ProcNode) -> String {
-            guard let p = n.proc else { return n.subtitle }
+            guard let p = n.proc else {
+                guard n.subtitle.isEmpty else { return n.subtitle }
+                // "3 of 151 processes" while a search hides some.
+                let procs = n.shownCount == n.totalCount ? "\(n.totalCount) processes" : "\(n.shownCount) of \(n.totalCount) processes"
+                if n.kind == .category, let c = n.category, n.unitCount != n.shownCount {
+                    return "\(n.unitCount) \(c.unitNoun) · \(procs)"
+                }
+                return procs
+            }
             var parts: [String] = []
+            if let app = p.containingAppName { parts.append("in \(app)") }
+            if let e = p.extensionPoint { parts.append("extension: \(ExtensionInfo.title(e))") }
             if let l = p.launchdLabel { parts.append("launchd: \(l)") }
             if let a = p.lsAppName { parts.append("LS: \(a)") }
             if !p.lsTags.isEmpty { parts.append(p.lsTags.joined(separator: " ")) }

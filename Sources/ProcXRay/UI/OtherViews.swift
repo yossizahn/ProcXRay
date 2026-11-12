@@ -287,6 +287,15 @@ enum SelfTest {
             roots.forEach(walk)
             let ok = Set(ids).count == ids.count && pids.count == procs.count && Set(pids) == Set(procs.keys)
             print("grouping \(g.label): \(roots.count) roots, \(pids.count) procs, \(ids.count) rows — \(ok ? "ok" : "MISMATCH")")
+            if g == .smart {
+                for c in roots {
+                    let subs = (c.children ?? []).filter { $0.kind == .group }.map { "\($0.title) \($0.totalCount)" }
+                    print("  \(c.title): \(c.unitCount) top-level, \(c.totalCount) procs, \(Fmt.pct(c.cpuKey)) %, \(Fmt.bytes(c.memKey))"
+                          + (subs.isEmpty ? "" : " — " + subs.joined(separator: ", ")))
+                }
+                let other = roots.first { $0.category == .other }?.children ?? []
+                if !other.isEmpty { print("  other: \(other.prefix(8).map { "\($0.title)(\($0.proc?.path ?? "-"))" })") }
+            }
             if g == .jetsam {
                 for r in roots.filter({ ($0.children ?? []).contains { $0.proc == nil } })
                     .sorted(by: { ($0.children?.count ?? 0) > ($1.children?.count ?? 0) }).prefix(4) {
