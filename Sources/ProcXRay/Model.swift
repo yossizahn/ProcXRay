@@ -147,6 +147,8 @@ struct ProcNode: Identifiable, Sendable {
     var rootPid: pid_t?
     /// Rows with a fixed order sort before their siblings, in this order, whatever the sort column.
     var fixedOrder: Int?
+    /// A group row above already names this row's extension point, so the name cell doesn't repeat it.
+    var extensionPointShownAbove = false
     /// Starts collapsed in the outline until the user opens it (or a search is active).
     var startsCollapsed = false
     /// Processes in the subtree before / after the search filter; and for a category, its top-level units.
@@ -177,7 +179,7 @@ struct ProcNode: Identifiable, Sendable {
         // "ttys003": a shell shown without a terminal row of its own (see SmartTree.roleGroups).
         if let t = p.tty, q.lowercased().hasPrefix("tty"),
            SmartTree.ttyName(t).localizedCaseInsensitiveContains(q) { return true }
-        return [p.path, p.signer, p.signID, p.launchdLabel, p.lsAppName, p.user]
+        return [p.path, p.signer, p.signID, p.launchdLabel, p.lsAppName, p.user, p.extensionPoint.map(ExtensionInfo.title)]
             .compactMap { $0 }.contains { $0.localizedCaseInsensitiveContains(q) }
     }
 }

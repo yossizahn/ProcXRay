@@ -280,10 +280,21 @@ enum SmartTree {
             let c = category(ofRoot: rp)
             var s = c.singular
             if c == .extensions, let e = rp.extensionPoint { s += " · " + ExtensionInfo.title(e) }
-            if p.pid != r { s += " · " + (p.tty != nil ? "Terminal" : role(of: p).singular) }
+            if p.pid != r {
+                s += " · " + (p.tty != nil ? "Terminal" : role(of: p).singular)
+                // An app's own extension: what kind, from its declared extension point.
+                if isExtension(p), let e = p.extensionPoint { s += " · " + ExtensionInfo.title(e) }
+            }
             out[p.pid] = s
         }
         return out
+    }
+
+    private static func hidingExtensionPoint(_ n: ProcNode) -> ProcNode {
+        var m = n
+        m.extensionPointShownAbove = true
+        m.children = n.children?.map(hidingExtensionPoint)
+        return m
     }
 
     static func build(_ input: Input) -> [ProcNode] {
@@ -356,7 +367,9 @@ enum SmartTree {
             var children: [ProcNode] = []
             for (sub, es) in bySub {
                 if sub.isEmpty || es.count < 2 || bySub.count < 2 { children += es.map(\.node); continue }
-                var g = ProcNode(id: groupID(c, sub), proc: nil, title: sub, children: es.map(\.node))
+                // Under a group named after the extension point, the rows needn't repeat it.
+                let kids = c == .extensions ? es.map { Self.hidingExtensionPoint($0.node) } : es.map(\.node)
+                var g = ProcNode(id: groupID(c, sub), proc: nil, title: sub, children: kids)
                 g.kind = .group
                 g.category = c
                 children.append(g)

@@ -713,6 +713,12 @@ struct ProcessOutline: NSViewRepresentable {
             let orphan = p.leftBehindGroup != nil
             let color: NSColor = p.isZombie || !p.isInspectable ? .secondaryLabelColor : orphan ? .systemOrange : .labelColor
             let s = NSMutableAttributedString(string: n.title, attributes: [.font: Self.body, .foregroundColor: color])
+            // An app extension says what kind it is (its declared extension point), unless a group above does.
+            if let e = p.extensionPoint, !n.extensionPointShownAbove {
+                s.append(NSAttributedString(string: " · " + ExtensionInfo.title(e), attributes: [
+                    .font: Self.body, .foregroundColor: NSColor.secondaryLabelColor,
+                ]))
+            }
             func badge(_ t: String, _ c: NSColor) {
                 s.append(NSAttributedString(string: "  "))
                 s.append(NSAttributedString(string: t, attributes: [

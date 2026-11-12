@@ -70,7 +70,7 @@ Groups inside an app, decided 2026-11-12: only where the system defines the answ
 | XPC services | executable at `XPCServices/<name>.xpc/Contents/MacOS/` | bundle layout. WebKit's content, networking and GPU processes land here, since they are XPC services of WebKit.framework |
 | Terminal sessions | has a controlling tty | kernel data; sub-grouped by tty, then process group, so a pipeline is one row |
 
-Every other helper is a plain row under its app. A group is only created when it would hold two or more processes, and not when every helper would land in the same one.
+Every other helper is a plain row under its app. An extension's type is shown rather than grouped: its row adds the extension point's readable name after the process name ("· Finder Sync"), and Kind reads "App · Extension · Finder Sync". The name comes from the bundle's declared `NSExtensionPointIdentifier` or `EXExtensionPointIdentifier`, through a table of exact identifiers, with the raw identifier when the table has none. Rows under an Extensions sub-group named after that same point leave it out. A group is only created when it would hold two or more processes, and not when every helper would land in the same one.
 
 Dropped: Renderers, GPU, Network and Utility (from Chromium's `--type=` argument or the helper bundle's name suffix), Content processes (Firefox's `plugin-container` and its last argument) and Web content (executable names). The bundle-name suffixes and executable names are guesses, and the argv types are specific to Chromium and Firefox, so the tree would treat one browser engine's processes differently from every other app's.
 
