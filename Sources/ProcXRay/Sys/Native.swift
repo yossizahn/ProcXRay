@@ -101,6 +101,10 @@ enum Native {
         return kproc(k)
     }
 
+    /// Whether `pid` still belongs to the process that started at `start`: pids are reused, so a pid
+    /// alone may by now name an unrelated process.
+    static func isSame(_ pid: pid_t, start: Date) -> Bool { process(pid)?.start == start }
+
     /// Whether `uid` is in the admin group (gid 80), i.e. could run the same tools with sudo.
     static func isAdmin(_ uid: uid_t) -> Bool {
         if uid == 0 { return true }
@@ -169,11 +173,14 @@ enum Native {
         return r > 0 ? r : nil
     }
 
-    /// 1 = sandboxed, 0 = not, nil = unknown.
-    static func sandboxed(_ pid: pid_t) -> Bool? {
+    /// 1 = sandboxed, 0 = not, nil = unknown. sandbox_check also returns non-zero for a pid that has
+    /// exited (or never existed), so a "yes" counts only if the same process is still there afterwards.
+    static func sandboxed(_ pid: pid_t, start: Date) -> Bool? {
         guard let f = sandboxCheckFn else { return nil }
         let r = f(pid, nil, 0)
-        return r < 0 ? nil : r != 0
+        if r < 0 { return nil }
+        if r == 0 { return false }
+        return isSame(pid, start: start) ? true : nil
     }
 
     static func cwd(_ pid: pid_t) -> String? {

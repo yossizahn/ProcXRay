@@ -78,7 +78,7 @@ enum HelperDaemon {
                     if m.cpuNanos == nil { m.cpuNanos = Native.machToNanos(ru.ri_user_time &+ ru.ri_system_time) }
                 }
                 m.responsible = Native.responsible(k.pid)
-                m.sandboxed = Native.sandboxed(k.pid)
+                m.sandboxed = Native.sandboxed(k.pid, start: k.start)
                 out.append(m)
             }
             reply((try? JSONEncoder().encode(out)) ?? Data())

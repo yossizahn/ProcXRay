@@ -114,6 +114,7 @@ struct ProcessWindow: View {
     @Environment(Store.self) var store
     let ref: ProcessRef
     @State private var lastSeen: ProcInfo?
+    @State private var lastSign: SignInfo?
 
     var body: some View {
         let live = store.procs[ref.pid].flatMap { $0.start.timeIntervalSince1970 == ref.start ? $0 : nil }
@@ -125,7 +126,7 @@ struct ProcessWindow: View {
                             .font(.callout).frame(maxWidth: .infinity).padding(6)
                             .background(.orange.opacity(0.2))
                     }
-                    InspectorView(proc: p)
+                    InspectorView(proc: p, exited: live == nil, lastSign: lastSign)
                 }
                 .navigationTitle(Text(verbatim: "\(p.name) (\(p.pid))"))
             } else {
@@ -134,6 +135,10 @@ struct ProcessWindow: View {
             }
         }
         .onChange(of: live, initial: true) { _, p in if let p { lastSeen = p } }
+        // The store forgets a process's signature once it exits; keep the last one this window saw.
+        .onChange(of: live.map { "\($0.codeKey)|\(store.signInfo(for: $0) != nil)" }, initial: true) { _, _ in
+            if let p = live, let s = store.signInfo(for: p) { lastSign = s }
+        }
         .frame(minWidth: 640, minHeight: 420)
     }
 }

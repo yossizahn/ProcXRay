@@ -25,13 +25,14 @@ enum Bench {
         time("lsappinfo parse") { _ = LSAppInfo.parse(lsText) }
         time("launchctl list") { _ = Launchd.list() }
         time("sysctl allProcesses") { _ = Native.allProcesses() }
-        let pids = Native.allProcesses().map(\.pid).filter { $0 >= 0 }
+        let kprocs = Native.allProcesses().filter { $0.pid >= 0 }
+        let pids = kprocs.map(\.pid)
         time("per-pid path") { for p in pids { _ = Native.path(p) } }
         time("per-pid responsible") { for p in pids { _ = Native.responsible(p) } }
         time("per-pid coalition") { for p in pids { _ = Native.coalition(p) } }
         time("per-pid taskInfo") { for p in pids { _ = Native.taskInfo(p) } }
         time("per-pid rusage") { for p in pids { _ = Native.rusage(p) } }
-        time("per-pid sandboxed") { for p in pids { _ = Native.sandboxed(p) } }
+        time("per-pid sandboxed") { for k in kprocs { _ = Native.sandboxed(k.pid, start: k.start) } }
         time("per-pid userName") { for p in Native.allProcesses() { _ = Native.userName(p.uid) } }
         if helper { time("helper allMetrics (XPC)") { _ = HelperClient.shared.allMetrics() } }
         let priv = helper ? HelperClient.shared.allMetrics() : nil

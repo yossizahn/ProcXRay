@@ -315,7 +315,9 @@ struct ProcessOutline: NSViewRepresentable {
                     outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
                     outline.scrollRowToVisible(row)
                 }
-            } else if parent.selection == nil {
+            } else {
+                // Nothing selected, or a target this outline doesn't show: never leave another row
+                // highlighted, or Inspect and Return would act on different processes.
                 outline.deselectAll(nil)
             }
         }
@@ -417,10 +419,15 @@ struct ProcessOutline: NSViewRepresentable {
                 add("Copy Path") { Self.copy(path) }
             }
             add("Copy PID") { Self.copy("\(p.pid)") }
-            if let r = p.responsible, r != p.pid, procs[r] != nil {
-                add("Select Responsible (\(r))") { parent.selection = Int(r) }
+            // Only jump to rows the outline shows; a search may hide the target.
+            func jump(_ title: String, to pid: pid_t) {
+                if byID[Int(pid)] != nil { add(title) { parent.selection = Int(pid) }; return }
+                let mi = NSMenuItem(title: title + " — hidden by the search", action: nil, keyEquivalent: "")
+                mi.isEnabled = false
+                menu.addItem(mi)
             }
-            if p.ppid > 1 { add("Select Parent (\(p.ppid))") { parent.selection = Int(p.ppid) } }
+            if let r = p.responsible, r != p.pid, procs[r] != nil { jump("Select Responsible (\(r))", to: r) }
+            if p.ppid > 1 { jump("Select Parent (\(p.ppid))", to: p.ppid) }
         }
 
         static func copy(_ s: String) {

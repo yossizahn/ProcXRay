@@ -18,7 +18,14 @@ enum InspectorTab: String, CaseIterable, Identifiable {
 struct InspectorView: View {
     @Environment(Store.self) var store
     let proc: ProcInfo
+    /// The process is gone and `proc` is its last snapshot. Its pid may already belong to another
+    /// process, so nothing is read from the pid any more: tabs keep what they showed, or say why not.
+    var exited = false
+    /// Signing details the window saw while the process ran; the store drops them once it's gone.
+    var lastSign: SignInfo?
     @AppStorage("inspectorTab") private var tab: InspectorTab = .general
+
+    private var sign: SignInfo? { store.signInfo(for: proc) ?? lastSign }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -39,15 +46,17 @@ struct InspectorView: View {
             Divider()
             Group {
                 switch tab {
-                case .general: GeneralTab(proc: proc)
+                case .general: GeneralTab(proc: proc, exited: exited)
                 case .lineage: LineageTab(proc: proc)
-                case .signature: SignatureTab(proc: proc)
+                case .signature: SignatureTab(sign: sign, exited: exited)
                 case .entitlements:
-                    let xml = store.signInfo(for: proc)?.entitlementsXML
-                    OutputPane(raw: xml ?? "No entitlements (or not yet loaded).", filterable: true) { f in
+                    let xml = sign?.entitlementsXML
+                    let none = sign == nil && exited ? "Entitlements weren't read before the process exited."
+                                                     : "No entitlements (or not yet loaded)."
+                    OutputPane(raw: xml ?? none, filterable: true) { f in
                         EntitlementsView(xml: xml, filter: f)
                     }
-                case .args: ArgsTab(proc: proc)
+                case .args: ArgsTab(proc: proc, exited: exited)
                 case .files:
                     toolTab(.lsof, auto: true, title: "lsof -n -P -p \(proc.pid)",
                             parse: LsofParser.parse, isEmpty: \.isEmpty) { LsofView(entries: $0, filter: $1) }
@@ -59,6 +68,7 @@ struct InspectorView: View {
                             parse: SampleParser.parse, isEmpty: \.threads.isEmpty) { SampleView(report: $0, filter: $1) }
                 case .logs:
                     let pid = proc.pid
+                    // `log show` reads history, not the process, so it still works after an exit.
                     CommandTab(key: "log\(proc.key)", auto: false,
                                title: "/usr/bin/log show --last 10m — events from pid \(pid) or mentioning it",
                                command: {
@@ -67,7 +77,7 @@ struct InspectorView: View {
                                        "--predicate", "processID == \(pid) OR eventMessage CONTAINS \"\(pid)\""], timeout: 120)
                                },
                                parse: LogParser.parse, isEmpty: \.isEmpty) { LogView(entries: $0, filter: $1) }
-                case .launch: LaunchTab(proc: proc)
+                case .launch: LaunchTab(proc: proc, exited: exited)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -80,11 +90,15 @@ struct InspectorView: View {
                                      parse: @escaping @Sendable (String) -> P, isEmpty: @escaping (P) -> Bool,
                                      @ViewBuilder visual: @escaping (P, String) -> V) -> some View {
         let viaHelper = store.helperState.isRunning
-        let pid = proc.pid
-        let platform = store.signInfo(for: proc)?.isPlatform == true
+        let pid = proc.pid, start = proc.start
+        let platform = sign?.isPlatform == true
         return CommandTab(key: "\(tool)\(proc.key)\(viaHelper)", auto: auto,
                           title: title + (viaHelper ? "   [as root via helper]" : "   [as \(NSUserName())]"),
+                          disabledReason: exited ? Self.exitedNote : nil,
                           command: {
+            // The pid may have been reused since this window last saw the process: check right before
+            // running (sample suspends its target) and again before showing the output.
+            guard Native.isSame(pid, start: start) else { return Self.goneNote(pid) }
             var out: String
             if viaHelper {
                 out = HelperClient.shared.run(tool, pid: pid) ?? "helper did not answer"
@@ -95,6 +109,7 @@ struct InspectorView: View {
                 }
                 out = Shell.run(path, args, timeout: tool.timeout)
             }
+            guard Native.isSame(pid, start: start) else { return Self.goneNote(pid) }
             let failed = out.isEmpty || out.contains("not permitted") || out.contains("Unable to") || out.contains("failed")
             if failed && tool != .lsof {
                 out += viaHelper && platform
@@ -105,6 +120,11 @@ struct InspectorView: View {
             }
             return out
         }, parse: parse, isEmpty: isEmpty, visual: visual)
+    }
+
+    static let exitedNote = "The process has exited, so this can't be collected any more."
+    nonisolated static func goneNote(_ pid: pid_t) -> String {
+        "Process \(pid) has exited (its pid may now belong to another process); nothing was collected."
     }
 }
 
@@ -162,7 +182,8 @@ struct KV: View {
 struct GeneralTab: View {
     @Environment(Store.self) var store
     let proc: ProcInfo
-    @State private var cwd: String?
+    var exited = false
+    @State private var cwd: (key: String, path: String?)?
 
     var body: some View {
         let p = proc
@@ -179,7 +200,7 @@ struct GeneralTab: View {
         let jetMembers = p.jetsamCoalition.map { c in store.procs.values.filter { $0.jetsamCoalition == c }.count } ?? 0
         var rows: [(String, String)] = [
             ("Path", p.path ?? "— (\(p.comm))"),
-            ("Working dir", cwd ?? "—"),
+            ("Working dir", cwd?.key == p.key ? cwd?.path ?? "—" : "—"),
             ("Parent", "\(parent?.name ?? "?") (\(p.ppid))"),
             ("Responsible", resp),
             ("Coalition", p.coalition.map { "resource \($0) (\(coalMembers) member(s)) · jetsam \(p.jetsamCoalition.map(String.init) ?? "—") (\(jetMembers) member(s))" } ?? "—"),
@@ -208,16 +229,18 @@ struct GeneralTab: View {
         if p.viaHelper { rows.append(("Source", "task metrics read as root via the privileged helper")) }
         if let l = p.launchdLabel { rows.append(("launchd label", l)) }
         if let a = p.lsAppName { rows.append(("LaunchServices", "\(a) \(p.lsTags.joined(separator: " "))")) }
-        return KV(rows: rows).task(id: p.key) {
-            let pid = p.pid
+        // Re-read on an exec and on every manual refresh: a `cd` changes nothing else we watch.
+        return KV(rows: rows).task(id: "\(p.codeKey)|\(store.fullRefreshGen)|\(exited)") {
+            guard !exited else { return }   // keep the last value; the pid may be someone else's now
+            let pid = p.pid, start = p.start, key = p.key
             let helper = store.helperState.isRunning
             let c = await Task.detached { () -> String? in
-                if let c = Native.cwd(pid) { return c }
-                return helper ? HelperClient.shared.argsEnv(pid)?.cwd : nil
+                let c = Native.cwd(pid) ?? (helper ? HelperClient.shared.argsEnv(pid)?.cwd : nil)
+                return Native.isSame(pid, start: start) ? c : nil
             }.value
             // The detached load doesn't stop when the selection changes; drop a result for an old one.
             guard !Task.isCancelled else { return }
-            cwd = c
+            cwd = (key, c)
         }
     }
 
@@ -280,10 +303,10 @@ struct LineageTab: View {
 // MARK: - Signature
 
 struct SignatureTab: View {
-    @Environment(Store.self) var store
-    let proc: ProcInfo
+    let sign: SignInfo?
+    let exited: Bool
     var body: some View {
-        if let s = store.signInfo(for: proc) {
+        if let s = sign {
             KV(rows: [
                 ("Signer", s.shortSigner),
                 ("Identifier", s.identifier ?? "—"),
@@ -297,6 +320,9 @@ struct SignatureTab: View {
                 ("Requirement", s.designatedRequirement ?? "—"),
                 ("Error", s.error ?? "—"),
             ])
+        } else if exited {
+            Text("The process exited before its code signature was read.").foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ProgressView("Reading code signature…").frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -312,8 +338,10 @@ extension String {
 struct ArgsTab: View {
     @Environment(Store.self) var store
     let proc: ProcInfo
+    var exited = false
     @State private var info: Native.ArgsEnv?
     @State private var loaded = false
+    @State private var loadedKey: String?
 
     var body: some View {
         Group {
@@ -324,24 +352,32 @@ struct ArgsTab: View {
                            filterable: true) { f in
                     ArgsEnvView(info: info, filter: f)
                 }
-            } else if loaded {
-                Text("Arguments not readable (other user's process, or it has exited).").foregroundStyle(.secondary)
+            } else if loaded || exited {
+                Text(exited ? "The process has exited; its arguments can't be read any more."
+                            : "Arguments not readable (other user's process, or it has exited).")
+                    .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ProgressView()
             }
         }
-        .task(id: proc.key) {
-            let pid = proc.pid
+        // codeKey: an exec keeps pid and start time but replaces path, argv and environment.
+        .task(id: "\(proc.codeKey)|\(store.fullRefreshGen)|\(exited)") {
+            guard !exited else { return }   // keep what was shown; the pid may be someone else's now
+            if loadedKey != proc.key { info = nil; loaded = false }   // a different process: no stale rows
+            let pid = proc.pid, start = proc.start, key = proc.key
             let helper = store.helperState.isRunning
             let a = await Task.detached { () -> Native.ArgsEnv? in
-                if let a = Native.argsEnv(pid) { return a }
-                guard helper, let r = HelperClient.shared.argsEnv(pid) else { return nil }
-                return Native.ArgsEnv(execPath: r.execPath, args: r.args, env: r.env)
+                let a: Native.ArgsEnv? = Native.argsEnv(pid) ?? {
+                    guard helper, let r = HelperClient.shared.argsEnv(pid) else { return nil }
+                    return Native.ArgsEnv(execPath: r.execPath, args: r.args, env: r.env)
+                }()
+                return Native.isSame(pid, start: start) ? a : nil
             }.value
             guard !Task.isCancelled else { return }
             info = a
             loaded = true
+            loadedKey = key
         }
     }
 }
@@ -352,6 +388,8 @@ struct CommandTab<Parsed, Visual: View>: View {
     let key: String
     let auto: Bool
     let title: String
+    /// Set when the command can't run any more (the process exited); earlier output stays visible.
+    var disabledReason: String? = nil
     let command: @Sendable () -> String
     let parse: @Sendable (String) -> Parsed
     let isEmpty: (Parsed) -> Bool
@@ -371,7 +409,8 @@ struct CommandTab<Parsed, Visual: View>: View {
                 Text(title).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 TextField(showRaw ? "filter lines" : "filter", text: $filter).textFieldStyle(.roundedBorder).frame(width: 180)
-                Button(output == nil ? "Run" : "Re-run") { run() }.disabled(running)
+                Button(output == nil ? "Run" : "Re-run") { run() }.disabled(running || disabledReason != nil)
+                    .help(disabledReason ?? "")
                 if running { ProgressView().controlSize(.small) }
             }
             .padding(6)
@@ -388,8 +427,9 @@ struct CommandTab<Parsed, Visual: View>: View {
                 }
             } else {
                 VStack(spacing: 8) {
-                    Image(systemName: "play.circle").font(.largeTitle).foregroundStyle(.secondary)
-                    Text("Press Run to collect this data.").foregroundStyle(.secondary)
+                    Image(systemName: disabledReason == nil ? "play.circle" : "xmark.circle")
+                        .font(.largeTitle).foregroundStyle(.secondary)
+                    Text(disabledReason ?? "Press Run to collect this data.").foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .opacity(running ? 0 : 1)
@@ -402,7 +442,11 @@ struct CommandTab<Parsed, Visual: View>: View {
             running = false
             output = nil
             parsed = nil
-            if auto { run() }
+            if auto && disabledReason == nil { run() }
+        }
+        .onChange(of: disabledReason) { _, r in
+            // Exited mid-run: stop it (sample would otherwise go on suspending whatever has the pid).
+            if r != nil, running { runTask?.cancel(); runTask = nil; running = false }
         }
         .onDisappear { runTask?.cancel() }   // window closed: don't let sample / log show run on
     }
@@ -431,6 +475,8 @@ struct CommandTab<Parsed, Visual: View>: View {
 struct LaunchTab: View {
     @Environment(Store.self) var store
     let proc: ProcInfo
+    var exited = false
+    @State private var loadedKey: String?
     @State private var ls: String?
     @State private var job: (title: String, text: String)?
     @State private var procinfo: (title: String, text: String)?
@@ -447,7 +493,10 @@ struct LaunchTab: View {
 
     var body: some View {
         Group {
-            if loading {
+            if loading && exited {
+                Text("The process has exited; this can't be read any more.").foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if loading {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 OutputPane(raw: raw, filterable: true) { f in
@@ -475,9 +524,11 @@ struct LaunchTab: View {
                 }
             }
         }
-        .task(id: proc.key) {
-            loading = true
-            let label = proc.launchdLabel
+        // Reload when the process registers with LaunchServices or launchd, execs, or on a manual refresh.
+        .task(id: "\(proc.codeKey)|\(proc.lsAppName ?? "")|\(proc.launchdLabel ?? "")|\(store.fullRefreshGen)|\(exited)") {
+            guard !exited else { return }   // keep what was shown; the pid may be someone else's now
+            if loadedKey != proc.key { loading = true }   // a different process: don't show the old one's
+            let label = proc.launchdLabel, key = proc.key
             let lsRaw = store.lsApps.first { $0.pid == proc.pid }?.raw
             let pid = proc.pid
             let helper = store.helperState.isRunning
@@ -494,6 +545,7 @@ struct LaunchTab: View {
             job = (j.0, j.1)
             procinfo = (p.0, p.1)
             loading = false
+            loadedKey = key
         }
     }
 

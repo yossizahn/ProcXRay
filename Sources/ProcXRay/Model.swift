@@ -138,6 +138,9 @@ final class Store {
     var paused = false
     var interval: Double = 2
     var lastRefresh = Date()
+    /// Bumped by each full refresh (Refresh button, coming back on screen), not by timer ticks: views
+    /// that read something the snapshot doesn't carry (a cwd, LaunchServices details) reload on it.
+    var fullRefreshGen = 0
     var refreshMillis = 0
     /// Why the last refresh couldn't read the process list (the table keeps the previous snapshot).
     var refreshError: String?
@@ -282,6 +285,7 @@ final class Store {
                     self.jobs = snap.jobs
                 }
                 self.prevCPU = snap.cpu
+                if full { self.fullRefreshGen &+= 1 }
                 self.updateGhostCount()
                 self.lastRefresh = Date()
                 self.refreshMillis = ms
@@ -428,7 +432,7 @@ final class Store {
                 cpu[p.key] = (c, now)
             }
             // sandbox check is cheap but noisy for zombies
-            if !p.isZombie { p.sandboxed = Native.sandboxed(pid) ?? priv?[pid]?.sandboxed }
+            if !p.isZombie { p.sandboxed = Native.sandboxed(pid, start: p.start) ?? priv?[pid]?.sandboxed }
             out[pid] = p
         }
         return Snapshot(procs: out, ls: ls, jobs: jobs, cpu: cpu)

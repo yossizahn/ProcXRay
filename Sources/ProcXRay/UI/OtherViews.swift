@@ -197,6 +197,7 @@ struct LaunchdView: View {
         let jobs = store.jobs.filter {
             (!runningOnly || $0.pid != nil) && (search.isEmpty || $0.label.localizedCaseInsensitiveContains(search))
         }.sorted(using: sort)
+        let current = selection.flatMap { s in store.jobs.first { $0.id == s } }
         SplitPane(id: "launchd", defaultFraction: 0.6) {
             Table(jobs, selection: $selection, sortOrder: $sort) {
                 TableColumn("Label", value: \.label) { j in Text(j.label) }.width(min: 200, ideal: 360)
@@ -207,13 +208,17 @@ struct LaunchdView: View {
                 TableColumn("Process") { j in Text(j.pid.flatMap { procs[$0]?.path } ?? "").foregroundStyle(.secondary) }
             }
         } bottom: {
-            if selection != nil {
+            if let label = selection, current == nil {
+                PanePlaceholder(text: "\(label) is no longer loaded in launchd")
+            } else if selection != nil {
                 if detail == "loading…" { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
                 else { OutputPane(raw: detail, filterable: true) { f in KVTreeView(text: detail, filter: f) } }
             } else { PanePlaceholder(text: "Select a job to see launchctl print") }
         }
-        .task(id: selection) {
-            guard let label = selection else { return }
+        // The label stays the same when the job restarts or is removed: reload when its row changes,
+        // and on a manual refresh (run counts and other details aren't in the row).
+        .task(id: "\(selection ?? "")|\(current.map { "\($0)" } ?? "gone")|\(store.fullRefreshGen)") {
+            guard let label = selection, current != nil else { return }
             detail = "loading…"
             let d = await Task.detached { Launchd.printJob(label) }.value
             guard !Task.isCancelled else { return }   // selection moved on while launchctl ran
