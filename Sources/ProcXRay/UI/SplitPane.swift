@@ -71,7 +71,9 @@ struct SplitPane<Top: View, Bottom: View>: View {
                                               set: { fraction = Double(clamp(total * $0 / 100, total) / max(total, 1)) }),
                                in: 0...100, step: 5) { Text("Split") }
                     }
-                    .focusable()
+                    // `.activate` = focusable only through keyboard navigation, so a click/drag doesn't
+                    // take focus and draw a focus ring around the grab area.
+                    .focusable(interactions: .activate)
                     .onKeyPress(.upArrow) { nudge(-1, total: total, topHeight: topHeight); return .handled }
                     .onKeyPress(.downArrow) { nudge(1, total: total, topHeight: topHeight); return .handled }
             }
