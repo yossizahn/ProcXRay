@@ -197,14 +197,7 @@ struct GeneralTab: View {
     var body: some View {
         let p = proc
         let parent = store.procs[p.ppid]
-        let resp: String = {
-            if let t = p.leftBehindText { return "† \(t) — exited and left this process running" }
-            guard let r = p.responsible else { return "unknown" }
-            if r == p.pid { return "self (\(r))" }
-            if let rp = store.procs[r] { return "\(rp.name) (\(r))" }
-            let name = store.lsApps.first { $0.pid == r }?.name
-            return "† \(name ?? "exited process") (\(r)) — no longer running"
-        }()
+        let resp = store.responsibleDescription(p)
         let coalMembers = p.coalition.map { c in store.procs.values.filter { $0.coalition == c }.count } ?? 0
         let jetMembers = p.jetsamCoalition.map { c in store.procs.values.filter { $0.jetsamCoalition == c }.count } ?? 0
         var rows: [(String, String)] = [
@@ -270,6 +263,25 @@ struct GeneralTab: View {
 
 // MARK: - Lineage
 
+extension Store {
+    /// The process responsible for `p`, running and distinct from `p` (nil for self, unknown, exited
+    /// or Left Behind, which responsibleDescription spells out).
+    func responsibleProcess(_ p: ProcInfo) -> ProcInfo? {
+        guard p.leftBehindText == nil, let r = p.responsible, r != p.pid else { return nil }
+        return procs[r]
+    }
+
+    /// One-line account of who is responsible for `p`, shared by the General and Lineage tabs.
+    func responsibleDescription(_ p: ProcInfo) -> String {
+        if let t = p.leftBehindText { return "† \(t) — exited and left this process running" }
+        guard let r = p.responsible else { return "unknown" }
+        if r == p.pid { return "self (\(r))" }
+        if let rp = procs[r] { return "\(rp.name) (\(r))" }
+        let name = lsApps.first { $0.pid == r }?.name
+        return "† \(name ?? "exited process") (\(r)) — no longer running"
+    }
+}
+
 struct LineageTab: View {
     @Environment(Store.self) var store
     let proc: ProcInfo
@@ -293,11 +305,47 @@ struct LineageTab: View {
                 .sorted { $0.pid < $1.pid }
         } ?? []
         List {
-            SwiftUI.Section("Parent chain (ppid → launchd)") { ForEach(ancestors) { row($0) } }
-            SwiftUI.Section("Children (\(children.count))") { ForEach(children) { row($0) } }
-            SwiftUI.Section("Processes this one is responsible for (\(attributed.count))") { ForEach(attributed) { row($0) } }
-            SwiftUI.Section("Same resource coalition (\(coal.count))") { ForEach(coal) { row($0) } }
-            SwiftUI.Section("Same jetsam coalition, other resource coalitions (\(jet.count))") { ForEach(jet) { row($0) } }
+            section("parent", "Parent chain (ppid → launchd)", count: ancestors.count) { ForEach(ancestors) { row($0) } }
+            section("children", "Children (\(children.count))", count: children.count) { ForEach(children) { row($0) } }
+            section("responsible", "Responsible process", count: 1) {
+                if let rp = store.responsibleProcess(proc) { row(rp) }
+                else { Text(store.responsibleDescription(proc)).foregroundStyle(.secondary) }
+            }
+            section("attributed", "Processes this one is responsible for (\(attributed.count))", count: attributed.count) { ForEach(attributed) { row($0) } }
+            section("coalition", "Same resource coalition (\(coal.count))", count: coal.count) { ForEach(coal) { row($0) } }
+            section("jetsam", "Same jetsam coalition, other resource coalitions (\(jet.count))", count: jet.count) { ForEach(jet) { row($0) } }
+        }
+        .onChange(of: proc.key) { expanded = [:] }   // another process: back to the size-based defaults
+    }
+
+    /// Sections longer than this start collapsed, until the user opens them.
+    private static let collapseAbove = 5
+
+    /// The user's open/closed choice per section, for the process shown; sections without one
+    /// follow their size.
+    @State private var expanded: [String: Bool] = [:]
+
+    private func section<Content: View>(_ id: String, _ title: String, count: Int,
+                                        @ViewBuilder content: () -> Content) -> some View {
+        // A plain Section with our own chevron: Section(isExpanded:) only shows its control on hover.
+        let open = expanded[id] ?? (count <= Self.collapseAbove)
+        return SwiftUI.Section {
+            if open { content() }
+        } header: {
+            Button { expanded[id] = !open } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                        .frame(width: 10)
+                    Text(title)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+            .accessibilityValue(open ? "expanded" : "collapsed")
         }
     }
 
