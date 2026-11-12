@@ -215,7 +215,9 @@ struct GeneralTab: View {
             ("Coalition", p.coalition.map { "resource \($0) (\(coalMembers) member(s)) · jetsam \(p.jetsamCoalition.map(String.init) ?? "—") (\(jetMembers) member(s))" } ?? "—"),
             ("Process group", "\(p.pgid)"),
             ("User", "\(p.user) (uid \(p.uid))"),
-            ("Started", "\(Fmt.date.string(from: p.start))  (\(Fmt.age(p.start)) ago)"),
+            ("Started", Fmt.shownStart(p.start) == p.start
+                ? "\(Fmt.date.string(from: p.start))  (\(Fmt.age(p.start)) ago)"
+                : "at boot, before the clock was set (\(Fmt.date.string(from: Fmt.shownStart(p.start))), \(Fmt.age(p.start)) ago)"),
             ("State", stateText(p)),
             ("Sandboxed", p.sandboxed.map { $0 ? "yes" : "no" } ?? "unknown"),
             ("Rosetta", p.isTranslated ? "yes (x86_64 translated)" : "no"),

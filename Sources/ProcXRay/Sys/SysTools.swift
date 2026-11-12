@@ -139,6 +139,30 @@ enum BTM {
     // Long limit: sfltool waits for the user to type an admin password.
     static func dump() -> [BTMItem] { parse(Shell.run("/usr/bin/sfltool", ["dumpbtm"], timeout: 300)) }
 
+    /// The records, or why there are none: a cancelled password prompt, a failed tool and a helper that
+    /// didn't answer must not look like a successful load of zero records.
+    static func load(viaHelper: Bool) -> ([BTMItem], String?) {
+        let text: String
+        if viaHelper {
+            guard let t = HelperClient.shared.run(.btmDump) else { return ([], "The helper did not answer.") }
+            text = t
+        } else {
+            let r = Shell.exec("/usr/bin/sfltool", ["dumpbtm"], timeout: 300)
+            guard r.ok else {
+                let out = r.annotated.trimmingCharacters(in: .whitespacesAndNewlines)
+                return ([], "sfltool dumpbtm failed (exit \(r.status))" + (out.isEmpty ? "." : ":\n\(out)"))
+            }
+            text = r.output
+        }
+        let items = parse(text)
+        // A dump always has a "Records for UID" section; anything else is an error message.
+        if items.isEmpty && !text.contains("Records for UID") {
+            let out = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return ([], out.isEmpty ? "sfltool dumpbtm returned no output." : out)
+        }
+        return (items, nil)
+    }
+
     static func parse(_ text: String) -> [BTMItem] {
         var items: [BTMItem] = []
         var uid = "?"

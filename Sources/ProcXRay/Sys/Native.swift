@@ -118,6 +118,14 @@ enum Native {
         return groups.prefix(Int(n)).contains(80)
     }
 
+    /// kern.boottime, read on each call: it moves when the clock is stepped.
+    static func bootTime() -> Date? {
+        var tv = timeval()
+        var size = MemoryLayout<timeval>.size
+        var mib: [Int32] = [CTL_KERN, KERN_BOOTTIME]
+        guard sysctl(&mib, 2, &tv, &size, nil, 0) == 0, tv.tv_sec > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(tv.tv_sec) + Double(tv.tv_usec) / 1e6)
+    }
     private static func kproc(_ k: kinfo_proc) -> KProc {
         var k = k
         let comm = withUnsafePointer(to: &k.kp_proc.p_comm) {
@@ -214,7 +222,16 @@ enum Native {
             return s
         }
         let exec = readCString() ?? ""
-        while i < size && buf[i] == 0 { i += 1 }
+        // The kernel pads the exec path (and its NUL) to a multiple of 8 bytes from the start of the
+        // strings; argv starts right there. Skipping every NUL instead would also eat an empty argv[0]
+        // and shift an environment variable into the arguments. Checked for path lengths 10–32, odd and
+        // even, with and without an empty argv[0].
+        let aligned = 4 + (i - 4 + 7) / 8 * 8
+        if aligned <= size, buf[i..<aligned].allSatisfy({ $0 == 0 }) {
+            i = aligned
+        } else {
+            while i < size && buf[i] == 0 { i += 1 }   // unexpected layout: the old guess
+        }
         var args: [String] = []
         for _ in 0..<max(0, Int(argc)) { if let a = readCString() { args.append(a) } }
         var env: [String] = []

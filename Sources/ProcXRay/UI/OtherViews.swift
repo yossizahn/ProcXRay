@@ -124,6 +124,15 @@ struct BackgroundItemsView: View {
         }
         if store.btm.isEmpty && !store.btmLoading {
             VStack(spacing: 10) {
+                if let e = store.btmError {
+                    Label("Couldn't load background items", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red).font(.headline)
+                    Text(verbatim: e).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                        .textSelection(.enabled).lineLimit(12).frame(maxWidth: 560)
+                    Divider().frame(maxWidth: 560)
+                } else if store.btmLoaded {
+                    Text("sfltool dumpbtm returned no background item records.").font(.headline)
+                }
                 Image(systemName: store.helperState.isRunning ? "gearshape.2" : "lock.shield")
                     .font(.largeTitle).foregroundStyle(.secondary)
                 Text(verbatim: store.helperState.isRunning
@@ -178,7 +187,8 @@ struct BackgroundItemsView: View {
             if store.btmLoading { ProgressView().controlSize(.small) }
         }
         .navigationTitle("Background Items")
-        .navigationSubtitle("sfltool dumpbtm — \(store.btm.count) records, loaded on request only")
+        .navigationSubtitle(store.btmError.map { "Last reload failed: \($0.split(separator: "\n").first ?? "")" }
+                            ?? "sfltool dumpbtm — \(store.btm.count) records, loaded on request only")
     }
 }
 

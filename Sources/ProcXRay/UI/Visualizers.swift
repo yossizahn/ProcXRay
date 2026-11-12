@@ -332,6 +332,11 @@ struct VmmapView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(s.warnings.enumerated()), id: \.offset) { _, w in
+                Label(w, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(.orange).textSelection(.enabled)
+                    .padding(.horizontal, 10)
+            }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     StatTile(title: "Physical footprint", value: Fmt.bytes(s.footprint),

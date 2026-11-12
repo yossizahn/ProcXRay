@@ -541,7 +541,10 @@ struct ProcessOutline: NSViewRepresentable {
             case .signer:
                 set(p?.signer ?? "")
                 if p?.signer == "unsigned" { color = .systemRed }
-            case .disk: set(p.map { Fmt.bytes(($0.diskRead ?? 0) + ($0.diskWrite ?? 0)) } ?? "")
+            // "—" when neither counter could be read: not the same as no I/O.
+            case .disk: set(p.map { q in
+                Fmt.bytes(q.diskRead == nil && q.diskWrite == nil ? nil : (q.diskRead ?? 0) &+ (q.diskWrite ?? 0))
+            } ?? "")
             case .started: set(p.map { Fmt.age($0.start) } ?? "")
             case .context:
                 set(Self.context(n))

@@ -116,7 +116,11 @@ struct ProcNode: Identifiable, Sendable {
     var coalKey: UInt64 { proc?.coalition ?? 0 }
     var jetsamKey: UInt64 { proc?.jetsamCoalition ?? 0 }
     var startKey: Date { proc?.start ?? .distantPast }
-    var diskKey: UInt64 { (proc?.diskRead ?? 0) + (proc?.diskWrite ?? 0) }
+    /// -1 when neither counter could be read, so unknown sorts apart from (and below) a real zero.
+    var diskKey: Int64 {
+        guard let p = proc, p.diskRead != nil || p.diskWrite != nil else { return -1 }
+        return Int64(clamping: (p.diskRead ?? 0) &+ (p.diskWrite ?? 0))
+    }
 
     func matches(_ q: String) -> Bool {
         if title.localizedCaseInsensitiveContains(q) || subtitle.localizedCaseInsensitiveContains(q) { return true }
@@ -135,6 +139,10 @@ final class Store {
     var jobs: [LaunchdJob] = []
     var btm: [BTMItem] = []
     var btmLoading = false
+    /// Set once a load finished and produced a record list (possibly empty), so "nothing loaded yet",
+    /// "loaded, no records" and "failed" (btmError) look different.
+    var btmLoaded = false
+    var btmError: String?
     var paused = false
     var interval: Double = 2
     var lastRefresh = Date()
@@ -365,8 +373,15 @@ final class Store {
         let useHelper = helperState.isRunning
         Task.detached {
             // As root the helper's sfltool doesn't need to prompt; without it, sfltool asks for a password.
-            let items = useHelper ? BTM.parse(HelperClient.shared.run(.btmDump) ?? "") : BTM.dump()
-            await MainActor.run { self.btm = items; self.btmLoading = false }
+            let (items, error) = BTM.load(viaHelper: useHelper)
+            await MainActor.run {
+                if let error {
+                    self.btmError = error   // keep the previous list, if any
+                } else {
+                    self.btm = items; self.btmError = nil; self.btmLoaded = true
+                }
+                self.btmLoading = false
+            }
         }
     }
 
@@ -714,8 +729,19 @@ enum Fmt {
     static let date: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "MMM d HH:mm:ss"; return f
     }()
+    /// Processes started before the clock was set at boot report 1970/1976 start times ("18487d" old).
+    /// Nothing ran before boot, so for display such a start is the boot time. The raw value stays in
+    /// ProcInfo.start: it is part of the process's identity and must not move when boot time does.
+    static func shownStart(_ d: Date) -> Date {
+        if bootCache == nil || Date().timeIntervalSince(bootCache!.at) > 5 { bootCache = (Date(), Native.bootTime()) }
+        guard let boot = bootCache?.boot, d < boot else { return d }
+        return boot
+    }
+    nonisolated(unsafe) private static var bootCache: (at: Date, boot: Date?)?
+
     static func age(_ d: Date) -> String {
-        let s = Int(Date().timeIntervalSince(d))
+        // A start time after now (the clock was set back since) is shown as just started, not negative.
+        let s = max(0, Int(Date().timeIntervalSince(shownStart(d))))
         if s < 60 { return "\(s)s" }
         if s < 3600 { return "\(s / 60)m" }
         if s < 86400 { return "\(s / 3600)h \(s % 3600 / 60)m" }

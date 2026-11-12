@@ -78,7 +78,8 @@ struct LsofEntry: Identifiable, Hashable, Sendable {
 enum LsofParser {
     static func parse(_ text: String) -> [LsofEntry] {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-        guard let header = lines.first(where: { $0.hasPrefix("COMMAND") }),
+        guard let headerIdx = lines.firstIndex(where: { $0.hasPrefix("COMMAND") }),
+              case let header = lines[headerIdx],
               let nameCol = header.range(of: "NAME")?.lowerBound else { return [] }
         let h = Array(header)
         let nameOffset = header.distance(from: header.startIndex, to: nameCol)
@@ -89,9 +90,11 @@ enum LsofParser {
         }
         let cols: [(String, Int)] = [("TYPE", end("TYPE")), ("DEVICE", end("DEVICE")),
                                      ("SIZE", end("SIZE/OFF")), ("NODE", end("NODE"))]
+        let pidEnd = end("PID")   // PID is right-aligned under its header
         _ = h
         var out: [LsofEntry] = []
-        for line in lines where !line.hasPrefix("COMMAND") {
+        // Only the header itself is skipped: a process may be named COMMANDER.
+        for (n, line) in lines.enumerated() where n != headerIdx {
             let chars = Array(line)
             guard chars.count > 0 else { continue }
             let prefix = String(chars[..<min(nameOffset, chars.count)])
@@ -106,8 +109,11 @@ enum LsofParser {
                 while i < pc.count, pc[i] != " " { i += 1 }
                 toks.append((String(pc[s..<i]), i))
             }
-            // COMMAND may contain spaces: the pid is the first all-digit token after it.
-            guard let pidIdx = toks.firstIndex(where: { Int($0.0) != nil }), toks.count > pidIdx + 2 else { continue }
+            // COMMAND may contain spaces or be all digits (a process named "123"): the pid is the
+            // all-digit token that ends under the PID header.
+            let pidIdx = toks.indices.filter { Int(toks[$0].0) != nil }
+                .min { abs(toks[$0].1 - pidEnd) < abs(toks[$1].1 - pidEnd) }
+            guard let pidIdx, toks.count > pidIdx + 2 else { continue }
             let fdRaw = toks[pidIdx + 2].0
             var fields: [String: String] = [:]
             for t in toks[(pidIdx + 3)...] {
@@ -170,15 +176,21 @@ struct VMSummary: Sendable {
     var regionTotal: VMRegion?
     var zones: [MallocZone] = []
     var zoneTotal: MallocZone?
+    /// Lines vmmap printed about its own limits (an unreadable malloc zone makes its numbers partial).
+    var warnings: [String] = []
     var isEmpty: Bool { regions.isEmpty && zones.isEmpty }
 }
 
 enum VmmapParser {
     private static let size = #"(\d+(?:\.\d+)?[KMGTPB]?)"#
+    /// vmmap always prints the size columns with a unit ("0K", "1.4T"). Requiring it keeps a name that
+    /// ends in a number ("App-Specific Tag 16") from lending that number to the first size column and
+    /// shifting every column after it. Only ALLOCATED in the zone table can be a bare byte count.
+    private static let unitSize = #"(\d+(?:\.\d+)?[KMGTPB])"#
     private static let regionRE = try! NSRegularExpression(
-        pattern: #"^(.+?)\s+"# + Array(repeating: size + #"\s+"#, count: 7).joined() + #"(\d+)\s*(.*)$"#)
+        pattern: #"^(.+?)\s+"# + Array(repeating: unitSize + #"\s+"#, count: 7).joined() + #"(\d+)\s*(.*)$"#)
     private static let zoneRE = try! NSRegularExpression(
-        pattern: #"^(.+?)\s+"# + Array(repeating: size + #"\s+"#, count: 4).joined()
+        pattern: #"^(.+?)\s+"# + Array(repeating: unitSize + #"\s+"#, count: 4).joined()
             + #"(\d+)\s+"# + size + #"\s+"# + size + #"\s+(\d+)%\s+(\d+)\s*$"#)
 
     static func parse(_ text: String) -> VMSummary {
@@ -193,6 +205,9 @@ enum VmmapParser {
             if t == "----" { sec = .other; continue }
             switch sec {
             case .header:
+                // vmmap's header is "Key: value" lines; anything else is a warning it printed, such as
+                // "Can't examine target process's malloc zone …, so memory analysis will be incomplete".
+                if !t.contains(":") || t.hasPrefix("Can't examine") { s.warnings.append(t); continue }
                 if let r = t.range(of: ":") {
                     let k = String(t[..<r.lowerBound]), v = t[r.upperBound...].trimmingCharacters(in: .whitespaces)
                     if k == "Physical footprint" { s.footprint = SizeText.bytes(v) }
