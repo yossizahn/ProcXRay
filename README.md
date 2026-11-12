@@ -29,9 +29,11 @@ Every pane has a **Visual / Raw** switch to see the tool's original text.
 ## Build & run
 
 ```bash
-./build-app.sh
+./build-app.sh --release
 open build/ProcXRay.app
 ```
+
+Without `--release`, `./build-app.sh` makes a dev build, `build/ProcXRay Dev.app`, with bundle id `local.procxray.dev`. It has its own privileged helper (`local.procxray.dev.helper`) and its own settings, so running it alongside an installed `ProcXRay.app` doesn't touch that app's helper. Both are optimized builds.
 
 Requires full Xcode (`/Applications/Xcode.app`). The Command Line Tools SDK for macOS 27 lacks the SwiftUI macro plugin, so `@State` fails to compile with it.
 
@@ -47,7 +49,7 @@ The sidebar's **Install Privileged Helper…** button registers a root daemon th
 - **Mutual code-signing check, pinned to this build.** The helper's XPC listener only accepts a client that is this exact binary: identifier `local.procxray`, the same team, and the same cdhash (`setConnectionCodeSigningRequirement`). The app requires the same of the helper. Team ID and cdhash are read from the binary's own signature at runtime, so anything else signed with the same certificate is rejected. After a rebuild, a helper still running the old binary is rejected until it exits.
 - **Per-user policy.** A caller in the `admin` group (who could run the same tools with `sudo`) can inspect any process. Other users get arguments, environment and tools only for their own processes, and no `sfltool dumpbtm`.
 - **No files left behind.** `sample` writes its report to stdout instead of `/tmp`, and the helper runs with umask 077.
-- **One copy owns it.** macOS registers the daemon by bundle identifier, so launching another copy of the app (a fresh `build/` or a copy elsewhere) moves the registration to that copy; if that copy is unsigned or later deleted, launchd can't start the helper. The sidebar then shows it as unreachable with an **Uninstall Helper** button: uninstall, then install again from the copy you use.
+- **One copy owns it.** macOS registers the daemon by bundle identifier, so launching another copy with the same identifier (another `--release` build, or a copy elsewhere) moves the registration to that copy; dev builds use their own identifier to avoid this. if that copy is unsigned or later deleted, launchd can't start the helper. The sidebar then shows it as unreachable with an **Uninstall Helper** button: uninstall, then install again from the copy you use.
 - **Exits when idle.** It quits about 10 s after the last connection closes, and launchd restarts it on demand.
 - With the helper running, root-owned processes show memory, CPU, threads and arguments, and Background Items loads without a password prompt. `vmmap`/`sample` still cannot inspect Apple platform binaries (SIP).
 

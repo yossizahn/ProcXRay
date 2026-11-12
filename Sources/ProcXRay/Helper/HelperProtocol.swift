@@ -3,9 +3,21 @@ import Security
 
 /// Shared between the app and the root helper (same binary, run with `--helper`).
 enum HelperConfig {
-    static let machService = "local.procxray.helper"
-    static let plistName = "local.procxray.helper.plist"
-    static let bundleID = "local.procxray"
+    /// `local.procxray` for release builds, `local.procxray.dev` for dev builds (see build-app.sh). Read from this
+    /// binary's own signature, so the app and the helper (same binary, started by launchd) always agree, and a dev
+    /// build registers, serves and talks to its own helper instead of taking over the installed app's.
+    static let bundleID: String = {
+        var me: SecCode?
+        var info: CFDictionary?
+        if SecCodeCopySelf([], &me) == errSecSuccess, let me,
+           SecCodeCopySigningInformation(unsafeBitCast(me, to: SecStaticCode.self), [], &info) == errSecSuccess,
+           let id = (info as? [String: Any])?[kSecCodeInfoIdentifier as String] as? String, id.hasPrefix("local.procxray") {
+            return id
+        }
+        return "local.procxray"
+    }()
+    static var machService: String { "\(bundleID).helper" }
+    static var plistName: String { "\(bundleID).helper.plist" }
 
     /// Team ID and cdhash of this binary's signature (app and helper are the same binary).
     /// Note: an "Apple Development: Name (XXXXXXXXXX)" certificate's parenthesised ID is NOT the team ID.
