@@ -10,9 +10,14 @@ struct SplitPane<Top: View, Bottom: View>: View {
     private let minPane: CGFloat = 120
     private let top: Top
     private let bottom: Bottom
+    private let showsBottom: Bool
 
-    init(id: String, defaultFraction: Double = 0.5, @ViewBuilder top: () -> Top, @ViewBuilder bottom: () -> Bottom) {
+    /// With `showsBottom` false the top view fills the pane. It keeps its identity either way, so
+    /// toggling the bottom pane doesn't rebuild (or lose the state of) the top view.
+    init(id: String, defaultFraction: Double = 0.5, showsBottom: Bool = true,
+         @ViewBuilder top: () -> Top, @ViewBuilder bottom: () -> Bottom) {
         _fraction = AppStorage(wrappedValue: defaultFraction, "splitPane.\(id)")
+        self.showsBottom = showsBottom
         self.top = top()
         self.bottom = bottom()
     }
@@ -20,11 +25,13 @@ struct SplitPane<Top: View, Bottom: View>: View {
     var body: some View {
         GeometryReader { geo in
             let total = geo.size.height
-            let topHeight = clamp(total * fraction, total)
+            let topHeight = showsBottom ? clamp(total * fraction, total) : total
             VStack(spacing: 0) {
                 top.frame(width: geo.size.width, height: topHeight)
-                divider(total: total, topHeight: topHeight)
-                bottom.frame(width: geo.size.width, height: max(0, total - topHeight - 1))
+                if showsBottom {
+                    divider(total: total, topHeight: topHeight)
+                    bottom.frame(width: geo.size.width, height: max(0, total - topHeight - 1))
+                }
             }
         }
     }

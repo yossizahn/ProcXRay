@@ -18,6 +18,7 @@ struct ProcessesView: View {
     @Environment(Store.self) var store
     @Environment(\.openWindow) private var openWindow
     @AppStorage("grouping") private var grouping: Grouping = .parent
+    @AppStorage(InspectorPaneKey.name) private var showPane = false
     @State private var search = ""
     @State private var selection: ProcNode.ID?
     @State private var sort = [KeyPathComparator(\ProcNode.pidKey)]
@@ -34,19 +35,25 @@ struct ProcessesView: View {
     private func inspect(_ p: ProcInfo) { openWindow(id: ProcessWindow.id, value: ProcessRef(p)) }
 
     var body: some View {
-        ProcessOutline(store: store, grouping: grouping, filter: search,
-                       selection: $selection, sort: $sort,
-                       onOpen: { p in inspect(p) },
-                       onSignal: { p, sig, label in pendingSignal = (p, sig, label) })
-            // A grouping switch re-parents nearly every row; start from a fresh outline (all expanded).
-            .id(grouping)
+        SplitPane(id: "processes", defaultFraction: 0.6, showsBottom: showPane) {
+            ProcessOutline(store: store, grouping: grouping, filter: search,
+                           selection: $selection, sort: $sort,
+                           onOpen: { p in inspect(p) },
+                           onSignal: { p, sig, label in pendingSignal = (p, sig, label) })
+                // A grouping switch re-parents nearly every row; start from a fresh outline (all expanded).
+                .id(grouping)
+        } bottom: {
+            SelectedProcessPane(selection: selection)
+        }
         .focusedSceneValue(\.inspectProcess, hasProcessSelected ? { inspectSelected() } : nil)
         .searchable(text: $search, placement: .toolbar, prompt: "name, pid, path, team, bundle, label…")
         .toolbar {
             ToolbarItemGroup {
                 Button { inspectSelected() } label: { Label("Inspect", systemImage: "info.circle") }
-                    .help("Inspect the selected process (⌘I)")
+                    .help("Inspect the selected process in its own window (⌘I)")
                     .disabled(!hasProcessSelected)
+                Toggle(isOn: $showPane) { Label("Inspector Pane", systemImage: "rectangle.bottomhalf.inset.filled") }
+                    .help(showPane ? "Hide the inspector pane (⌥⌘I)" : "Show the selected process in a pane below the list (⌥⌘I)")
                 Menu {
                     Picker("Group", selection: $grouping) {
                         ForEach(Grouping.allCases) { Text($0.label).tag($0) }
@@ -72,6 +79,24 @@ struct ProcessesView: View {
                 }
                 pendingSignal = nil
             }
+        }
+    }
+}
+
+/// The optional pane under the process list. It reads per-refresh data itself, so a tick re-renders
+/// only this pane, not ProcessesView (see the note there).
+struct SelectedProcessPane: View {
+    @Environment(Store.self) var store
+    let selection: ProcNode.ID?
+
+    var body: some View {
+        if let id = selection, id >= 0, let p = store.procs[pid_t(id)] {
+            InspectorView(proc: p)
+        } else {
+            Text(selection.map { $0 < 0 ? "Group row — select a process inside it." : "This process has exited." }
+                 ?? "Select a process")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

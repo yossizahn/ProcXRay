@@ -73,15 +73,21 @@ struct ProcXRayApp: App {
 /// View ▸ Inspect Process (⌘I), as in Activity Monitor; acts on the selected row of the focused window.
 struct InspectCommand: Commands {
     @FocusedValue(\.inspectProcess) private var inspect
+    @AppStorage(InspectorPaneKey.name) private var showPane = false
     var body: some Commands {
         CommandGroup(before: .toolbar) {
             Button("Inspect Process") { inspect?() }
                 .keyboardShortcut("i")
                 .disabled(inspect == nil)
+            Button(showPane ? "Hide Inspector Pane" : "Show Inspector Pane") { showPane.toggle() }
+                .keyboardShortcut("i", modifiers: [.command, .option])
             Divider()
         }
     }
 }
+
+/// Whether the Processes view shows the selected process in a pane below the list (off: inspector windows only).
+enum InspectorPaneKey { static let name = "showInspectorPane" }
 
 struct InspectProcessKey: FocusedValueKey { typealias Value = () -> Void }
 extension FocusedValues {
