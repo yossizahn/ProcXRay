@@ -130,9 +130,10 @@ struct SelectedProcessPane: View {
     var sort: ColumnSort
     var columns: Set<String>
 
-    /// The process the selected row stands for, by key: a pid reused under a still-selected row is another process.
+    /// The selected process row's process, by key: a pid reused under a still-selected row is another
+    /// process. Group rows (an app's row included) have their own inspector and don't go into the history.
     private var selectedProc: ProcInfo? {
-        selection.flatMap(SmartTree.pid(forRow:)).flatMap { store.procs[$0] }
+        selection.flatMap { $0 >= 0 ? store.procs[pid_t(clamping: $0)] : nil }
     }
 
     /// Following a link selects its process in the tree. A row the search hides can't be selected, so the
@@ -148,11 +149,11 @@ struct SelectedProcessPane: View {
     var body: some View {
         Group {
             // Reading store.procs makes the summary follow each refresh.
-            if let id = selection, id < 0, SmartTree.pid(forRow: id) == nil, !store.procs.isEmpty,
+            if let id = selection, id < 0, !store.procs.isEmpty,
                let n = Self.find(id, in: store.nodes(grouping: grouping, filter: filter, sort: sort, columns: columns)) {
-                GroupSummaryView(node: n).environment(\.inspectorLinks, links)
-            } else if selection.map({ $0 < 0 && SmartTree.pid(forRow: $0) == nil }) == true {
-                placeholder("Group row — select a process inside it.")
+                GroupInspectorView(node: n).environment(\.inspectorLinks, links)
+            } else if selection.map({ $0 < 0 }) == true {
+                placeholder("This group isn't in the list any more.")
             } else {
                 // Nothing selected (deselected, or the row went away when its process exited): keep
                 // showing the last process, as a browser keeps its page.
@@ -175,62 +176,6 @@ struct SelectedProcessPane: View {
             if let c = n.children, let hit = find(id, in: c) { return hit }
         }
         return nil
-    }
-}
-
-/// What a category or group row holds: counts, totals, and its heaviest processes.
-struct GroupSummaryView: View {
-    let node: ProcNode
-
-    private var members: [ProcInfo] {
-        var out: [ProcInfo] = []
-        func walk(_ n: ProcNode) { if let p = n.proc { out.append(p) }; n.children?.forEach(walk) }
-        walk(node)
-        return out
-    }
-
-    var body: some View {
-        let ms = members
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(node.title).font(.title3.bold())
-                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
-                    row("Processes", node.shownCount == node.totalCount ? "\(node.totalCount)"
-                                                                        : "\(node.shownCount) of \(node.totalCount) (search)")
-                    if node.kind == .category, node.unitCount != node.shownCount { row("Top-level rows", "\(node.unitCount)") }
-                    row("CPU", "\(Fmt.pct(node.cpuKey)) %")
-                    row("Memory", Fmt.bytes(node.memKey))
-                    row("Disk I/O", Fmt.bytes(node.diskKey < 0 ? nil : UInt64(node.diskKey)))
-                }
-                HStack(alignment: .top, spacing: 24) {
-                    top("Top by CPU", ms.sorted { ($0.cpuPercent ?? 0) > ($1.cpuPercent ?? 0) }) { "\(Fmt.pct($0.cpuPercent)) %" }
-                    top("Top by memory", ms.sorted { ($0.footprint ?? 0) > ($1.footprint ?? 0) }) { Fmt.bytes($0.footprint) }
-                }
-            }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func row(_ k: String, _ v: String) -> some View {
-        GridRow {
-            Text(k).foregroundStyle(.secondary)
-            Text(verbatim: v).monospacedDigit().textSelection(.enabled)
-        }
-    }
-
-    private func top(_ title: String, _ ps: [ProcInfo], _ value: @escaping (ProcInfo) -> String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.headline)
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
-                ForEach(ps.prefix(5), id: \.key) { p in
-                    GridRow {
-                        ProcessChip(proc: p)
-                        Text(verbatim: value(p)).monospacedDigit().gridColumnAlignment(.trailing)
-                    }
-                }
-            }
-        }
     }
 }
 

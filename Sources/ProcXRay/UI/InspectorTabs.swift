@@ -469,7 +469,7 @@ struct UsageTab: View {
                     Text("Task info isn't readable (owned by \(p.user)). Install the privileged helper to read it.")
                         .foregroundStyle(.secondary)
                 }
-                section("CPU", "cpu", h?.cpu, format: { "\(Fmt.pct($0)) %" }, rows: [
+                Self.section("CPU", "cpu", h?.cpu, format: { "\(Fmt.pct($0)) %" }, rows: [
                     ("CPU", r?.cpuPercent.map { "\(Fmt.pct($0)) %" } ?? "—", Fmt.secs(p.cpuNanos)),
                     ("On performance cores", r?.pCoreShare.map { String(format: "%.0f %%", $0) } ?? "—",
                      c?.pCoreNanos.map { pc in Fmt.secs(pc) + (p.cpuNanos.flatMap { $0 > 0 ? String(format: " (%.0f %%)", Double(pc) / Double($0) * 100) : nil } ?? "") } ?? "—"),
@@ -482,7 +482,7 @@ struct UsageTab: View {
                      c.flatMap { c in c.instructions.flatMap { i in c.cycles.flatMap { $0 > 0 ? String(format: "%.2f", Double(i) / Double($0)) : nil } } } ?? "—"),
                     ("Context switches", rate(r?.contextSwitches), Fmt.count(c?.contextSwitches)),
                 ])
-                section("Memory", "memorychip", h?.memory, fromZero: false, format: { Fmt.bytes(UInt64($0)) }, rows: [
+                Self.section("Memory", "memorychip", h?.memory, fromZero: false, format: { Fmt.bytes(UInt64($0)) }, rows: [
                     ("Footprint", Fmt.bytes(p.footprint), c?.peakFootprint.map { "peak " + Fmt.bytes($0) } ?? "—"),
                     ("Resident", Fmt.bytes(p.rss), ""),
                     ("Virtual", Fmt.bytes(p.virt), ""),
@@ -490,17 +490,17 @@ struct UsageTab: View {
                     ("Page faults", rate(r?.faults), c.map { "\(Fmt.count($0.faults)) (\(Fmt.count($0.cowFaults)) copy-on-write)" } ?? "—"),
                     ("Page-ins", rate(r?.pageins), Fmt.count(c?.pageins)),
                 ])
-                section("Disk", "internaldrive", h?.disk, format: bytesPerSecFormat, rows: [
+                Self.section("Disk", "internaldrive", h?.disk, format: bytesPerSecFormat, rows: [
                     ("Read", r?.diskRead.map(bytesPerSecFormat) ?? "—", Fmt.bytes(p.diskRead)),
                     ("Written", r?.diskWrite.map(bytesPerSecFormat) ?? "—", Fmt.bytes(p.diskWrite)),
                     ("Logical writes", r?.logicalWrites.map(bytesPerSecFormat) ?? "—", Fmt.bytes(c?.logicalWrites)),
                 ])
-                section("Energy and wakeups", "bolt", h?.power, format: wattsFormat, rows: [
+                Self.section("Energy and wakeups", "bolt", h?.power, format: wattsFormat, rows: [
                     ("CPU energy", r?.watts.map(wattsFormat) ?? "—", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
                     ("Billed energy", "", c?.billedEnergyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
                     ("Wakeups (idle + interrupt)", rate(r?.wakeups), Fmt.count(p.wakeups)),
                 ])
-                section("System calls and IPC", "arrow.left.arrow.right", nil, format: { _ in "" }, rows: [
+                Self.section("System calls and IPC", "arrow.left.arrow.right", nil, format: { _ in "" }, rows: [
                     ("BSD system calls", rate(r?.unixSyscalls), Fmt.count(c?.unixSyscalls)),
                     ("Mach system calls", rate(r?.machSyscalls), Fmt.count(c?.machSyscalls)),
                     ("Mach messages sent", rate(r?.machMsgsSent), Fmt.count(c?.machMsgsSent)),
@@ -528,8 +528,10 @@ struct UsageTab: View {
     private func rate(_ v: Double?) -> String { v.map(perSecFormat) ?? "—" }
     private static let metricWidth: CGFloat = 180, nowWidth: CGFloat = 90, totalWidth: CGFloat = 240
 
-    private func section(_ title: String, _ symbol: String, _ spark: [Double?]?, fromZero: Bool = true,
-                         format: @escaping (Double) -> String, rows: [Row]) -> some View {
+    /// One section: metric, now and since start in fixed-width columns, and its sparkline. The group
+    /// inspector uses it too, so both pages line up the same way.
+    static func section(_ title: String, _ symbol: String, _ spark: [Double?]?, fromZero: Bool = true,
+                        format: @escaping (Double) -> String, rows: [(String, String, String)]) -> some View {
         Card(title: title, systemImage: symbol) {
             HStack(alignment: .top, spacing: 16) {
                 // Fixed column widths, so every section's columns and sparkline line up with the others'.
