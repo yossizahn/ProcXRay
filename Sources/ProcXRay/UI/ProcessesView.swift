@@ -19,10 +19,10 @@ struct ProcessesView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("grouping") private var grouping: Grouping = .smart
     @AppStorage(InspectorPaneKey.name) private var showPane = false
-    @AppStorage(ColumnPrefs.key) private var hiddenColumns = ColumnPrefs.defaultHidden
+    @AppStorage(ColumnPrefs.key) private var shownColumns = ColumnPrefs.defaultShown
     @State private var search = ""
     @State private var selection: ProcNode.ID?
-    @State private var sort = [KeyPathComparator(\ProcNode.pidKey)]
+    @State private var sort = ColumnSort.pid
     @State private var pendingSignal: (ProcInfo, Int32, String)?
     @State private var signalError: String?
     /// The pane's history. Kept here so hiding the pane doesn't lose it; this view never reads it.
@@ -43,7 +43,7 @@ struct ProcessesView: View {
     var body: some View {
         SplitPane(id: "processes", defaultFraction: 0.6, showsBottom: showPane) {
             ProcessOutline(store: store, grouping: grouping, filter: search,
-                           selection: $selection, sort: $sort, hiddenColumns: ColumnPrefs.parse(hiddenColumns),
+                           selection: $selection, sort: $sort, shownColumns: ColumnPrefs.parse(shownColumns),
                            onOpen: { p in inspect(p) },
                            onSignal: { p, sig, label in
                                // Resume is harmless: send it at once. The rest are confirmed first.
@@ -52,7 +52,8 @@ struct ProcessesView: View {
                 // A grouping switch re-parents nearly every row; start from a fresh outline (all expanded).
                 .id(grouping)
         } bottom: {
-            SelectedProcessPane(selection: $selection, nav: paneNav, grouping: grouping, filter: search, sort: sort)
+            SelectedProcessPane(selection: $selection, nav: paneNav, grouping: grouping, filter: search, sort: sort,
+                                columns: ColumnPrefs.parse(shownColumns))
         }
         .focusedSceneValue(\.inspectProcess, hasProcessSelected ? { inspectSelected() } : nil)
         .searchable(text: $search, placement: .toolbar, prompt: "name, pid, path, team, bundle, label…")
@@ -119,7 +120,8 @@ struct SelectedProcessPane: View {
     let nav: InspectorNavigation
     var grouping: Grouping
     var filter: String
-    var sort: [KeyPathComparator<ProcNode>]
+    var sort: ColumnSort
+    var columns: Set<String>
 
     /// The process the selected row stands for, by key: a pid reused under a still-selected row is another process.
     private var selectedProc: ProcInfo? {
@@ -140,7 +142,7 @@ struct SelectedProcessPane: View {
         Group {
             // Reading store.procs makes the summary follow each refresh.
             if let id = selection, id < 0, SmartTree.pid(forRow: id) == nil, !store.procs.isEmpty,
-               let n = Self.find(id, in: store.nodes(grouping: grouping, filter: filter, sort: sort)) {
+               let n = Self.find(id, in: store.nodes(grouping: grouping, filter: filter, sort: sort, columns: columns)) {
                 GroupSummaryView(node: n).environment(\.inspectorLinks, links)
             } else if selection.map({ $0 < 0 && SmartTree.pid(forRow: $0) == nil }) == true {
                 placeholder("Group row — select a process inside it.")

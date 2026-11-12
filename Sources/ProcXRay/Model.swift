@@ -157,8 +157,10 @@ struct ProcNode: Identifiable, Sendable {
     var shownCount = 0
     var unitCount = 0
 
-    var nameKey: String { title.lowercased() }
-    var pidKey: Int { proc.map { Int($0.pid) } ?? Int(Int32.max) }
+    /// Group rows: their value in each shown column (Column.GroupRule), filled in by `Store.sorted`.
+    var groupValues: [String: CellValue] = [:]
+    /// The row's value in the sort column.
+    var sortValue: CellValue = .empty
     /// Own value, or the subtree total for rows without a process. Filled in by `Store.sorted`:
     /// computing it on read re-walked the whole subtree on every sort comparison.
     var cpuKey: Double = 0
@@ -166,13 +168,6 @@ struct ProcNode: Identifiable, Sendable {
     /// -1 when neither counter could be read (anywhere in the subtree, for group rows), so unknown
     /// sorts apart from (and below) a real zero.
     var diskKey: Int64 = -1
-    var userKey: String { proc?.user ?? "" }
-    var signerKey: String { proc?.signer ?? "" }
-    var threadsKey: Int32 { proc?.threads ?? 0 }
-    var respKey: Int { proc?.responsible.map(Int.init) ?? 0 }
-    var coalKey: UInt64 { proc?.coalition ?? 0 }
-    var jetsamKey: UInt64 { proc?.jetsamCoalition ?? 0 }
-    var startKey: Date { proc?.start ?? .distantPast }
     static func disk(_ p: ProcInfo) -> Int64 {
         guard p.diskRead != nil || p.diskWrite != nil else { return -1 }
         return Int64(clamping: (p.diskRead ?? 0) &+ (p.diskWrite ?? 0))
@@ -215,10 +210,13 @@ final class Store {
     var refreshError: String?
 
     /// Bumped whenever an input of nodes() changes, so the table's tree is only rebuilt when needed.
-    @ObservationIgnored private var dataGen = 0
+    @ObservationIgnored private(set) var dataGen = 0
+    /// The Kind column's labels, rebuilt when the data changes (see `kind(of:)`).
+    @ObservationIgnored var kindCache: (gen: Int, map: [pid_t: String])?
     /// Bumps each time nodes() actually rebuilds, so views can skip work when it returned the cached tree.
     @ObservationIgnored private(set) var nodesVersion = 0
-    @ObservationIgnored private var nodesCache: (gen: Int, grouping: Grouping, filter: String, sort: [KeyPathComparator<ProcNode>], nodes: [ProcNode])?
+    @ObservationIgnored private var nodesCache: (gen: Int, grouping: Grouping, filter: String, sort: ColumnSort,
+                                                 columns: Set<String>, nodes: [ProcNode])?
 
     private(set) var signCache: [String: SignInfo] = [:]
     @ObservationIgnored private var prevCPU: [String: (UInt64, UInt64)] = [:]   // key -> (cpuNanos, wall uptime nanos)
@@ -611,15 +609,17 @@ final class Store {
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    func nodes(grouping: Grouping, filter: String, sort: [KeyPathComparator<ProcNode>]) -> [ProcNode] {
-        if let c = nodesCache, c.gen == dataGen, c.grouping == grouping, c.filter == filter, c.sort == sort { return c.nodes }
-        let out = buildNodes(grouping: grouping, filter: filter, sort: sort)
-        nodesCache = (dataGen, grouping, filter, sort, out)
+    /// `columns`: the shown columns, whose group-row values are worked out (the others cost nothing).
+    func nodes(grouping: Grouping, filter: String, sort: ColumnSort, columns: Set<String> = []) -> [ProcNode] {
+        if let c = nodesCache, c.gen == dataGen, c.grouping == grouping, c.filter == filter, c.sort == sort,
+           c.columns == columns { return c.nodes }
+        let out = buildNodes(grouping: grouping, filter: filter, sort: sort, columns: columns)
+        nodesCache = (dataGen, grouping, filter, sort, columns, out)
         nodesVersion &+= 1
         return out
     }
 
-    private func buildNodes(grouping: Grouping, filter: String, sort: [KeyPathComparator<ProcNode>]) -> [ProcNode] {
+    private func buildNodes(grouping: Grouping, filter: String, sort: ColumnSort, columns: Set<String>) -> [ProcNode] {
         let all = Array(procs.values)
         var roots: [ProcNode]
         switch grouping {
@@ -695,7 +695,8 @@ final class Store {
         }
         roots = roots.map(Self.counted)
         if !filter.isEmpty { roots = prune(roots, filter) }
-        return sorted(roots, sort)
+        let shown = Column.all.filter { columns.contains($0.id) && $0.id != "name" && $0.id != "context" }
+        return sorted(roots, sort, shown: shown, sortColumn: Column.byID[sort.id], memo: ColumnMemo()).nodes
     }
 
     /// Sets totalCount (processes in the subtree) before the search filter prunes anything.
@@ -745,10 +746,32 @@ final class Store {
     /// kept Dictionary iteration order, which reshuffles whenever a process comes or goes; the table then
     /// saw hundreds of moved rows per refresh and spent seconds rebuilding and re-measuring row views.
     /// Children are sorted first so each node's cpuKey/memKey (subtree totals) is set before it is compared.
-    private func sorted(_ nodes: [ProcNode], _ sort: [KeyPathComparator<ProcNode>]) -> [ProcNode] {
-        nodes.map { n in
+    /// Also fills each group row's value for every shown column (by the column's group rule) and each
+    /// row's value in the sort column. Returns the processes under `nodes`, for the parent's group values.
+    private func sorted(_ nodes: [ProcNode], _ sort: ColumnSort, shown: [Column], sortColumn: Column?,
+                        memo: ColumnMemo) -> (nodes: [ProcNode], members: [ProcInfo]) {
+        var allMembers: [ProcInfo] = []
+        let out = nodes.map { n in
             var m = n
-            m.children = n.children.map { sorted($0, sort) }
+            var members: [ProcInfo] = []
+            if let c = n.children {
+                let r = sorted(c, sort, shown: shown, sortColumn: sortColumn, memo: memo)
+                m.children = r.nodes
+                members = r.members
+            }
+            if let p = n.proc { members.append(p) }
+            allMembers += members
+            if n.proc == nil {
+                for (i, col) in shown.enumerated() {
+                    m.groupValues[col.id] = col.groupValue(m, members: members, store: self) { memo.value(i, col, $0, self) }
+                }
+            }
+            if sort.id == "name" {
+                m.sortValue = .text(n.title)
+            } else if let col = sortColumn {
+                m.sortValue = n.proc.map { col.sortValue($0, self) } ?? m.groupValues[col.id]
+                    ?? col.groupValue(m, members: members, store: self) { col.value($0, self) }
+            }
             let kids = m.children ?? []
             if let p = n.proc {
                 m.cpuKey = p.cpuPercent ?? 0
@@ -767,15 +790,19 @@ final class Store {
             if a.fixedOrder != nil || b.fixedOrder != nil, a.fixedOrder != b.fixedOrder {
                 return (a.fixedOrder ?? .max) < (b.fixedOrder ?? .max)
             }
-            for c in sort {
-                switch c.compare(a, b) {
-                case .orderedAscending: return true
-                case .orderedDescending: return false
-                case .orderedSame: continue
+            // Rows without a value go last, whichever way the column is sorted.
+            let av = a.sortValue.hasValue, bv = b.sortValue.hasValue
+            if av != bv { return av }
+            if av {
+                switch CellValue.compare(a.sortValue, b.sortValue) {
+                case .orderedAscending: return sort.ascending
+                case .orderedDescending: return !sort.ascending
+                case .orderedSame: break
                 }
             }
             return a.id < b.id
         }
+        return (out, allMembers)
     }
 
     // MARK: Actions
@@ -833,5 +860,19 @@ enum Fmt {
         if s < 3600 { return "\(s / 60)m" }
         if s < 86400 { return "\(s / 3600)h \(s % 3600 / 60)m" }
         return "\(s / 86400)d \(s % 86400 / 3600)h"
+    }
+}
+
+/// Each process's value per shown column, worked out once per tree build: a process is a member of
+/// every group row above it.
+@MainActor
+final class ColumnMemo {
+    private var values: [[pid_t: CellValue]] = []
+    func value(_ i: Int, _ col: Column, _ p: ProcInfo, _ store: Store) -> CellValue {
+        while values.count <= i { values.append([:]) }
+        if let v = values[i][p.pid] { return v }
+        let v = col.value(p, store)
+        values[i][p.pid] = v
+        return v
     }
 }

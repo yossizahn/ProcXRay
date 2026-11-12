@@ -42,14 +42,35 @@ enum Bench {
         for g in Grouping.allCases {
             time("nodes(\(g.label))") {
                 store.procs = snap.procs   // bump the cache generation so it really rebuilds
-                _ = store.nodes(grouping: g, filter: "", sort: [KeyPathComparator(\ProcNode.pidKey)])
+                _ = store.nodes(grouping: g, filter: "", sort: .pid)
             }
         }
         for g in Grouping.allCases {
             time("nodes(\(g.label), memory)") {
                 store.procs = snap.procs
-                _ = store.nodes(grouping: g, filter: "", sort: [KeyPathComparator(\ProcNode.memKey, order: .reverse)])
+                _ = store.nodes(grouping: g, filter: "", sort: ColumnSort(id: "mem", ascending: false))
             }
+        }
+        let defaultCols = Set(Column.defaultShown), allCols = Set(Column.all.map(\.id))
+        for (label, cols) in [("default columns", defaultCols), ("all columns", allCols)] {
+            for g in [Grouping.smart, .flat] {
+                time("nodes(\(g.label), \(label))") {
+                    store.procs = snap.procs
+                    _ = store.nodes(grouping: g, filter: "", sort: ColumnSort(id: "mem", ascending: false), columns: cols)
+                }
+            }
+        }
+        if ProcessInfo.processInfo.environment["BENCH_COLUMNS"] != nil {
+            for c in Column.all {
+                time("nodes(Smart, only \(c.id))") {
+                    store.procs = snap.procs
+                    _ = store.nodes(grouping: .smart, filter: "", sort: .pid, columns: [c.id])
+                }
+            }
+        }
+        time("nodes(Smart, all columns, sort by Kind)") {
+            store.procs = snap.procs
+            _ = store.nodes(grouping: .smart, filter: "", sort: ColumnSort(id: "kind", ascending: true), columns: allCols)
         }
         time("ghosts()") { _ = Store.ghosts(procs: snap.procs, lsApps: snap.ls) }
         let one = Array(snap.procs.values.prefix(50))

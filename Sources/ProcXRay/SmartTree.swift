@@ -30,6 +30,20 @@ enum ProcCategory: Int, CaseIterable, Sendable {
         }
     }
 
+    /// One member of the category, for the Kind column.
+    var singular: String {
+        switch self {
+        case .apps: "App"
+        case .backgroundApps: "Background app"
+        case .extensions: "Extension"
+        case .thirdPartyServices: "Third-party service"
+        case .systemInterface: "System interface"
+        case .systemServices: "System service"
+        case .other: "Other"
+        case .leftBehind: "Left behind"
+        }
+    }
+
     /// What one top-level row of the category is called in its summary ("12 apps · 151 processes").
     var unitNoun: String {
         switch self {
@@ -203,10 +217,16 @@ enum SmartTree {
         return out
     }
 
+    /// devname() searches /dev, so each device is looked up once (the TTY column asks per process per refresh).
     static func ttyName(_ tty: Int32) -> String {
-        guard let c = devname(dev_t(tty), mode_t(S_IFCHR)) else { return "tty \(tty)" }
-        return String(cString: c)
+        ttyLock.lock(); defer { ttyLock.unlock() }
+        if let n = ttyNames[tty] { return n }
+        let n = devname(dev_t(tty), mode_t(S_IFCHR)).map { String(cString: $0) } ?? "tty \(tty)"
+        ttyNames[tty] = n
+        return n
     }
+    nonisolated(unsafe) private static var ttyNames: [Int32: String] = [:]
+    private static let ttyLock = NSLock()
 
     // MARK: Build
 
@@ -215,9 +235,10 @@ enum SmartTree {
         var lsApps: [LSApp]
     }
 
-    static func build(_ input: Input) -> [ProcNode] {
+    /// Pass 1: the unit root of every process.
+    static func unitRoots(_ input: Input) -> [pid_t: pid_t] {
         let procs = input.procs
-        // Pass 1: owners. Rule order follows the proposal (pid-domain owner, rule 4, is not read yet).
+        // Owners. Rule order follows the proposal (pid-domain owner, rule 4, is not read yet).
         var appByBundle: [String: pid_t] = [:]
         for a in input.lsApps where !a.exited {
             if let pid = a.pid, let b = a.bundlePath, procs[pid] != nil { appByBundle[b] = pid }
@@ -253,8 +274,31 @@ enum SmartTree {
             for q in path { rootOf[q] = r }
             return r
         }
+        for p in procs.values { _ = root(p.pid) }
+        return rootOf
+    }
+
+    /// "App · Renderer", "Extension · Widgets", "System service": the Kind column, per pid.
+    static func kinds(_ input: Input) -> [pid_t: String] {
+        let rootOf = unitRoots(input)
+        var out: [pid_t: String] = [:]
+        for p in input.procs.values {
+            let r = rootOf[p.pid] ?? p.pid
+            guard let rp = input.procs[r] else { continue }
+            let c = category(ofRoot: rp)
+            var s = c.singular
+            if c == .extensions, let e = rp.extensionPoint { s += " · " + ExtensionInfo.title(e) }
+            if p.pid != r { s += " · " + (p.tty != nil ? "Terminal" : role(of: p).singular) }
+            out[p.pid] = s
+        }
+        return out
+    }
+
+    static func build(_ input: Input) -> [ProcNode] {
+        let procs = input.procs
+        let rootOf = unitRoots(input)
         var members: [pid_t: [ProcInfo]] = [:]
-        for p in procs.values { members[root(p.pid), default: []].append(p) }
+        for p in procs.values { members[rootOf[p.pid] ?? p.pid, default: []].append(p) }
 
         // Inside a unit the parent chain gives the structure (a shell under its terminal, a job under the
         // shell); a member whose parent is outside the unit hangs off the root.
@@ -413,6 +457,21 @@ enum ProcRole: Int, CaseIterable, Sendable {
         case .xpcServices: "XPC services"
         case .terminalSessions: "Terminal sessions"
         case .helpers: "Helpers"
+        }
+    }
+
+    var singular: String {
+        switch self {
+        case .renderers: "Renderer"
+        case .contentProcesses: "Content process"
+        case .webContent: "Web content"
+        case .gpu: "GPU"
+        case .network: "Network"
+        case .utility: "Utility"
+        case .extensions: "Extension"
+        case .xpcServices: "XPC service"
+        case .terminalSessions: "Terminal"
+        case .helpers: "Helper"
         }
     }
 }

@@ -23,6 +23,7 @@ struct ProcXRayApp: App {
     @State private var store = Store()
 
     init() {
+        ColumnPrefs.migrate()
         if CommandLine.arguments.contains("--spawn-leftover") {
             // Test helper: reproduce "app quit but its helper kept running".
             let p = Process()

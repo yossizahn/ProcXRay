@@ -281,7 +281,7 @@ enum SelfTest {
         // Every grouping must place each process exactly once, with unique row ids.
         let store = Store(); store.procs = procs; store.lsApps = snap.ls
         for g in Grouping.allCases {
-            let roots = store.nodes(grouping: g, filter: "", sort: [KeyPathComparator(\ProcNode.pidKey)])
+            let roots = store.nodes(grouping: g, filter: "", sort: .pid)
             var ids: [Int] = [], pids: [pid_t] = []
             func walk(_ n: ProcNode) { ids.append(n.id); if let p = n.proc { pids.append(p.pid) }; n.children?.forEach(walk) }
             roots.forEach(walk)
@@ -320,6 +320,15 @@ enum SelfTest {
                 }
             }
         }
+        // Group-row values with every column shown: one line per category, and the first app's row.
+        let all = Set(Column.all.map(\.id))
+        let smart = store.nodes(grouping: .smart, filter: "", sort: ColumnSort(id: "mem", ascending: false), columns: all)
+        func values(_ n: ProcNode) -> String {
+            Column.all.compactMap { c in n.groupValues[c.id].flatMap { $0.hasValue ? "\(c.id)=\($0.display)" : nil } }
+                .joined(separator: " ")
+        }
+        for c in smart { print("values \(c.title): \(values(c))") }
+        if let app = smart.first?.children?.first { print("values \(app.title): \(values(app))") }
         for g in Store.ghosts(procs: procs, lsApps: snap.ls) {
             print("left behind by \(g.name) (\(g.detail)): \(g.survivors.map { "\($0.name)(\($0.pid))" })")
         }

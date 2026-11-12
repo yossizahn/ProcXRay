@@ -12,9 +12,9 @@ struct ProcessOutline: NSViewRepresentable {
     let grouping: Grouping
     let filter: String
     @Binding var selection: ProcNode.ID?
-    @Binding var sort: [KeyPathComparator<ProcNode>]
-    /// Column ids the user hid (ColumnPrefs); shared by every window and View ▸ Columns.
-    var hiddenColumns: Set<String> = []
+    @Binding var sort: ColumnSort
+    /// Column ids shown (ColumnPrefs); shared by every window and View ▸ Columns.
+    var shownColumns: Set<String> = ColumnPrefs.parse(ColumnPrefs.defaultShown)
     let onOpen: (ProcInfo) -> Void
     let onSignal: (ProcInfo, Int32, String) -> Void
 
@@ -34,18 +34,20 @@ struct ProcessOutline: NSViewRepresentable {
         outline.style = .fullWidth
         outline.autoresizesOutlineColumn = false
         outline.indentationPerLevel = 14
-        for c in Column.allCases {
-            let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(c.rawValue))
+        for c in Column.all {
+            let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(c.id))
             col.title = c.title
-            col.minWidth = c.widths.min
-            col.width = max(c.widths.ideal, Column.sortedHeaderWidth(col))
+            col.minWidth = min(c.minWidth, c.width)
+            col.width = max(c.width, Column.sortedHeaderWidth(col))
             col.headerCell.alignment = c.numeric ? .right : .left
             col.headerToolTip = c.tooltip
-            if c.comparator(.forward) != nil {
-                col.sortDescriptorPrototype = NSSortDescriptor(key: c.rawValue, ascending: true)
+            if c.id != "context" {
+                col.sortDescriptorPrototype = NSSortDescriptor(key: c.id, ascending: true)
             }
+            // Before the autosave is read: a column it doesn't know (new in this version) stays hidden.
+            col.isHidden = !Column.defaultShown.contains(c.id)
             outline.addTableColumn(col)
-            if c == .name { outline.outlineTableColumn = col }
+            if c.id == "name" { outline.outlineTableColumn = col }
         }
         outline.autosaveName = "ProcessOutline.columns"
         outline.autosaveTableColumns = true
@@ -82,93 +84,6 @@ struct ProcessOutline: NSViewRepresentable {
         co.apply()
     }
 
-    // MARK: Columns
-
-    enum Column: String, CaseIterable {
-        case name, pid, cpu, mem, threads, user, responsible, coalition, jetsam, signer, disk, started, context
-
-        var title: String {
-            switch self {
-            case .name: "Name"
-            case .pid: "PID"
-            case .cpu: "CPU %"
-            case .mem: "Memory"
-            case .threads: "Threads"
-            case .user: "User"
-            case .responsible: "Responsible"
-            case .coalition: "Res. coalition"
-            case .jetsam: "Jetsam coalition"
-            case .signer: "Signer"
-            case .disk: "Disk I/O"
-            case .started: "Started"
-            case .context: "Context"
-            }
-        }
-
-        var widths: (min: CGFloat, ideal: CGFloat) {
-            switch self {
-            case .name: (180, 280)
-            case .pid: (44, 56)
-            case .cpu: (44, 52)
-            case .mem: (60, 76)
-            case .threads: (44, 56)
-            case .user: (50, 70)
-            case .responsible: (80, 130)
-            case .coalition, .jetsam: (50, 100)
-            case .signer: (70, 110)
-            case .disk: (56, 70)
-            case .started: (50, 70)
-            case .context: (120, 300)
-            }
-        }
-
-        /// Width of the header as it looks when sorted: a bold title plus the sort arrow, so sorting by
-        /// the column doesn't truncate its title.
-        static func sortedHeaderWidth(_ col: NSTableColumn) -> CGFloat {
-            let font = NSFont.boldSystemFont(ofSize: col.headerCell.font?.pointSize ?? NSFont.smallSystemFontSize)
-            return ceil((col.title as NSString).size(withAttributes: [.font: font]).width) + 30
-        }
-
-        /// Header tooltip: what the column shows and in which unit.
-        var tooltip: String {
-            switch self {
-            case .name: "Process name, or the title of a group row. Badges: LEFT (outlived its app), ZOMBIE, ROSETTA, SBX (sandboxed), EXITED."
-            case .pid: "Process ID."
-            case .cpu: "CPU use over the last refresh, as a percentage of one core (can pass 100). Group rows: the sum of their processes."
-            case .mem: "Physical footprint: the memory macOS charges to the process, as in Activity Monitor. Group rows: the sum."
-            case .threads: "Number of threads."
-            case .user: "User the process runs as."
-            case .responsible: "The process macOS holds responsible for this one (for privacy prompts and energy). † marks one that has exited."
-            case .coalition: "Resource coalition id: processes macOS accounts for together, usually an app and its helpers."
-            case .jetsam: "Jetsam coalition id: processes macOS frees memory from together, such as a host app and its extensions."
-            case .signer: "Who signed the running code: Apple, a Developer ID team, ad hoc, or unsigned."
-            case .disk: "Bytes read plus written since the process started. — when neither could be read. Group rows: the sum."
-            case .started: "Time since the process started."
-            case .context: "launchd label, LaunchServices name, extension point, terminal, or the path. Group rows: process counts."
-            }
-        }
-
-        var numeric: Bool { [.pid, .cpu, .mem, .threads, .coalition, .jetsam, .disk].contains(self) }
-
-        func comparator(_ order: SortOrder) -> KeyPathComparator<ProcNode>? {
-            switch self {
-            case .name: KeyPathComparator(\.nameKey, order: order)
-            case .pid: KeyPathComparator(\.pidKey, order: order)
-            case .cpu: KeyPathComparator(\.cpuKey, order: order)
-            case .mem: KeyPathComparator(\.memKey, order: order)
-            case .threads: KeyPathComparator(\.threadsKey, order: order)
-            case .user: KeyPathComparator(\.userKey, order: order)
-            case .responsible: KeyPathComparator(\.respKey, order: order)
-            case .coalition: KeyPathComparator(\.coalKey, order: order)
-            case .jetsam: KeyPathComparator(\.jetsamKey, order: order)
-            case .signer: KeyPathComparator(\.signerKey, order: order)
-            case .disk: KeyPathComparator(\.diskKey, order: order)
-            case .started: KeyPathComparator(\.startKey, order: order)
-            case .context: nil
-            }
-        }
-    }
-
     // MARK: Coordinator
 
     final class Item: NSObject {
@@ -191,7 +106,9 @@ struct ProcessOutline: NSViewRepresentable {
         /// Re-apply whenever the store's process data changes, without going through SwiftUI.
         /// withObservationTracking fires once, before the change, so re-register and read after it lands.
         var headerMenu: NSMenu?
-        private var hiddenApplied: Set<String>?
+        private var shownApplied: Set<String>?
+        /// The header column a column shown from the header menu goes next to.
+        private var showNextTo: String?
         private var commandObservers: [NSObjectProtocol] = []
 
         /// View ▸ Columns acts on the outline in the key window (several main windows can be open).
@@ -213,25 +130,48 @@ struct ProcessOutline: NSViewRepresentable {
             return w == (NSApp.keyWindow ?? NSApp.mainWindow)
         }
 
-        private func syncHidden(_ outline: NSOutlineView) {
-            guard parent.hiddenColumns != hiddenApplied else { return }
-            hiddenApplied = parent.hiddenColumns
+        private func syncShown(_ outline: NSOutlineView) {
+            let shown = parent.shownColumns
+            guard shown != shownApplied else { return }
+            let first = shownApplied == nil
+            shownApplied = shown
             for col in outline.tableColumns {
-                let hide = col.identifier.rawValue != Column.name.rawValue && parent.hiddenColumns.contains(col.identifier.rawValue)
-                if col.isHidden != hide { col.isHidden = hide }
+                let id = col.identifier.rawValue
+                let hide = id != "name" && !shown.contains(id)
+                guard col.isHidden != hide else { continue }
+                col.isHidden = hide
+                // A column just switched on goes next to the header column it was picked from, or after
+                // the last shown one, not wherever it sat in the catalogue.
+                if !hide, !first { place(col, in: outline) }
             }
+            showNextTo = nil
             // Sorting by a column nobody can see: back to the default (PID).
             // Next turn: this runs inside a SwiftUI update, which mustn't change state.
-            if let key = outline.sortDescriptors.first?.key, parent.hiddenColumns.contains(key) {
-                DispatchQueue.main.async { [weak self] in self?.parent.sort = [KeyPathComparator(\.pidKey)] }
+            if parent.sort.id != "name", !shown.contains(parent.sort.id) {
+                DispatchQueue.main.async { [weak self] in self?.parent.sort = .pid }
             }
+        }
+
+        private func place(_ col: NSTableColumn, in o: NSOutlineView) {
+            guard let from = o.tableColumns.firstIndex(of: col) else { return }
+            // After the column it was picked from. Otherwise just before Context, a wide trailing summary
+            // that would push it out of sight, or after the last shown column.
+            let to: Int
+            if let id = showNextTo, case let a = o.column(withIdentifier: NSUserInterfaceItemIdentifier(id)), a >= 0 {
+                to = from < a ? a : a + 1
+            } else if let c = o.tableColumns.firstIndex(where: { $0.identifier.rawValue == "context" && !$0.isHidden }) {
+                to = from < c ? c - 1 : c
+            } else if let a = o.tableColumns.lastIndex(where: { !$0.isHidden && $0 !== col }) {
+                to = from < a ? a : a + 1
+            } else { return }
+            if to != from { o.moveColumn(from, toColumn: to) }
         }
 
         // MARK: Column sizing
 
         /// Width that shows `col`'s header and every visible cell in it untruncated.
         private func fittingWidth(_ col: NSTableColumn) -> CGFloat {
-            guard let o = outline, let c = Column(rawValue: col.identifier.rawValue) else { return col.width }
+            guard let o = outline, let c = Column.byID[col.identifier.rawValue] else { return col.width }
             let ci = o.column(withIdentifier: col.identifier)
             var w = Column.sortedHeaderWidth(col)
             let rows = o.rows(in: o.visibleRect)
@@ -239,7 +179,7 @@ struct ProcessOutline: NSViewRepresentable {
             let probe = Cell(column: c)
             for r in rows.location..<rows.location + rows.length {
                 guard let it = o.item(atRow: r) as? Item else { continue }
-                probe.show(it.node, column: c, procs: procs)
+                probe.show(it.node, column: c, store: parent.store)
                 // The outline column's cells start after the row's indentation and disclosure triangle.
                 let inset = o.frameOfCell(atColumn: ci, row: r).minX - o.rect(ofColumn: ci).minX
                 w = max(w, inset + probe.fittingWidth)
@@ -257,24 +197,27 @@ struct ProcessOutline: NSViewRepresentable {
         /// Catalogue order, default widths, default visibility.
         func resetColumns() {
             guard let o = outline else { return }
-            for (i, c) in Column.allCases.enumerated() {
-                let at = o.column(withIdentifier: NSUserInterfaceItemIdentifier(c.rawValue))
-                guard at >= 0 else { continue }
+            // Shown columns first, in the default order, then the rest of the catalogue.
+            let order = Column.defaultShown + Column.all.map(\.id).filter { !Column.defaultShown.contains($0) }
+            for (i, id) in order.enumerated() {
+                let at = o.column(withIdentifier: NSUserInterfaceItemIdentifier(id))
+                guard at >= 0, let c = Column.byID[id] else { continue }
                 if at != i { o.moveColumn(at, toColumn: i) }
-                o.tableColumns[i].width = max(c.widths.ideal, Column.sortedHeaderWidth(o.tableColumns[i]))
+                o.tableColumns[i].width = max(c.width, Column.sortedHeaderWidth(o.tableColumns[i]))
             }
-            ColumnPrefs.setHidden(ColumnPrefs.defaultHidden)
+            shownApplied = nil   // re-apply visibility without moving anything
+            ColumnPrefs.setShown(Set(Column.defaultShown))
         }
 
         private func buildHeaderMenu(_ menu: NSMenu) {
             guard let o = outline, let header = o.headerView else { return }
-            func item(_ title: String, state: Bool? = nil, _ action: @escaping () -> Void) {
+            func item(_ title: String, state: Bool? = nil, in m: NSMenu? = nil, _ action: @escaping () -> Void) {
                 let mi = NSMenuItem(title: title, action: #selector(MenuAction.fire), keyEquivalent: "")
                 let a = MenuAction(action)
                 mi.target = a
                 mi.representedObject = a
                 if let state { mi.state = state ? .on : .off }
-                menu.addItem(mi)
+                (m ?? menu).addItem(mi)
             }
             // The column under the pointer when the menu opened.
             var clicked: NSTableColumn?
@@ -283,7 +226,7 @@ struct ProcessOutline: NSViewRepresentable {
                 if ci >= 0 { clicked = o.tableColumns[ci] }
             }
             if let col = clicked {
-                if col.identifier.rawValue != Column.name.rawValue {
+                if col.identifier.rawValue != "name" {
                     let id = col.identifier.rawValue
                     item("Hide \(col.title)") { ColumnPrefs.toggle(id) }
                 }
@@ -291,9 +234,25 @@ struct ProcessOutline: NSViewRepresentable {
             }
             item("Size All Columns to Fit") { [weak self] in self?.sizeAllToFit() }
             menu.addItem(.separator())
-            let hidden = parent.hiddenColumns
-            for c in Column.allCases where c != .name {
-                item(c.title, state: !hidden.contains(c.rawValue)) { ColumnPrefs.toggle(c.rawValue) }
+            // The shown columns, in table order, for one-click hiding; then the whole catalogue by section.
+            let shown = parent.shownColumns
+            let anchor = clicked?.identifier.rawValue
+            for col in o.tableColumns where !col.isHidden && col.identifier.rawValue != "name" {
+                let id = col.identifier.rawValue
+                item(col.title, state: true) { ColumnPrefs.toggle(id) }
+            }
+            menu.addItem(.separator())
+            for section in Column.Section.allCases {
+                let sub = NSMenu(title: section.title)
+                for c in Column.all where c.section == section && c.id != "name" {
+                    item(c.title, state: shown.contains(c.id), in: sub) { [weak self] in
+                        self?.showNextTo = anchor
+                        ColumnPrefs.toggle(c.id)
+                    }
+                }
+                let mi = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+                mi.submenu = sub
+                menu.addItem(mi)
             }
             menu.addItem(.separator())
             item("Reset Columns") { [weak self] in self?.resetColumns() }
@@ -319,7 +278,7 @@ struct ProcessOutline: NSViewRepresentable {
         private var seeded: Set<Int> = []
         private var appliedFilter = ""
         private var updating = false
-        private var pushedSort: [KeyPathComparator<ProcNode>] = []
+        private var pushedSort: ColumnSort?
 
         private var shownRoots: [Item] = []
         private var loaded = false
@@ -329,8 +288,9 @@ struct ProcessOutline: NSViewRepresentable {
             updating = true
             defer { updating = false }
             syncSortIndicators(outline)
-            syncHidden(outline)
-            let nodes = parent.store.nodes(grouping: parent.grouping, filter: parent.filter, sort: parent.sort)
+            syncShown(outline)
+            let nodes = parent.store.nodes(grouping: parent.grouping, filter: parent.filter, sort: parent.sort,
+                                           columns: parent.shownColumns)
             procs = parent.store.procs
             if parent.store.nodesVersion != appliedVersion {
                 appliedVersion = parent.store.nodesVersion
@@ -446,8 +406,8 @@ struct ProcessOutline: NSViewRepresentable {
                 guard let it = outline.item(atRow: row) as? Item else { continue }
                 for col in 0..<outline.numberOfColumns {
                     if let cell = outline.view(atColumn: col, row: row, makeIfNecessary: false) as? Cell,
-                       let c = Column(rawValue: outline.tableColumns[col].identifier.rawValue) {
-                        cell.show(it.node, column: c, procs: procs)
+                       let c = Column.byID[outline.tableColumns[col].identifier.rawValue] {
+                        cell.show(it.node, column: c, store: parent.store)
                     }
                 }
             }
@@ -508,10 +468,7 @@ struct ProcessOutline: NSViewRepresentable {
         private func syncSortIndicators(_ outline: NSOutlineView) {
             guard parent.sort != pushedSort else { return }
             pushedSort = parent.sort
-            outline.sortDescriptors = parent.sort.compactMap { c in
-                Column.allCases.first { $0.comparator(.forward)?.keyPath == c.keyPath }
-                    .map { NSSortDescriptor(key: $0.rawValue, ascending: c.order == .forward) }
-            }
+            outline.sortDescriptors = [NSSortDescriptor(key: parent.sort.id, ascending: parent.sort.ascending)]
         }
 
         // MARK: Data source
@@ -528,9 +485,8 @@ struct ProcessOutline: NSViewRepresentable {
 
         func outlineView(_ o: NSOutlineView, sortDescriptorsDidChange old: [NSSortDescriptor]) {
             guard !updating else { return }
-            let new: [KeyPathComparator<ProcNode>] = o.sortDescriptors.prefix(1).compactMap { d in
-                Column(rawValue: d.key ?? "")?.comparator(d.ascending ? .forward : .reverse)
-            }
+            guard let d = o.sortDescriptors.first, let key = d.key, Column.byID[key] != nil else { return }
+            let new = ColumnSort(id: key, ascending: d.ascending)
             pushedSort = new
             parent.sort = new
         }
@@ -551,9 +507,9 @@ struct ProcessOutline: NSViewRepresentable {
         }
 
         func outlineView(_ o: NSOutlineView, viewFor col: NSTableColumn?, item: Any) -> NSView? {
-            guard let col, let c = Column(rawValue: col.identifier.rawValue), let it = item as? Item else { return nil }
+            guard let col, let c = Column.byID[col.identifier.rawValue], let it = item as? Item else { return nil }
             let cell = (o.makeView(withIdentifier: col.identifier, owner: nil) as? Cell) ?? Cell(column: c)
-            cell.show(it.node, column: c, procs: procs)
+            cell.show(it.node, column: c, store: parent.store)
             return cell
         }
 
@@ -655,8 +611,8 @@ struct ProcessOutline: NSViewRepresentable {
 
         init(column c: Column) {
             super.init(frame: .zero)
-            identifier = NSUserInterfaceItemIdentifier(c.rawValue)
-            label.lineBreakMode = .byTruncatingTail
+            identifier = NSUserInterfaceItemIdentifier(c.id)
+            label.lineBreakMode = c.truncateMiddle ? .byTruncatingMiddle : .byTruncatingTail
             label.maximumNumberOfLines = 1
             label.usesSingleLineMode = true
             label.cell?.truncatesLastVisibleLine = true
@@ -664,7 +620,7 @@ struct ProcessOutline: NSViewRepresentable {
             label.font = c.numeric ? Self.mono : Self.body
             addSubview(label)
             textField = label
-            hasIcon = c == .name
+            hasIcon = c.id == "name"
             if hasIcon {
                 icon.imageScaling = .scaleProportionallyDown
                 addSubview(icon)
@@ -700,40 +656,28 @@ struct ProcessOutline: NSViewRepresentable {
             if icon.contentTintColor != tint { icon.contentTintColor = tint }
         }
 
-        func show(_ n: ProcNode, column c: Column, procs: [pid_t: ProcInfo]) {
-            let p = n.proc
-            var color = NSColor.labelColor
-            switch c {
-            case .name:
-                showName(n, procs: procs)
-                return
-            case .pid: set(p.map { String($0.pid) } ?? "")
-            // Group rows show their subtree's totals (Store.sorted fills them in).
-            case .cpu: set(Fmt.pct(p?.cpuPercent ?? (p == nil ? n.cpuKey : nil)))
-            case .mem: set(p == nil ? Fmt.bytes(n.memKey) : Fmt.bytes(p?.footprint))
-            case .threads: set(p?.threads.map(String.init) ?? "")
-            case .user: set(p?.user ?? "")
-            case .responsible:
-                if let p, let t = p.leftBehindText {
-                    set("† \(t)"); color = .systemOrange
-                } else if let p, let r = p.responsible {
-                    if r == p.pid { set("self"); color = .secondaryLabelColor }
-                    else if let rp = procs[r] { set("\(rp.name) (\(r))") }
-                    else { set("† gone (\(r))"); color = .systemOrange }
-                } else { set("") }
-            case .coalition: set(p?.coalition.map(String.init) ?? "")
-            case .jetsam: set(p?.jetsamCoalition.map(String.init) ?? "")
-            case .signer:
-                set(p?.signer ?? "")
-                if p?.signer == "unsigned" { color = .systemRed }
-            // "—" when neither counter could be read: not the same as no I/O.
-            case .disk: set(Fmt.bytes(n.diskKey < 0 ? nil : UInt64(n.diskKey)))
-            case .started: set(p.map { Fmt.age($0.start) } ?? "")
-            case .context:
+        func show(_ n: ProcNode, column c: Column, store: Store) {
+            switch c.id {
+            case "name":
+                showName(n, procs: store.procs)
+            case "context":
                 set(Self.context(n))
-                color = .secondaryLabelColor
+                set(color: .secondaryLabelColor)
+            default:
+                // Processes: the column's own value. Group rows: what Store.sorted worked out for them.
+                let v = n.proc.map { c.value($0, store) } ?? n.groupValues[c.id] ?? .empty
+                set(v.display)
+                set(color: Self.color(v.tint))
             }
-            set(color: color)
+        }
+
+        private static func color(_ t: CellValue.Tint) -> NSColor {
+            switch t {
+            case .normal: .labelColor
+            case .secondary: .secondaryLabelColor
+            case .warning: .systemOrange
+            case .danger: .systemRed
+            }
         }
 
         private static var symbols: [String: NSImage] = [:]
@@ -804,45 +748,6 @@ struct ProcessOutline: NSViewRepresentable {
             if !p.lsTags.isEmpty { parts.append(p.lsTags.joined(separator: " ")) }
             if parts.isEmpty, let path = p.path { parts.append(path) }
             return parts.joined(separator: " · ")
-        }
-    }
-}
-
-/// Which process table columns are hidden: one app-wide list, so the header menu, View ▸ Columns and
-/// every window agree. Order and widths stay in AppKit's column autosave.
-enum ColumnPrefs {
-    static let key = "hiddenColumns"
-    /// The coalition ids matter in one grouping, whose group rows already show them.
-    static let defaultHidden = "coalition,jetsam"
-    static let sizeAllToFit = Notification.Name("ProcXRay.sizeAllColumnsToFit")
-    static let reset = Notification.Name("ProcXRay.resetColumns")
-
-    static func parse(_ raw: String) -> Set<String> { Set(raw.split(separator: ",").map(String.init)) }
-    static var hidden: Set<String> { parse(UserDefaults.standard.string(forKey: key) ?? defaultHidden) }
-    static func setHidden(_ raw: String) { UserDefaults.standard.set(raw, forKey: key) }
-    static func toggle(_ id: String) {
-        var h = hidden
-        if h.contains(id) { h.remove(id) } else { h.insert(id) }
-        setHidden(h.sorted().joined(separator: ","))
-    }
-}
-
-/// View ▸ Columns: the header menu's toggles, reachable from the keyboard.
-struct ColumnsCommands: Commands {
-    @AppStorage(ColumnPrefs.key) private var hiddenRaw = ColumnPrefs.defaultHidden
-
-    var body: some Commands {
-        CommandGroup(after: .toolbar) {
-            Menu("Columns") {
-                let hidden = ColumnPrefs.parse(hiddenRaw)
-                ForEach(ProcessOutline.Column.allCases.filter { $0 != .name }, id: \.self) { c in
-                    Toggle(c.title, isOn: Binding(get: { !hidden.contains(c.rawValue) },
-                                                  set: { _ in ColumnPrefs.toggle(c.rawValue) }))
-                }
-                Divider()
-                Button("Size All Columns to Fit") { NotificationCenter.default.post(name: ColumnPrefs.sizeAllToFit, object: nil) }
-                Button("Reset Columns") { NotificationCenter.default.post(name: ColumnPrefs.reset, object: nil) }
-            }
         }
     }
 }
