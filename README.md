@@ -1,87 +1,60 @@
 # Proc X-Ray
 
-A Process Hacker–style process explorer for macOS that surfaces the attribution data macOS itself uses: responsible processes, coalitions, LaunchServices state, code signatures, launchd jobs and Background Task Management records.
+A Process Hacker–style process explorer for macOS. It shows the attribution data macOS itself uses: responsible processes, coalitions, LaunchServices state, code signatures, launchd jobs and Background Task Management records.
 
-## Screenshots
+![Proc X-Ray](docs/screenshots/overview.png)
 
-Process tree with the inspector on `launchd`, showing `vmmap --summary` parsed into footprint tiles, memory-portion bars and a per-region chart:
+## Highlights
 
-![Memory Map](docs/screenshots/memory.png)
+- **Smart process tree.** Every process is sorted into Apps, Background apps, Extensions, Third-party services, System interface and System services, with each app's helpers, XPC services and terminal sessions under it. You can switch to a parent, responsible or coalition tree, or to a flat list.
+- **Rich columns.** About 50 columns cover CPU, memory, disk, energy, signing and launchd. Filter chips catch the usual suspects: unsigned, root, not sandboxed, Rosetta and recently started processes.
+- **Inspector.** Six tabs (Overview, Origin, Trust, Resources, Connections and Activity) answer what a process is, who launched it, who signed it, what it's using and what it's talking to. Every process it mentions is a clickable link.
+- **Left Behind.** Finds processes that keep an app "running in the background" after you quit it.
+- **Visual, not just text.** The output of `lsof`, `vmmap`, `sample`, `log`, `launchctl` and `lsappinfo` is parsed into tables, charts and call trees. A Raw switch shows the original text.
+- **Privileged helper (optional).** A read-only root daemon fills in data for root-owned processes and loads Background Items without a password prompt.
 
-`sample` as a collapsible call tree: busy threads in orange, waits in grey, libraries colour-coded:
+## A closer look
+
+Resources: each figure now and since start, with sparklines and CPU time split by QoS class.
+
+![Resources](docs/screenshots/resources.png)
+
+`vmmap --summary` drawn as footprint tiles, portion bars and a per-region chart.
+
+![Memory map](docs/screenshots/memory.png)
+
+Connections, with the other end of every pipe and socket resolved into a peer graph.
+
+![Connections](docs/screenshots/connections.png)
+
+`sample` as a collapsible call tree, with busy threads in orange.
 
 ![Sample](docs/screenshots/sample.png)
 
-`lsof` as a typed, filterable table (here filtered to Unix and TCP sockets):
-
-![Files & Sockets](docs/screenshots/files.png)
-
-Entitlements grouped into Apple-private, sandbox/security and other:
-
-![Entitlements](docs/screenshots/entitlements.png)
-
-`lsappinfo` and `launchctl print` rendered as cards:
-
-![launchd / LaunchServices](docs/screenshots/launchd.png)
-
-Every pane has a **Visual / Raw** switch to see the tool's original text.
-
 ## Build & run
+
+Requires full Xcode, not just the Command Line Tools.
 
 ```bash
 ./build-app.sh --release
 open "build/Proc X-Ray.app"
 ```
 
-Without `--release`, `./build-app.sh` makes a dev build, `build/Proc X-Ray Dev.app`, with bundle id `local.procxray.dev`. It has its own privileged helper (`local.procxray.dev.helper`) and its own settings, so running it alongside an installed `Proc X-Ray.app` doesn't touch that app's helper. Both are optimized builds.
-
-Requires full Xcode (`/Applications/Xcode.app`). The Command Line Tools SDK for macOS 27 lacks the SwiftUI macro plugin, so `@State` fails to compile with it.
-
-`build-app.sh` signs with the first "Apple Development" identity in your keychain (override with `SIGN_ID=…`). It also rewrites the binary's recorded SDK version with `vtool`: SwiftPM records sdk = deployment target (14.0), which makes AppKit run the app in macOS 14 compatibility mode (opaque toolbar, thicker split divider and a visible kink where the sidebar meets the toolbar).
-
-The app icon (a chip under an X-ray scan beam) is drawn in code by `tools/make-icon.swift`; regenerate `Resources/AppIcon.icns` with `swift tools/make-icon.swift Resources`.
+Without `--release` you get `build/Proc X-Ray Dev.app`. It has its own bundle id, helper and settings, so it can run alongside the release build. `build-app.sh` signs with your first "Apple Development" identity; set `SIGN_ID=…` to use another.
 
 ## Privileged helper
 
-The sidebar's **Install Privileged Helper…** button registers a root daemon through `SMAppService.daemon`. macOS asks you to approve it once under System Settings → General → Login Items. The helper is the same binary started by launchd as `ProcXRay --helper` (the executable inside the bundle keeps the unspaced name).
+Click **Install Privileged Helper…** in the sidebar, then approve it once in System Settings → General → Login Items. The helper:
 
-- **Read-only.** It returns task metrics for every pid and args/env/cwd for a pid, and runs a fixed allowlist of tools whose command lines it builds itself: `lsof`, `vmmap --summary`, `sample`, `launchctl procinfo` and `sfltool dumpbtm`. It never accepts paths, commands or free-form arguments.
-- **Mutual code-signing check, pinned to this build.** The helper's XPC listener only accepts a client that is this exact binary: identifier `local.procxray`, the same team, and the same cdhash (`setConnectionCodeSigningRequirement`). The app requires the same of the helper. Team ID and cdhash are read from the binary's own signature at runtime, so anything else signed with the same certificate is rejected. After a rebuild, a helper still running the old binary is rejected until it exits.
-- **Per-user policy.** A caller in the `admin` group (who could run the same tools with `sudo`) can inspect any process. Other users get arguments, environment and tools only for their own processes, and no `sfltool dumpbtm`.
-- **No files left behind.** `sample` writes its report to stdout instead of `/tmp`, and the helper runs with umask 077.
-- **One copy owns it.** macOS registers the daemon by bundle identifier, so launching another copy with the same identifier (another `--release` build, or a copy elsewhere) moves the registration to that copy; dev builds use their own identifier to avoid this. if that copy is unsigned or later deleted, launchd can't start the helper. The sidebar then shows it as unreachable with an **Uninstall Helper** button: uninstall, then install again from the copy you use.
-- **Exits when idle.** It quits about 10 s after the last connection closes, and launchd restarts it on demand.
-- With the helper running, root-owned processes show memory, CPU, threads and arguments, and Background Items loads without a password prompt. `vmmap`/`sample` still cannot inspect Apple platform binaries (SIP).
+- is read-only and runs only a fixed allowlist of tools (`lsof`, `vmmap`, `sample`, `launchctl procinfo` and `sfltool dumpbtm`), with arguments it builds itself.
+- accepts connections only from this exact build of the app, matched by team ID and cdhash.
+- lets admins inspect any process. Other users can inspect only their own processes.
+- exits about 10 s after it goes idle. launchd restarts it on demand.
 
-## What it shows
+Without the helper the app runs unprivileged, and root-owned processes show `—`.
 
-- **Processes**: the Smart tree (the default) sorts every process into Apps, Background apps, Extensions, Third-party services, System interface and System services, with each app's helpers under it. Inside an app, only groups the system defines exactly: Extensions (`.appex` bundles), XPC services (`.xpc` bundles in `XPCServices`) and Terminal sessions (by tty, then by process group, so a pipeline is one row). Other helpers are plain rows. An app extension's row names its type after its name ("· Finder Sync"), from the extension point its Info.plist declares, unless the group above already does; the search matches it too. Group rows show the totals of their subtree. The other groupings: parent tree, responsible tree (apps that exited and left processes running appear as `†` groups), resource coalition groups, jetsam coalition groups (a host with its app extensions, each extension's resource coalition nested inside), or flat. Shown by default: CPU, physical footprint, threads, user, responsible process, signer, disk I/O, age and context. About 40 more are a menu away, in eight sections (identity, ownership, CPU, memory, disk, energy, security, time): kind, bundle id, path, architecture, state, parent, launchd label and domain, extension point, containing app, coalition ids, TTY, process group, CPU time, P-core share, instructions per cycle, peak/resident/virtual/Neural Engine memory, disk read and written, logical writes, energy, team id, signing id, sandboxed and hardened runtime, and start time, plus per-second rates over the last refresh: waiting for CPU, context switches, page faults, page-ins, disk read and written, power (CPU energy, `ri_energy_nj`), wakeups, system calls and Mach messages. Group rows fill each column by its own rule: totals where values add up, the shared value or a count ("3 users") where they don't, the app's own value on an app's row, and nothing where a total would mislead. Right-click the header, or use View ▸ Columns, to show or hide columns, size them to fit (double-clicking a divider also works) or reset them; header tooltips explain each column. Badges mark LEFT (outlived the app that launched it, as listed under Left Behind), ZOMBIE, ROSETTA, SBX (sandboxed) and EXITED.
-- **Inspector** (double-click a process, press Return, or ⌘I; one window per process, like Activity Monitor's Inspect; or turn on the Inspector Pane, ⌥⌘I, to show the selected process below the list). In the pane, selecting a group row (an app, a category, a coalition…) shows the whole group instead: its CPU, memory, disk and power now with sparklines, the Resources figures summed over its processes (only values that add up), its main process, its heaviest processes and every member. A fixed header gives the name, pid, user and age; what the process is and which app or job it belongs to (as a link); whether it's sandboxed; who signed it; badges for exited, left behind, zombie, stopped, Rosetta, root, unsigned, invalid or ad hoc signatures; and Signal and Reveal. Six tabs: **Overview** (CPU, memory, disk and power now, each with a sparkline of the last four minutes; path, bundle and version, user, start, state, architecture, sandbox, signer, working directory, kind; owner, parent and responsible process; and, collapsed, the arguments and environment), **Origin** (the Background Items record that installed it, matched exactly on executable path or launchd label; what launched it: launchd job with plist, type, properties, runs and last exit, or the LaunchServices record, or the extension point; parent chain; responsible process; children, processes it is responsible for, coalition members, and processes from the same bundle or the same binary), **Trust** (a one-line verdict such as "Developer ID: Mozilla Corporation (43AQ936H96), hardened runtime", the signature, the sandbox, entitlements grouped by Apple's documented key namespaces, with a few notable ones flagged with what they permit, and other running processes from the same team), **Resources** (CPU, memory, disk, energy and wakeups, system calls and IPC: each value now beside its total since start, with a sparkline of the last four minutes; open files, power assertions and CPU time per QoS class; and `vmmap --summary`), **Connections** (`lsof`) and **Activity** (`/usr/bin/log`, filtered to the pid, and `sample`, 1 s).
-- **Links**: every process the inspector names (owner, parent, responsible, the parent chain and related processes in Origin, the same team in Trust, a group's top processes) is a chip: click shows it in the same inspector (the pane also selects it in the tree), ⌘-click opens its own window, hover shows path, user, CPU and memory; a chip for a process that has exited is struck through. Back and forward (⌘[ and ⌘]) move through what each inspector has shown, including processes that have since exited, which show their last snapshot.
-- **Visual / Raw**: every tool-backed pane is parsed (`Sys/Parsers.swift`) and drawn visually (`UI/Visualizers.swift`): lsof as a typed, filterable socket/file table with TCP state badges; vmmap as footprint tiles, portion bars, a region bar chart and sortable region/malloc-zone tables; sample as a collapsible call tree with per-thread busy/idle summaries; logs as a level-stacked event histogram plus table; launchctl print/procinfo and lsappinfo as cards. A Visual/Raw switch (remembered app-wide) shows the original text, and output that can't be parsed (errors, permission notes) falls back to it automatically.
-- **Left Behind**: processes that keep an app in the "running in background" state after it quits. Detected three ways: a responsible pid that no longer exists; LaunchServices entries marked `exited-with-subordinates`, matched through their coalition and related pids; and, once the app is launched again (LaunchServices then drops the exited entry), a running app whose `relatedCoalitionIDs` names a coalition other than its own, which is an earlier instance's. On macOS 27 a leftover reports itself as its own responsible process, so in practice the LaunchServices entries are what find it; leftovers of apps LaunchServices doesn't track (command-line tools) aren't detected. The LEFT badge, the Responsible column and the Responsible tree all use this same result.
-- **LaunchServices Apps**: parsed `lsappinfo list`, including coalition members and related pids.
-- **Background Items**: parsed `sfltool dumpbtm`. Loaded only on request. Through the helper it runs as root with no prompt; without the helper, `sfltool` asks for an admin password on every run.
-- **launchd Jobs**: `launchctl list` plus `launchctl print` for the selected job.
+## More
 
-## Data sources
-
-- `sysctl(KERN_PROC_ALL)`, `KERN_PROCARGS2`, `proc_pidpath`, `proc_pidinfo` (task info, vnode paths, coalition flavor 20), `proc_pid_rusage` v4
-- `responsibility_get_pid_responsible_for_pid` and `sandbox_check` (private libsystem symbols resolved with `dlsym`)
-- Security.framework `SecCodeCopyGuestWithAttributes` / `SecCodeCopySigningInformation`
-- `lsappinfo`, `launchctl`, `sfltool`, `lsof`, `vmmap`, `sample`, `/usr/bin/log`
-
-Runs unprivileged. Task info, arguments and environment are only readable for your own processes; root-owned ones show `—`.
-
-## Notes
-
-- Built to be left running. Nothing refreshes while no Proc X-Ray window is on screen (hidden, minimized, covered, another Space, screen locked); measured ~0.07% CPU in that state. On screen, a 2 s refresh with ~800 processes costs roughly 3–5% of one core. LaunchServices and launchd lists are re-read every 5th tick, since `lsappinfo` is a subprocess spawn that also makes launchservicesd work.
-- The process table is an `NSOutlineView`, not SwiftUI `Table`: rows are reused by id, the tree is updated with per-parent insert/remove/move, and visible cells are refreshed in place. The view hosting it doesn't read per-tick data, so SwiftUI doesn't re-render (and re-push its environment through every cell) on each refresh.
-
-- `lsappinfo`'s `coalition:` field is the **jetsam** coalition id, not the resource coalition. The jetsam id is often the resource id + 1, but not always (on one machine, 116 of 703 processes differed), so match against both ids rather than deriving one from the other.
-- Several resource coalitions can share one jetsam coalition: app extensions (widgets, wallpapers, QuickLook thumbnailers, `DeviceFS`) get a resource coalition of their own but join their host's jetsam coalition. The reverse (one resource coalition spanning several jetsam coalitions) wasn't observed.
-- `PROC_PIDCOALITIONINFO` returns 40 bytes on current macOS; a 32-byte buffer fails.
-- In zsh, `log` is a shell builtin that shadows `/usr/bin/log`. Always use the full path.
-- `ProcXRay --bench` times each stage of a refresh tick (wall and CPU, including spawned tools) for performance work.
-- `ProcXRay --dump [--pid N] [--btm]` prints a self-test snapshot for cross-checking against `ps` and `lsappinfo`. `--btm` triggers the password prompt.
-- `ProcXRay --spawn-leftover` starts a detached `sleep 120` and exits, which reproduces the "app quit but a helper kept running" state.
+- [docs/process-info-sources.md](docs/process-info-sources.md) lists where each piece of data comes from.
+- `ProcXRay --dump [--pid N]` prints a snapshot for cross-checking. `--bench` times each refresh stage.
+- Proc X-Ray aims to be very light on system resources.
