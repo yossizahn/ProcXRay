@@ -28,7 +28,7 @@ Do not build these, even though the proposal describes them. They were cut for c
 
 - The working tree has uncommitted changes from other work (`InspectorNavigation.swift` is new; `InspectorView.swift`, `ProcessesView.swift`, `ProcessOutline.swift`, `App.swift` are modified). Build on top of them. Do not revert, reformat or commit them.
 - There is no test target. The project verifies with CLI modes of the app binary: `--dump` (`SelfTest` in `UI/OtherViews.swift`), `--bench`, and `--helper-call` (`Bench.swift`). Follow that pattern.
-- Build: `./build-app.sh` makes `build/ProcXRay Dev.app` with its own helper (`local.procxray.dev.helper`). It needs full Xcode and a signing identity; both are set up on this machine.
+- Build: `./build-app.sh` makes `build/Proc X-Ray Dev.app` with its own helper (`local.procxray.dev.helper`). It needs full Xcode and a signing identity; both are set up on this machine.
 - You cannot run `sudo`. The dev helper is installed and runs as root, so test privileged code through `--helper-call`. After a rebuild the helper is the new binary; if `probe()` reports a protocol mismatch, wait about 10 s for the old helper to exit when idle and retry. If it reports "not installed" or "needs approval", stop and tell the user: only they can approve it.
 - Code style: match the files you touch. Comments say why, not what. 4-space indent, long lines are normal here.
 - Markdown you write: no hard-wrapped lines.
@@ -117,7 +117,7 @@ struct MachSnapshot: Codable, Sendable {
 **Verify.**
 
 - `--ipc --lsmp-file tools/ipc-probe/lsmp-sample.json` runs `pairMach` on the file and prints the links. It must print exactly the six links listed above.
-- Add `machlinks` to `Bench.helperCall`. Run `"build/ProcXRay Dev.app/Contents/MacOS/ProcXRay" --helper-call machlinks` and report: processes, links, reply size in bytes, total seconds, and how much of that was parsing. If parsing takes more than about 2 s, say so in your report and leave it; do not write a custom parser.
+- Add `machlinks` to `Bench.helperCall`. Run `"build/Proc X-Ray Dev.app/Contents/MacOS/ProcXRay" --helper-call machlinks` and report: processes, links, reply size in bytes, total seconds, and how much of that was parsing. If parsing takes more than about 2 s, say so in your report and leave it; do not write a custom parser.
 
 ## Step 3: the Connections tab
 

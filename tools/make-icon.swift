@@ -1,4 +1,4 @@
-// Renders the ProcXRay app icon: a processor chip seen through an X-ray scan beam.
+// Renders the Proc X-Ray app icon: a processor chip seen through an X-ray scan beam.
 // Usage: swift tools/make-icon.swift <out-dir>   → writes AppIcon.icns (+ AppIcon-1024.png)
 import AppKit
 import CoreGraphics

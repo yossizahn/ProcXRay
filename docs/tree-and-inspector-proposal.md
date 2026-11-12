@@ -533,7 +533,7 @@ A small graph view (this process in the middle, peers around it, edges labelled 
 
 ### Activity
 
-- **Timeline** recorded by ProcXRay while it runs: started, exec'd a different binary (cdhash changed, which the store already detects), child spawned or exited, CPU or memory crossing a threshold, signal sent from this app. Nothing else in the app keeps history, so this is new state: a capped event list per process key.
+- **Timeline** recorded by Proc X-Ray while it runs: started, exec'd a different binary (cdhash changed, which the store already detects), child spawned or exited, CPU or memory crossing a threshold, signal sent from this app. Nothing else in the app keeps history, so this is new state: a capped event list per process key.
 - **Logs**: the current view, with the timeline's events drawn as markers on its histogram.
 - **Sample**: the current view.
 

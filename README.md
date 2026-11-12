@@ -1,4 +1,4 @@
-# ProcXRay
+# Proc X-Ray
 
 A Process Hacker–style process explorer for macOS that surfaces the attribution data macOS itself uses: responsible processes, coalitions, LaunchServices state, code signatures, launchd jobs and Background Task Management records.
 
@@ -30,10 +30,10 @@ Every pane has a **Visual / Raw** switch to see the tool's original text.
 
 ```bash
 ./build-app.sh --release
-open build/ProcXRay.app
+open "build/Proc X-Ray.app"
 ```
 
-Without `--release`, `./build-app.sh` makes a dev build, `build/ProcXRay Dev.app`, with bundle id `local.procxray.dev`. It has its own privileged helper (`local.procxray.dev.helper`) and its own settings, so running it alongside an installed `ProcXRay.app` doesn't touch that app's helper. Both are optimized builds.
+Without `--release`, `./build-app.sh` makes a dev build, `build/Proc X-Ray Dev.app`, with bundle id `local.procxray.dev`. It has its own privileged helper (`local.procxray.dev.helper`) and its own settings, so running it alongside an installed `Proc X-Ray.app` doesn't touch that app's helper. Both are optimized builds.
 
 Requires full Xcode (`/Applications/Xcode.app`). The Command Line Tools SDK for macOS 27 lacks the SwiftUI macro plugin, so `@State` fails to compile with it.
 
@@ -43,7 +43,7 @@ The app icon (a chip under an X-ray scan beam) is drawn in code by `tools/make-i
 
 ## Privileged helper
 
-The sidebar's **Install Privileged Helper…** button registers a root daemon through `SMAppService.daemon`. macOS asks you to approve it once under System Settings → General → Login Items. The helper is the same binary started by launchd as `ProcXRay --helper`.
+The sidebar's **Install Privileged Helper…** button registers a root daemon through `SMAppService.daemon`. macOS asks you to approve it once under System Settings → General → Login Items. The helper is the same binary started by launchd as `ProcXRay --helper` (the executable inside the bundle keeps the unspaced name).
 
 - **Read-only.** It returns task metrics for every pid and args/env/cwd for a pid, and runs a fixed allowlist of tools whose command lines it builds itself: `lsof`, `vmmap --summary`, `sample`, `launchctl procinfo` and `sfltool dumpbtm`. It never accepts paths, commands or free-form arguments.
 - **Mutual code-signing check, pinned to this build.** The helper's XPC listener only accepts a client that is this exact binary: identifier `local.procxray`, the same team, and the same cdhash (`setConnectionCodeSigningRequirement`). The app requires the same of the helper. Team ID and cdhash are read from the binary's own signature at runtime, so anything else signed with the same certificate is rejected. After a rebuild, a helper still running the old binary is rejected until it exits.
@@ -75,7 +75,7 @@ Runs unprivileged. Task info, arguments and environment are only readable for yo
 
 ## Notes
 
-- Built to be left running. Nothing refreshes while no ProcXRay window is on screen (hidden, minimized, covered, another Space, screen locked); measured ~0.07% CPU in that state. On screen, a 2 s refresh with ~800 processes costs roughly 3–5% of one core. LaunchServices and launchd lists are re-read every 5th tick, since `lsappinfo` is a subprocess spawn that also makes launchservicesd work.
+- Built to be left running. Nothing refreshes while no Proc X-Ray window is on screen (hidden, minimized, covered, another Space, screen locked); measured ~0.07% CPU in that state. On screen, a 2 s refresh with ~800 processes costs roughly 3–5% of one core. LaunchServices and launchd lists are re-read every 5th tick, since `lsappinfo` is a subprocess spawn that also makes launchservicesd work.
 - The process table is an `NSOutlineView`, not SwiftUI `Table`: rows are reused by id, the tree is updated with per-parent insert/remove/move, and visible cells are refreshed in place. The view hosting it doesn't read per-tick data, so SwiftUI doesn't re-render (and re-push its environment through every cell) on each refresh.
 
 - `lsappinfo`'s `coalition:` field is the **jetsam** coalition id, not the resource coalition. The jetsam id is often the resource id + 1, but not always (on one machine, 116 of 703 processes differed), so match against both ids rather than deriving one from the other.

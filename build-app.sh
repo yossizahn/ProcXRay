@@ -1,8 +1,9 @@
 #!/bin/bash
-# Builds ProcXRay into ./build (always an optimized build).
-#   ./build-app.sh            dev build:     build/ProcXRay Dev.app, bundle id local.procxray.dev
-#   ./build-app.sh --release  installable:   build/ProcXRay.app,     bundle id local.procxray
-#   ./build-app.sh --install  --release, then replaces /Applications/ProcXRay.app (quitting and relaunching it if running)
+# Builds Proc X-Ray into ./build (always an optimized build).
+#   ./build-app.sh            dev build:     "build/Proc X-Ray Dev.app", bundle id local.procxray.dev
+#   ./build-app.sh --release  installable:   "build/Proc X-Ray.app",     bundle id local.procxray
+#   ./build-app.sh --install  --release, then replaces "/Applications/Proc X-Ray.app" (quitting and relaunching it if running)
+# The bundle's executable stays ProcXRay (no space), so command-line use is `.../MacOS/ProcXRay --bench` etc.
 # macOS registers the privileged helper by bundle id, and whichever copy with that id launched last takes the
 # registration over. Dev builds get their own id (and helper, and settings) so running one never breaks the
 # installed app's helper. Uses full Xcode: the Command Line Tools
@@ -12,9 +13,9 @@ cd "$(dirname "$0")"
 
 INSTALL=0
 case "${1:-}" in
-  --release) BUNDLE_ID=local.procxray;     NAME=ProcXRay ;;
-  --install) BUNDLE_ID=local.procxray;     NAME=ProcXRay; INSTALL=1 ;;
-  "")        BUNDLE_ID=local.procxray.dev; NAME="ProcXRay Dev" ;;
+  --release) BUNDLE_ID=local.procxray;     NAME="Proc X-Ray" ;;
+  --install) BUNDLE_ID=local.procxray;     NAME="Proc X-Ray"; INSTALL=1 ;;
+  "")        BUNDLE_ID=local.procxray.dev; NAME="Proc X-Ray Dev" ;;
   *) echo "usage: $0 [--release | --install]" >&2; exit 2 ;;
 esac
 
@@ -92,20 +93,33 @@ echo "built $APP"
 [[ $INSTALL == 1 ]] || exit 0
 
 DEST="/Applications/$NAME.app"
-EXE="$DEST/Contents/MacOS/ProcXRay"
-# PIDs of the installed GUI app. The root helper (same binary, run with --helper) is left alone.
-gui_pids() { ps -axo pid=,args= | awk -v exe="$EXE" '$2 == exe && !/--helper/ {print $1}'; }
+# Installed under its earlier name. Same bundle id, so it is quit and removed rather than left to compete
+# for the helper registration.
+LEGACY="/Applications/ProcXRay.app"
+# PIDs of an installed GUI app (args start with its executable path, which may contain spaces).
+# The root helper (same binary, run with --helper) is left alone.
+gui_pids() {
+  ps -axo pid=,args= | awk -v exe="$1/Contents/MacOS/ProcXRay" '
+    { pid = $1; sub(/^ *[0-9]+ /, "") }
+    (index($0, exe " ") == 1 || $0 == exe) && !/--helper/ { print pid }'
+}
+quit_app() {
+  local pids; pids="$(gui_pids "$1")"
+  [[ -n "$pids" ]] || return 1
+  echo "quitting running $(basename "$1" .app) ($(echo $pids))"
+  kill -TERM $pids 2>/dev/null || true
+  for _ in {1..50}; do [[ -z "$(gui_pids "$1")" ]] && break; sleep 0.1; done
+  pids="$(gui_pids "$1")"
+  if [[ -n "$pids" ]]; then kill -KILL $pids 2>/dev/null || true; sleep 0.2; fi
+  return 0
+}
 
-PIDS="$(gui_pids)"
-if [[ -n "$PIDS" ]]; then
-  echo "quitting running $NAME ($(echo $PIDS))"
-  kill -TERM $PIDS 2>/dev/null || true
-  for _ in {1..50}; do [[ -z "$(gui_pids)" ]] && break; sleep 0.1; done
-  PIDS="$(gui_pids)"
-  if [[ -n "$PIDS" ]]; then kill -KILL $PIDS 2>/dev/null || true; sleep 0.2; fi
-  WAS_RUNNING=1
-else
-  WAS_RUNNING=0
+WAS_RUNNING=0
+quit_app "$DEST" && WAS_RUNNING=1
+if [[ -d "$LEGACY" ]]; then
+  quit_app "$LEGACY" && WAS_RUNNING=1
+  rm -rf "$LEGACY"
+  echo "removed $LEGACY"
 fi
 
 rm -rf "$DEST"

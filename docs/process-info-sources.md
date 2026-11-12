@@ -1,6 +1,6 @@
 # Process info: sources and gaps
 
-Every piece of information ProcXRay has about a process, grouped by the API, tool or calculation that produces it. After that: what else macOS makes available, and how ProcXRay compares with `top` and Activity Monitor.
+Every piece of information Proc X-Ray has about a process, grouped by the API, tool or calculation that produces it. After that: what else macOS makes available, and how Proc X-Ray compares with `top` and Activity Monitor.
 
 The availability notes on unused APIs were measured on 2026-11-12 (macOS 27, Apple silicon, running as uid 501 without the helper) with a small C probe. They were not measured as root, so "needs root" means the call failed for this user and is expected to work from the helper; that has not been tested.
 
@@ -148,7 +148,7 @@ Grouped by how hard it is to get. "Same user" means the call worked for another 
 
 `/usr/bin/top` is setuid root, so it can read fields that need a task port.
 
-| top key | ProcXRay |
+| top key | Proc X-Ray |
 |---|---|
 | pid, command, ppid, pgrp, uid, user | yes |
 | cpu, time | yes |
@@ -167,7 +167,7 @@ Grouped by how hard it is to get. "Same user" means the call worked for another 
 
 Column and inspector labels taken from Activity Monitor's bundled strings (`ActivityMonitor.loctable`, `ProcessInspector.loctable`).
 
-| Activity Monitor | ProcXRay |
+| Activity Monitor | Proc X-Ray |
 |---|---|
 | Process Name, PID, User, Kind (Apple / Intel), Sandbox, Restricted | yes (Restricted = runtime `CS_RESTRICT`, in the Signature tab) |
 | % CPU, CPU Time, Threads, Idle Wake Ups | yes |
@@ -185,4 +185,4 @@ Column and inspector labels taken from Activity Monitor's bundled strings (`Acti
 | App Nap, Requires High Perf GPU, Recent hangs | no — source not identified |
 | Spindump | no |
 
-ProcXRay has things neither tool shows: responsible process, coalitions, Left Behind detection, code signature and entitlements, launchd / LaunchServices attribution, arguments and environment, and logs.
+Proc X-Ray has things neither tool shows: responsible process, coalitions, Left Behind detection, code signature and entitlements, launchd / LaunchServices attribution, arguments and environment, and logs.

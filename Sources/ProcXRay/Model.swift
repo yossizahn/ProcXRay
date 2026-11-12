@@ -277,7 +277,7 @@ final class Store {
         }
         guard visible != onScreen else { return }
         onScreen = visible
-        if ProcessInfo.processInfo.environment["PROCXRAY_DEBUG"] != nil { NSLog("ProcXRay on screen: %d", visible ? 1 : 0) }
+        if ProcessInfo.processInfo.environment["PROCXRAY_DEBUG"] != nil { NSLog("Proc X-Ray on screen: %d", visible ? 1 : 0) }
         if visible {
             probeHelper()
             // Paused means frozen: coming back on screen must not swap in new figures (Resume or Refresh does).

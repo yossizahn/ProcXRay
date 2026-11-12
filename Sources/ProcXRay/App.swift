@@ -57,7 +57,7 @@ struct ProcXRayApp: App {
 
     var body: some Scene {
         // The explicit id keeps the saved window frame ("main-AppWindow-1") stable across builds.
-        WindowGroup("ProcXRay", id: "main") {
+        WindowGroup("Proc X-Ray", id: "main") {
             ContentView()
                 .environment(store)
                 .frame(minWidth: 1100, minHeight: 650)
