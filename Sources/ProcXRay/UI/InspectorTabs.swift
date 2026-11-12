@@ -678,6 +678,14 @@ struct OriginTab: View {
                 if let e = p.extensionPoint {
                     Text("App extension for \(ExtensionInfo.title(e)) (\(e))\(p.containingAppName.map { ", inside \($0)" } ?? "").")
                 }
+                if let o = p.domainOwner, let host = store.procs[o] {
+                    HStack(spacing: 6) {
+                        Text("Started by launchd for")
+                        ProcessChip(proc: host)
+                        Text("(runs in its pid domain)").foregroundStyle(.secondary)
+                    }
+                    .help("launchctl print pid/\(o) lists this process among the services it launched.")
+                }
                 if let label = p.launchdLabel {
                     let nodes = job.map { LaunchctlParser.parse($0.text) } ?? []
                     let top = Dictionary(nodes.map { ($0.key, $0.value ?? "") }, uniquingKeysWith: { a, _ in a })
@@ -700,7 +708,7 @@ struct OriginTab: View {
                             if nodes.count > 1 { KVTreeContent(nodes: nodes, filter: "") } else { Text(job.text).foregroundStyle(.secondary) }
                         }
                     }
-                } else if store.lsApps.first(where: { $0.pid == p.pid }) == nil, p.extensionPoint == nil {
+                } else if store.lsApps.first(where: { $0.pid == p.pid }) == nil, p.extensionPoint == nil, p.domainOwner == nil {
                     Text("Not the main process of a launchd job in your domains, not a LaunchServices app.")
                         .foregroundStyle(.secondary)
                 }
@@ -738,10 +746,12 @@ struct OriginTab: View {
         let bundle = p.bundlePath
         let sameBundle = bundle.map { b in all.filter { $0.bundlePath == b && $0.pid != p.pid }.sorted(by: byPid) } ?? []
         let sameBinary = p.cdhash.map { h in all.filter { $0.cdhash == h && $0.pid != p.pid }.sorted(by: byPid) } ?? []
+        let hosted = all.filter { $0.domainOwner == p.pid && $0.pid != p.pid }.sorted(by: byPid)
         Card(title: "Related processes", systemImage: "circle.grid.cross") {
             VStack(alignment: .leading, spacing: 8) {
                 group("Children", children)
                 group("Responsible for", attributed)
+                if !hosted.isEmpty { group("Running in its pid domain", hosted) }
                 group("Same resource coalition", coal)
                 group("Same jetsam coalition, other resource coalitions", jet)
                 group("Same app bundle", sameBundle)

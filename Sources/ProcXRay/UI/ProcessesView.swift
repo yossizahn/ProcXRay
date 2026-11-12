@@ -21,6 +21,8 @@ struct ProcessesView: View {
     @AppStorage(InspectorPaneKey.name) private var showPane = false
     @AppStorage(ColumnPrefs.key) private var shownColumns = ColumnPrefs.defaultShown
     @State private var search = ""
+    @AppStorage("processes.chips") private var savedChips = ""
+    private var chips: Set<FilterChip> { FilterChip.parse(savedChips) }
     @State private var selection: ProcNode.ID?
     @AppStorage("processes.sort") private var savedSort = "pid,asc"
     private var sort: Binding<ColumnSort> {
@@ -49,7 +51,10 @@ struct ProcessesView: View {
 
     var body: some View {
         SplitPane(id: "processes", defaultFraction: 0.6, showsBottom: showPane) {
-            ProcessOutline(store: store, grouping: grouping, filter: search,
+          VStack(spacing: 0) {
+            FilterChipBar(saved: $savedChips)
+            Divider()
+            ProcessOutline(store: store, grouping: grouping, filter: search, chips: chips,
                            selection: $selection, sort: sort, shownColumns: ColumnPrefs.parse(shownColumns),
                            onOpen: { p in inspect(p) },
                            onSignal: { p, sig, label in
@@ -58,8 +63,10 @@ struct ProcessesView: View {
                            })
                 // A grouping switch re-parents nearly every row; start from a fresh outline (all expanded).
                 .id(grouping)
+          }
         } bottom: {
-            SelectedProcessPane(selection: $selection, nav: paneNav, grouping: grouping, filter: search, sort: sort.wrappedValue,
+            SelectedProcessPane(selection: $selection, nav: paneNav, grouping: grouping, filter: search, chips: chips,
+                                sort: sort.wrappedValue,
                                 columns: ColumnPrefs.parse(shownColumns))
         }
         .focusedSceneValue(\.inspectProcess, hasProcessSelected ? { inspectSelected() } : nil)
@@ -73,9 +80,15 @@ struct ProcessesView: View {
                     .help(showPane ? "Hide the inspector pane (⌥⌘I)" : "Show the selected process in a pane below the list (⌥⌘I)")
                 Menu {
                     Picker("Group", selection: $grouping) {
-                        ForEach(Grouping.allCases) { Text($0.label).tag($0) }
+                        ForEach(Grouping.trees) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.inline)
+                    Menu("Group Flat List By") {
+                        Picker("Group flat list by", selection: $grouping) {
+                            ForEach(Grouping.pivots) { Text($0.pivotTitle).tag($0) }
+                        }
+                        .pickerStyle(.inline).labelsHidden()
+                    }
                 } label: {
                     Label(grouping.label, systemImage: "list.bullet.indent").labelStyle(.titleAndIcon)
                 }
@@ -127,6 +140,7 @@ struct SelectedProcessPane: View {
     let nav: InspectorNavigation
     var grouping: Grouping
     var filter: String
+    var chips: Set<FilterChip> = []
     var sort: ColumnSort
     var columns: Set<String>
 
@@ -150,7 +164,7 @@ struct SelectedProcessPane: View {
         Group {
             // Reading store.procs makes the summary follow each refresh.
             if let id = selection, id < 0, !store.procs.isEmpty,
-               let n = Self.find(id, in: store.nodes(grouping: grouping, filter: filter, sort: sort, columns: columns)) {
+               let n = Self.find(id, in: store.nodes(grouping: grouping, filter: filter, chips: chips, sort: sort, columns: columns)) {
                 GroupInspectorView(node: n).environment(\.inspectorLinks, links)
             } else if selection.map({ $0 < 0 }) == true {
                 placeholder("This group isn't in the list any more.")
@@ -212,5 +226,49 @@ struct ProcessWindow: View {
             if let p = nav.current?.proc { self.ref = ProcessRef(p) }
         }
         .frame(minWidth: 640, minHeight: 420)
+    }
+}
+
+/// The quick filters above the tree. Reads per-refresh data for its counts, so it re-renders on each tick
+/// by itself rather than making ProcessesView do so (see the note there).
+struct FilterChipBar: View {
+    @Environment(Store.self) var store
+    @Binding var saved: String
+
+    var body: some View {
+        let on = FilterChip.parse(saved)
+        let now = Date()
+        let procs = Array(store.procs.values)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(FilterChip.allCases) { c in
+                    let active = on.contains(c)
+                    let count = procs.reduce(0) { $0 + (c.matches($1, now: now) ? 1 : 0) }
+                    Button {
+                        var s = on
+                        if active { s.remove(c) } else { s.insert(c) }
+                        saved = FilterChip.encode(s)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(c.title)
+                            Text(verbatim: "\(count)").monospacedDigit().foregroundStyle(active ? Color.white.opacity(0.85) : .secondary)
+                        }
+                        .font(.system(size: 11))
+                        .padding(.horizontal, 8).frame(height: 20)
+                        .foregroundStyle(active ? Color.white : Color.primary)
+                        .background(active ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.secondary.opacity(0.12)), in: Capsule())
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help(c.help + " Chips combine: a process must pass every chip that is on.")
+                    .accessibilityAddTraits(active ? .isSelected : [])
+                    .accessibilityValue("\(count) processes")
+                }
+                if !on.isEmpty { Button("Clear") { saved = "" }.controlSize(.small) }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+        }
+        .frame(height: 30)
     }
 }

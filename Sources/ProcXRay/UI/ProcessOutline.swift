@@ -11,6 +11,9 @@ struct ProcessOutline: NSViewRepresentable {
     let store: Store
     let grouping: Grouping
     let filter: String
+    var chips: Set<FilterChip> = []
+    /// The search text and chips together: what decides whether groups open to show matches.
+    var filterKey: String { chips.isEmpty ? filter : filter + "\u{1}" + FilterChip.encode(chips) }
     @Binding var selection: ProcNode.ID?
     @Binding var sort: ColumnSort
     /// Column ids shown (ColumnPrefs); shared by every window and View ▸ Columns.
@@ -289,7 +292,7 @@ struct ProcessOutline: NSViewRepresentable {
             defer { updating = false }
             syncSortIndicators(outline)
             syncShown(outline)
-            let nodes = parent.store.nodes(grouping: parent.grouping, filter: parent.filter, sort: parent.sort,
+            let nodes = parent.store.nodes(grouping: parent.grouping, filter: parent.filter, chips: parent.chips, sort: parent.sort,
                                            columns: parent.shownColumns)
             procs = parent.store.procs
             if parent.store.nodesVersion != appliedVersion {
@@ -316,12 +319,12 @@ struct ProcessOutline: NSViewRepresentable {
                     sync(outline)
                 }
             }
-            if parent.filter != appliedFilter {
+            if parent.filterKey != appliedFilter {
                 let wasEmpty = appliedFilter.isEmpty
-                appliedFilter = parent.filter
-                // A search opens every group that has a match; clearing it shuts the default-collapsed
-                // ones again, unless the user has touched them since.
-                if parent.filter.isEmpty {
+                appliedFilter = parent.filterKey
+                // A search (or chip) opens every group that has a match; clearing it shuts the
+                // default-collapsed ones again, unless the user has touched them since.
+                if parent.filterKey.isEmpty {
                     for id in defaultCollapsed { if let it = byID[id] { outline.collapseItem(it) } }
                 } else if wasEmpty {
                     expand(shownRoots, in: outline)
@@ -417,7 +420,7 @@ struct ProcessOutline: NSViewRepresentable {
         private func expand(_ items: [Item], in outline: NSOutlineView) {
             for it in items where !it.shown.isEmpty {
                 if collapsed.contains(it.id) { continue }
-                if parent.filter.isEmpty, defaultCollapsed.contains(it.id) { continue }
+                if parent.filterKey.isEmpty, defaultCollapsed.contains(it.id) { continue }
                 outline.expandItem(it)
                 expand(it.shown, in: outline)
             }
@@ -748,6 +751,7 @@ struct ProcessOutline: NSViewRepresentable {
             var parts: [String] = []
             if let app = p.containingAppName { parts.append("in \(app)") }
             if let e = p.extensionPoint { parts.append("extension: \(ExtensionInfo.title(e))") }
+            if let h = p.domainOwnerName { parts.append("host: \(h)") }
             if let t = p.tty { parts.append(SmartTree.ttyName(t)) }
             if let l = p.launchdLabel { parts.append("launchd: \(l)") }
             if let a = p.lsAppName { parts.append("LS: \(a)") }

@@ -77,7 +77,7 @@ enum SmartTree {
     static func roleID(_ root: pid_t, _ key: String) -> Int {
         roleBase - (Int(root) << 24) - Int(fnv(key) & 0xFF_FFFF)
     }
-    private static func fnv(_ key: String) -> UInt32 {
+    static func fnv(_ key: String) -> UInt32 {
         var h: UInt32 = 2_166_136_261   // FNV-1a: deterministic, unlike hashValue
         for b in key.utf8 { h = (h ^ UInt32(b)) &* 16_777_619 }
         return h
@@ -230,7 +230,7 @@ enum SmartTree {
     /// Pass 1: the unit root of every process.
     static func unitRoots(_ input: Input) -> [pid_t: pid_t] {
         let procs = input.procs
-        // Owners. Rule order follows the proposal (pid-domain owner, rule 4, is not read yet).
+        // Owners, by the proposal's rules in order.
         var appByBundle: [String: pid_t] = [:]
         for a in input.lsApps where !a.exited {
             if let pid = a.pid, let b = a.bundlePath, procs[pid] != nil { appByBundle[b] = pid }
@@ -242,6 +242,9 @@ enum SmartTree {
             if isExtension(p), let b = p.bundlePath, let app = appByBundle[b], app != p.pid {     // 3
                 owner[p.pid] = app; continue
             }
+            // 4: the host whose launchd pid domain it runs in, except for an extension: its host is a system
+            // daemon (chronod hosts every widget), shown in Context and Origin instead of nesting under it.
+            if !isExtension(p), let o = p.domainOwner, o != p.pid, procs[o] != nil { owner[p.pid] = o; continue }
             if p.ppid > 1, p.ppid != p.pid, procs[p.ppid] != nil { owner[p.pid] = p.ppid }        // 5
         }
         // Unit root of every process. A cycle (A owned by B, B by A) is broken at its lowest pid.

@@ -41,6 +41,17 @@ struct ProcXRayApp: App {
             Bench.rates(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
         }
+        if CommandLine.arguments.contains("--tree-stats") {
+            Bench.treeStats()
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--shell-test") {
+            exit(Bench.shellTest() ? 0 : 1)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--domains") {
+            Bench.domains(Array(CommandLine.arguments[(i + 1)...]))
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--peers") {
             Bench.peers(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)

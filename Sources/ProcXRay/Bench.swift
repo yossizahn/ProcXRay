@@ -145,4 +145,114 @@ enum Bench {
             print("\(k): \(found[k] ?? 0) found, \(missing[k] ?? 0) not visible, \(none[k] ?? 0) with no other end")
         }
     }
+
+    /// `ProcXRay --domains [--root]`: reads every process's launchd pid domain as the Store does, then counts
+    /// owners found and what the Smart tree's rule 4 changes.
+    static func domains(_ args: [String]) {
+        let viaHelper = args.contains("--root")
+        let priv = viaHelper ? HelperClient.shared.allMetrics() : nil
+        var procs = Store.snapshot(prev: [:], signCache: [:], priv: { priv }).procs
+        let ls = LSAppInfo.list()
+        let before = SmartTree.unitRoots(.init(procs: procs, lsApps: ls))
+        let t0 = Date()
+        var hostOf: [String: String] = [:]
+        var unread = 0, hosts = 0
+        for p in procs.values where p.pid > 0 && !p.isZombie {
+            guard let kids = PidDomain.read(p.pid, ownedByUser: p.uid == getuid(), viaHelper: viaHelper) else { unread += 1; continue }
+            if !kids.isEmpty { hosts += 1 }
+            for k in kids { if let c = procs[k], k != p.pid { hostOf[c.key] = p.key } }
+        }
+        print(String(format: "read %d domains in %.2f s; %d unreadable; %d hosts", procs.count, -t0.timeIntervalSinceNow, unread, hosts))
+        Store.applyDomainOwners(&procs, hostOf)
+        let owned = procs.values.filter { $0.domainOwner != nil }
+        let ext = procs.values.filter(SmartTree.isExtension)
+        print("with a host: \(owned.count); extensions \(ext.filter { $0.domainOwner != nil }.count) of \(ext.count)")
+        let after = SmartTree.unitRoots(.init(procs: procs, lsApps: ls))
+        let units = { (r: [pid_t: pid_t]) in Set(r.values).count }
+        let moved = procs.keys.filter { before[$0] != after[$0] }
+        print("units: \(units(before)) → \(units(after)); \(moved.count) processes moved by rule 4")
+        for pid in moved.prefix(15) {
+            let p = procs[pid]!, r = after[pid].flatMap { procs[$0] }
+            print("  \(p.name) (\(pid)) → unit of \(r?.name ?? "?") via host \(p.domainOwnerName ?? "-")")
+        }
+    }
+
+    /// `ProcXRay --shell-test`: checks Shell.exec's guarantees (output, status, stderr, limits, cancel).
+    static func shellTest() -> Bool {
+        var ok = true
+        func check(_ name: String, _ cond: Bool, _ detail: String = "") {
+            print((cond ? "ok   " : "FAIL ") + name + (detail.isEmpty ? "" : "  [\(detail)]"))
+            ok = ok && cond
+        }
+        func timed(_ f: () -> Shell.Result) -> (Shell.Result, Double) {
+            let t = Date(); let r = f(); return (r, -t.timeIntervalSinceNow)
+        }
+        var r = Shell.exec("/bin/echo", ["hello", "world"])
+        check("stdout", r.output == "hello world\n" && r.status == 0, r.output)
+        r = Shell.exec("/bin/sh", ["-c", "echo out; echo err >&2; exit 3"])
+        check("stderr merged, exit status", r.output.contains("out") && r.output.contains("err") && r.status == 3, "\(r.status)")
+        r = Shell.exec("/bin/sh", ["-c", "echo out; echo err >&2"], mergeStderr: false)
+        check("stderr dropped", r.output == "out\n", r.output)
+        r = Shell.exec("/bin/cat", [])
+        check("stdin is /dev/null", r.output.isEmpty && r.status == 0)
+        r = Shell.exec("/nonexistent/tool", [])
+        check("missing tool", r.status == -1 && r.output.hasPrefix("failed to run"), r.output)
+        var (t, secs) = timed { Shell.exec("/bin/sleep", ["10"], timeout: 1) }
+        check("timeout", t.timedOut && secs < 2, String(format: "%.2f s, status %d", secs, t.status))
+        (t, secs) = timed { Shell.exec("/bin/sh", ["-c", "trap '' TERM; sleep 10"], timeout: 0.5) }
+        check("SIGKILL after ignored SIGTERM", t.timedOut && secs < 4, String(format: "%.2f s, status %d", secs, t.status))
+        (t, _) = timed { Shell.exec("/usr/bin/yes", [], maxBytes: 100_000) }
+        check("output cap", t.truncated && t.output.utf8.count <= 100_000, "\(t.output.utf8.count) bytes")
+        (t, secs) = timed { Shell.exec("/bin/sh", ["-c", "echo hi; sleep 10 &"]) }
+        check("background child keeps pipe", t.output == "hi\n" && secs < 2, String(format: "%.2f s", secs))
+        let c = Shell.Cancel()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { c.cancel() }
+        (t, secs) = timed { Shell.Cancel.$current.withValue(c) { Shell.exec("/bin/sleep", ["10"]) } }
+        check("cancel", secs < 2, String(format: "%.2f s, status %d", secs, t.status))
+        var fds: [Int32] = [0, 0]; pipe(&fds)   // an app descriptor that must not reach the tool
+        r = Shell.exec("/bin/sh", ["-c", "ls /dev/fd | wc -l"])
+        check("no inherited descriptors", Int(r.output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 99 <= 5, r.output)
+        close(fds[0]); close(fds[1])
+        let t0 = Date()
+        for _ in 0..<50 { _ = Shell.exec("/usr/bin/true", []) }
+        print(String(format: "spawn cost: %.1f ms each", -t0.timeIntervalSinceNow * 20))
+        return ok
+    }
+
+    /// `ProcXRay --tree-stats`: rows per grouping, what identical-sibling collapse saves, pivot groups and
+    /// chip counts, on one snapshot with signatures read.
+    @MainActor static func treeStats() {
+        var procs = Store.snapshot(prev: [:], signCache: [:]).procs
+        let s1 = Store.snapshot(prev: [:], signCache: [:])   // a second sample, for CPU %
+        Thread.sleep(forTimeInterval: 1)
+        let s2 = Store.snapshot(prev: s1.samples, signCache: [:])
+        procs = s2.procs
+        for (pid, p) in procs {
+            let s = CodeSign.inspect(pid: pid, path: p.path)
+            procs[pid]!.signer = s.shortSigner
+        }
+        let store = Store(); store.procs = procs; store.lsApps = s2.ls
+        func rows(_ ns: [ProcNode]) -> Int { ns.reduce(0) { $0 + 1 + rows($1.children ?? []) } }
+        func collapsed(_ ns: [ProcNode]) -> [(String, Int)] {
+            ns.flatMap { n -> [(String, Int)] in
+                (n.title.contains(" ×") && n.proc == nil ? [(n.title, n.children?.count ?? 0)] : []) + collapsed(n.children ?? [])
+            }
+        }
+        for g in Grouping.trees + Grouping.pivots {
+            let ns = store.nodes(grouping: g, filter: "", sort: .pid)
+            let c = collapsed(ns)
+            let hidden = c.reduce(0) { $0 + $1.1 }
+            print("\(g.label): \(ns.count) top rows, \(rows(ns)) rows; \(c.count) identical sets hold \(hidden) processes"
+                  + (g == .smart ? ": " + c.sorted { $0.1 > $1.1 }.prefix(8).map(\.0).joined(separator: ", ") : ""))
+            if Grouping.pivots.contains(g) {
+                print("   groups: " + ns.sorted { $0.totalCount > $1.totalCount }.prefix(8).map { "\($0.title) \($0.totalCount)" }.joined(separator: ", "))
+            }
+        }
+        let now = Date()
+        for c in FilterChip.allCases {
+            let n = procs.values.filter { c.matches($0, now: now) }.count
+            let shown = store.nodes(grouping: .smart, filter: "", chips: [c], sort: .pid)
+            print("chip \(c.title): \(n) processes; Smart tree keeps \(rows(shown)) rows")
+        }
+    }
 }

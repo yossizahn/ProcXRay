@@ -48,6 +48,10 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var tty: Int32?
     /// NSExtensionPointIdentifier of the app extension this process runs (see ExtensionInfo).
     var extensionPoint: String?
+    /// The process whose launchd pid domain this one runs in: an extension's host daemon, an XPC service's
+    /// app (see PidDomain). Its name is kept for the Context column, which only sees this process.
+    var domainOwner: pid_t?
+    var domainOwnerName: String?
     var lsTags: [String] = []
     var signer: String?
     var signID: String?
@@ -128,8 +132,27 @@ enum Grouping: String, CaseIterable, Identifiable {
     case coalition = "Coalition"   // raw value kept stable: it's persisted in @AppStorage("grouping")
     case jetsam = "Jetsam coalition"
     case flat = "Flat"
+    // The flat list grouped by one field (View ▸ Group ▸ Group flat list by).
+    case bySigner = "By signer"
+    case byUser = "By user"
+    case byDomain = "By launchd domain"
+    case bySandbox = "By sandbox"
+    case byArch = "By architecture"
     var id: String { rawValue }
     var label: String { self == .coalition ? "Resource coalition" : rawValue }
+    static let trees: [Grouping] = [.smart, .parent, .responsible, .coalition, .jetsam, .flat]
+    static let pivots: [Grouping] = [.bySigner, .byUser, .byDomain, .bySandbox, .byArch]
+    /// The pivot's field name, for the submenu ("Signer").
+    var pivotTitle: String {
+        switch self {
+        case .bySigner: "Signer"
+        case .byUser: "User"
+        case .byDomain: "launchd domain"
+        case .bySandbox: "Sandbox"
+        case .byArch: "Architecture"
+        default: label
+        }
+    }
 }
 
 /// A row in the process table: a real process, or a synthetic group (dead responsible app / coalition).
@@ -222,14 +245,20 @@ final class Store {
     @ObservationIgnored var kindCache: (gen: Int, map: [pid_t: String], roots: [pid_t: pid_t])?
     /// Bumps each time nodes() actually rebuilds, so views can skip work when it returned the cached tree.
     @ObservationIgnored private(set) var nodesVersion = 0
-    @ObservationIgnored private var nodesCache: (gen: Int, grouping: Grouping, filter: String, sort: ColumnSort,
-                                                 columns: Set<String>, nodes: [ProcNode])?
+    @ObservationIgnored private var nodesCache: (gen: Int, grouping: Grouping, filter: String, chips: Set<FilterChip>,
+                                                 sort: ColumnSort, columns: Set<String>, nodes: [ProcNode])?
 
     private(set) var signCache: [String: SignInfo] = [:]
     /// Each process's command line, by codeKey: read once per process (and again after it execs), since
     /// argv doesn't change while the same code runs. nil: tried and couldn't be read.
     @ObservationIgnored private var argvCache: [String: String?] = [:]
     @ObservationIgnored private var readingArgv = false
+    /// launchd pid domains read so far, by host key: the keys of the services running in it (nil: couldn't
+    /// be read, e.g. a root process without the helper). See fillPidDomains.
+    @ObservationIgnored private var domainReads: [String: [String]?] = [:]
+    /// Inverse of domainReads: child key → host key. Applied by every snapshot.
+    @ObservationIgnored private var domainHostOf: [String: String] = [:]
+    @ObservationIgnored private var readingDomains = false
     /// Each process's counters at the last refresh, by key: CPU % and the rate columns divide the change
     /// by the time between the two readings.
     @ObservationIgnored private var prevSamples: [String: Sample] = [:]
@@ -308,7 +337,10 @@ final class Store {
                 guard gen == self.probeGen else { return }
                 if self.helperState != s {
                     // Other users' processes the app couldn't read: the helper can, so try them again.
-                    if s.isRunning { self.argvCache = self.argvCache.filter { $0.value != nil } }
+                    if s.isRunning {
+                        self.argvCache = self.argvCache.filter { $0.value != nil }
+                        self.domainReads = self.domainReads.filter { $0.value != nil }
+                    }
                     self.helperState = s
                 }
             }
@@ -373,6 +405,7 @@ final class Store {
         let prev = prevSamples
         let cache = signCache
         let argv = argvCache
+        let hosts = domainHostOf
         let useHelper = helperState.isRunning
         let readSlow = full || ticksSinceSlow + 1 >= Self.slowEvery || lsApps.isEmpty
         ticksSinceSlow = readSlow ? 0 : ticksSinceSlow + 1
@@ -384,7 +417,8 @@ final class Store {
             // Ask the helper first, but collect local data while it answers; the snapshot waits for the
             // helper only after that, and never longer than helperBudget (it normally takes ~10 ms).
             let priv = useHelper ? Pending { HelperClient.shared.allMetrics(timeout: Self.helperBudget) } : nil
-            var marked = Self.snapshot(prev: prev, signCache: cache, argvCache: argv, priv: { priv?.wait() }, ls: ls, jobs: jobs, otherJobs: otherJobs)
+            var marked = Self.snapshot(prev: prev, signCache: cache, argvCache: argv, domainHosts: hosts, priv: { priv?.wait() },
+                                       ls: ls, jobs: jobs, otherJobs: otherJobs)
             Self.markLeftBehind(&marked.procs, lsApps: marked.ls)
             let snap = marked
             let ms = Int((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
@@ -410,6 +444,7 @@ final class Store {
                 self.refreshing = false
                 self.fillSignatures()
                 self.fillCommandLines()
+                self.fillPidDomains()
             }
         }
     }
@@ -498,6 +533,59 @@ final class Store {
         }
     }
 
+    /// Reads the launchd pid domain of every process not read yet, in the background. A process that appears
+    /// may have been launched into a domain read earlier, so every domain that listed services is read again
+    /// when a new process is a child of launchd; most domains are empty (54 hosts among ~480 processes measured).
+    private func fillPidDomains() {
+        guard !readingDomains else { return }
+        let missing = procs.values.filter { $0.pid > 0 && !$0.isZombie && domainReads[$0.key] == nil }
+        guard !missing.isEmpty else { return }
+        // launchd starts what runs in a pid domain, so only a new child of launchd can be in one read before.
+        let hostKeys = missing.contains { $0.ppid == 1 }
+            ? Set(domainReads.compactMap { k, v in (v?.isEmpty == false) ? k : nil }) : []
+        let targets = missing + procs.values.filter { hostKeys.contains($0.key) }
+        let jobs = targets.map { ($0.pid, $0.start, $0.key, $0.uid == getuid()) }
+        let keyOf = procs.mapValues(\.key)
+        readingDomains = true
+        let helper = helperState.isRunning
+        Task.detached(priority: .utility) {
+            var acc: [String: [String]?] = [:]
+            for (pid, start, key, own) in jobs {
+                let kids = PidDomain.read(pid, ownedByUser: own, viaHelper: helper)
+                // The pid was reused while reading: the domain belongs to someone else; the next pass asks again.
+                guard Native.isSame(pid, start: start) else { continue }
+                acc[key] = kids.map { $0.compactMap { keyOf[$0] }.filter { $0 != key } }
+            }
+            let found = acc
+            await MainActor.run {
+                self.domainReads.merge(found) { _, b in b }
+                let live = Set(self.procs.values.map(\.key))
+                self.domainReads = self.domainReads.filter { live.contains($0.key) }
+                var hostOf: [String: String] = [:]
+                for (host, kids) in self.domainReads { for k in kids ?? [] { hostOf[k] = host } }
+                let changed = hostOf != self.domainHostOf
+                self.domainHostOf = hostOf
+                if changed {
+                    var procs = self.procs
+                    Self.applyDomainOwners(&procs, hostOf)
+                    self.procs = procs
+                }
+                self.readingDomains = false
+            }
+        }
+    }
+
+    /// Sets domainOwner on each process from child key → host key, when the host is still the same process.
+    nonisolated static func applyDomainOwners(_ procs: inout [pid_t: ProcInfo], _ hostOf: [String: String]) {
+        for (pid, p) in procs {
+            var owner: ProcInfo?
+            if let hk = hostOf[p.key], let hp = hk.split(separator: ":").first.flatMap({ pid_t($0) }),
+               let h = procs[hp], h.key == hk, hp != pid { owner = h }
+            if procs[pid]!.domainOwner != owner?.pid { procs[pid]!.domainOwner = owner?.pid }
+            if procs[pid]!.domainOwnerName != owner?.name { procs[pid]!.domainOwnerName = owner?.name }
+        }
+    }
+
     /// argv as one line: arguments with spaces, quotes or nothing in them are single-quoted, as a shell would.
     nonisolated static func joinArgs(_ args: [String]) -> String {
         args.map { a in
@@ -555,6 +643,7 @@ final class Store {
     /// `priv`: helper metrics, asked for only after the local pass so a slow helper delays just the merge.
     nonisolated static func snapshot(prev: [String: Sample], signCache: [String: SignInfo],
                                      argvCache: [String: String?] = [:],
+                                     domainHosts: [String: String] = [:],
                                      priv privSource: () -> [Int32: PrivMetrics]? = { nil },
                                      ls: [LSApp]? = nil, jobs: [LaunchdJob]? = nil,
                                      otherJobs: [LaunchdJob]? = nil) -> Snapshot {
@@ -612,6 +701,7 @@ final class Store {
             if !p.isZombie { p.sandboxed = Native.sandboxed(pid, start: p.start) ?? priv?[pid]?.sandboxed }
             out[pid] = p
         }
+        if !domainHosts.isEmpty { applyDomainOwners(&out, domainHosts) }
         return Snapshot(procs: out, ls: ls, jobs: jobs, otherJobs: otherJobs, samples: samples)
     }
 
@@ -689,16 +779,18 @@ final class Store {
     }
 
     /// `columns`: the shown columns, whose group-row values are worked out (the others cost nothing).
-    func nodes(grouping: Grouping, filter: String, sort: ColumnSort, columns: Set<String> = []) -> [ProcNode] {
-        if let c = nodesCache, c.gen == dataGen, c.grouping == grouping, c.filter == filter, c.sort == sort,
-           c.columns == columns { return c.nodes }
-        let out = buildNodes(grouping: grouping, filter: filter, sort: sort, columns: columns)
-        nodesCache = (dataGen, grouping, filter, sort, columns, out)
+    func nodes(grouping: Grouping, filter: String, chips: Set<FilterChip> = [], sort: ColumnSort,
+               columns: Set<String> = []) -> [ProcNode] {
+        if let c = nodesCache, c.gen == dataGen, c.grouping == grouping, c.filter == filter, c.chips == chips,
+           c.sort == sort, c.columns == columns { return c.nodes }
+        let out = buildNodes(grouping: grouping, filter: filter, chips: chips, sort: sort, columns: columns)
+        nodesCache = (dataGen, grouping, filter, chips, sort, columns, out)
         nodesVersion &+= 1
         return out
     }
 
-    private func buildNodes(grouping: Grouping, filter: String, sort: ColumnSort, columns: Set<String>) -> [ProcNode] {
+    private func buildNodes(grouping: Grouping, filter: String, chips: Set<FilterChip>, sort: ColumnSort,
+                            columns: Set<String>) -> [ProcNode] {
         let all = Array(procs.values)
         var roots: [ProcNode]
         switch grouping {
@@ -771,9 +863,12 @@ final class Store {
                 return ProcNode(id: Self.groupID(jet, sub: false), proc: nil,
                                 title: "\(title)  [jetsam \(jet)]", subtitle: sub, children: children)
             }
+        case .bySigner, .byUser, .byDomain, .bySandbox, .byArch:
+            roots = TreeExtras.pivot(grouping, all)
         }
+        if grouping != .flat { roots = TreeExtras.collapseIdentical(roots) }
         roots = roots.map(Self.counted)
-        if !filter.isEmpty { roots = prune(roots, filter) }
+        if !filter.isEmpty || !chips.isEmpty { roots = TreeExtras.prune(roots, text: filter, chips: chips, now: Date()) }
         let shown = Column.all.filter { columns.contains($0.id) && $0.id != "name" && $0.id != "context" }
         return sorted(roots, sort, shown: shown, sortColumn: Column.byID[sort.id], memo: ColumnMemo()).nodes
     }
@@ -809,16 +904,6 @@ final class Store {
             out.append(ProcNode(id: gid, proc: nil, title: "", children: ps.map { build($0, depth: 1) }))
         }
         return out
-    }
-
-    private func prune(_ nodes: [ProcNode], _ q: String) -> [ProcNode] {
-        nodes.compactMap { n in
-            if n.matches(q) { return n }
-            guard let c = n.children else { return nil }
-            let kept = prune(c, q)
-            if kept.isEmpty { return nil }
-            var m = n; m.children = kept; return m
-        }
     }
 
     /// Ties are broken by row id. Without that, rows that tie (every group row has the same pidKey)

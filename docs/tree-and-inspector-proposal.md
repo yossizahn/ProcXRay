@@ -159,7 +159,7 @@ The CPU and memory figures in these sketches are placeholders, not measurements.
 
 - **Roll-ups.** Every group row shows the sum of its subtree for CPU, memory, disk and energy. `ProcNode.cpuKey` and `memKey` already hold subtree totals for sorting; the outline needs to display them and the other columns need the same treatment.
 - **Sort inside, not across.** Categories keep a fixed order. The sort column orders units inside a category and members inside a unit. A "sort categories too" option is not worth having.
-- **Collapse identical siblings.** Three or more siblings running the same binary become one expandable row ("distnoted ×24"). Measured benefit under the attach rules above: 5 sets covering 49 processes, saving 44 rows, almost all inside apps. Small, so this is a late step.
+- **Collapse identical siblings.** Three or more siblings running the same binary become one expandable row ("distnoted ×24"). Measured benefit under the attach rules above: 5 sets covering 49 processes, saving 44 rows, almost all inside apps. Small, so this is a late step. Implemented (step 11) in every grouping but Flat, for rows with nothing under them; in the Smart tree on 2026-11-12, 12 sets covering 101 processes (`distnoted ×25`, `plugin-container ×22`, `cfprefsd ×8`).
 - **Expansion state.** Categories 2 and 3 start expanded, the rest collapsed. State is stored per category and per unit, keyed by something stable across launches (bundle id or path, not pid).
 - **Filtering.** The existing `prune` keeps a group when any descendant matches. With a filter active, every surviving group auto-expands and group rows show "3 of 151".
 - **Selection on a group row.** Decided 2026-11-12: every group row, an app's unit row included, has its own inspector (`UI/GroupInspector.swift`): the group's CPU, memory, disk and power now with summed sparklines, the Resources sections summed over its processes, the main process as a link, the top five by CPU, memory and power, and every member. Only additive values are summed; resident and virtual size are left out, and P-core share and instructions per cycle are worked out from the summed parts. When some members belong to other users and can't be read, the page says how many of the processes the sums cover. Selecting the main process's own row inspects it alone. (Originally a unit row selected its root process.)
@@ -169,7 +169,7 @@ The CPU and memory figures in these sketches are placeholders, not measurements.
 
 The grouping menu keeps Smart, Parent, Responsible, Coalition, Jetsam and Flat, and gains a "Group flat list by" submenu: signer or team, user, launchd domain, sandboxed, architecture. Each is a `Dictionary(grouping:)` over fields `ProcInfo` already has, plus roll-ups.
 
-Filter chips above the tree combine with the text filter:
+Implemented (step 11), as a "Group Flat List By" submenu. Filter chips above the tree combine with the text filter, and each shows how many processes it matches:
 
 - Started in the last 5 minutes
 - Non-Apple running as root
@@ -185,7 +185,7 @@ Filter chips above the tree combine with the text filter:
 | LaunchServices type per pid | `LSApp.type`, already parsed | free |
 | tty | `kinfo_proc`, already read | free; add to `ProcInfo` |
 | launchd label and domain for system daemons | `launchctl print system`, `print gui/<uid>`, `print user/<uid>` | Works without root. `launchctl list` (used now) covers only the gui domain: 214 running labels. Adding the other two gives 400 (157 system, 29 user). Three calls on the slow tick in place of one. |
-| pid-domain owner | `launchctl print pid/<n>` | One call per process. 2.4 s for all of this user's processes, so it cannot run every tick: do it once per new process, in the background, like signing. Fails with "Operation not permitted" for root-owned pids; needs the helper for those. |
+| pid-domain owner | `launchctl print pid/<n>` | One call per process. 2.4 s for all of this user's processes, so it cannot run every tick: do it once per new process, in the background, like signing. Fails with "Operation not permitted" for root-owned pids; needs the helper for those. Implemented (step 10): each process's own domain is read once, and domains that list services are read again when a new child of launchd appears. All 737 processes took 3.3 s once tools were started with `posix_spawn` (Foundation's `Process` cost ~67 ms per launch, 36.8 s in all). 179 processes have a host, 101 of 105 extensions; rule 4 moves 1 process. |
 | Extension point | bundle `Info.plist` | Read once per bundle path and cached. |
 | Chromium role | bundle name suffix; argv as a fallback | argv means `KERN_PROCARGS2` per helper process, once, cached by `key`. Cost not measured. |
 | Subsystem | keyword table over name, label, framework | pure computation |
@@ -581,11 +581,11 @@ Each step is usable on its own. Sizes are relative.
 | 9 | Connections peer resolution | M | 4 |
 | 10 | pid-domain owner (extension hosts), via helper for root | M | 3 |
 | 11 | Filter chips, pivots, identical-sibling collapse | S each | 1 |
-| 12 | Timeline, pin, compare | L | 7 |
+| 12 | ~~Timeline, pin, compare~~ on hold (2026-11-12) | L | 7 |
 | 13 | Header menu and View ▸ Columns to show and hide the existing columns; size to fit; header tooltips | S | — |
 | 14 | Column descriptors, the "have" columns of the catalogue, group-row rules | M | 13 |
 | 15 | Rate columns | M | 14; shares the previous-sample store with 8 |
-| 16 | Column sets, Customize sheet, own persistence | M | 14 |
+| 16 | ~~Column sets, Customize sheet, own persistence~~ on hold (2026-11-12) | M | 14 |
 | 17 | Columns needing new reads, read only while shown | S–M each | 14 |
 
 Steps 1 and 4 give the most for the least: the tree stops being flat, and the inspector's existing content becomes navigable, with no new data sources. Step 13 is small and independent of everything else, and step 14 is where the code gets simpler, so columns can run alongside either part.

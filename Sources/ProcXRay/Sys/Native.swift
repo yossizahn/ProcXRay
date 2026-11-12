@@ -332,25 +332,47 @@ enum Shell {
 
     /// `timeout`: SIGTERM the tool after this many seconds, SIGKILL it 2 s later if it's still running.
     /// `maxBytes`: stop reading and terminate the tool once it has written this much.
+    ///
+    /// Started with posix_spawn, not Foundation's Process: Process took ~67 ms per launch here (even for
+    /// /usr/bin/true), posix_spawn 2–4 ms, which matters for tools run once per process (launchctl print pid/…).
     static func exec(_ path: String, _ args: [String], mergeStderr: Bool = true,
                      timeout: Double = 60, maxBytes: Int = 64 << 20) -> Result {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = args
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = mergeStderr ? pipe : FileHandle.nullDevice
-        do { try p.run() } catch { return Result(output: "failed to run \(path): \(error)", status: -1) }
-        let pid = p.processIdentifier
+        var fds: [Int32] = [-1, -1]
+        guard pipe(&fds) == 0 else { return Result(output: "failed to run \(path): no pipe", status: -1) }
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_adddup2(&actions, fds[1], 1)
+        if mergeStderr {
+            posix_spawn_file_actions_adddup2(&actions, fds[1], 2)
+        } else {
+            posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
+        }
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        // Only stdin, stdout and stderr reach the tool: none of the app's other descriptors.
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
+        var pid: pid_t = 0
+        let argv: [UnsafeMutablePointer<CChar>?] = ([path] + args).map { strdup($0) } + [nil]
+        let rc = posix_spawn(&pid, path, &actions, &attr, argv, environ)
+        argv.forEach { free($0) }
+        posix_spawn_file_actions_destroy(&actions)
+        posix_spawnattr_destroy(&attr)
+        close(fds[1])
+        guard rc == 0 else {
+            close(fds[0])
+            return Result(output: "failed to run \(path): \(String(cString: strerror(rc)))", status: -1)
+        }
+        let child = Child(pid)
+        defer { close(fds[0]) }
         func stop() {
-            guard p.isRunning else { return }
-            kill(pid, SIGTERM)
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { if p.isRunning { kill(pid, SIGKILL) } }
+            child.signal(SIGTERM)
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { child.signal(SIGKILL) }
         }
 
         let cancel = Cancel.current
         var cancelled = false
-        let fd = pipe.fileHandleForReading.fileDescriptor
+        let fd = fds[0]
         let start = DispatchTime.now()
         var exitedAt: DispatchTime?
         var data = Data()
@@ -378,7 +400,7 @@ enum Shell {
                 timedOut = true
                 stop()
             }
-            if p.isRunning { continue }
+            if child.isRunning { continue }
             // The tool has exited but the pipe is still open: a background child inherited it.
             // Give buffered output a moment, then stop waiting for that child.
             if let e = exitedAt {
@@ -387,10 +409,47 @@ enum Shell {
                 exitedAt = now
             }
         }
-        p.waitUntilExit()
+        let status = child.wait()
         // Cut at the last newline so a truncated report doesn't end mid-line or mid-character.
         if truncated, let nl = data.lastIndex(of: 0x0A) { data = data[..<nl] }
-        return Result(output: String(decoding: data, as: UTF8.self), status: p.terminationStatus,
+        return Result(output: String(decoding: data, as: UTF8.self), status: status,
                       timedOut: timedOut, truncated: truncated)
+    }
+
+    /// A spawned tool. Reaping and signalling share a lock, so a late SIGKILL can never reach a pid that
+    /// was reaped and handed to another process.
+    private final class Child: @unchecked Sendable {
+        let pid: pid_t
+        private let lock = NSLock()
+        private var status: Int32?
+        init(_ pid: pid_t) { self.pid = pid }
+
+        var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return reap(WNOHANG) == nil }
+        func signal(_ sig: Int32) {
+            lock.lock(); defer { lock.unlock() }
+            if reap(WNOHANG) == nil { kill(pid, sig) }
+        }
+        /// Waits for the tool; its exit code, or the signal that ended it (as Process.terminationStatus).
+        /// Polls rather than blocking in waitpid under the lock, so a pending SIGKILL can still be sent.
+        func wait() -> Int32 {
+            while true {
+                lock.lock()
+                let s = reap(WNOHANG)
+                lock.unlock()
+                if let s { return s }
+                usleep(2_000)
+            }
+        }
+
+        private func reap(_ flags: Int32) -> Int32? {
+            if let status { return status }
+            var st: Int32 = 0
+            var r: pid_t
+            repeat { r = waitpid(pid, &st, flags) } while r < 0 && errno == EINTR
+            guard r == pid else { return r < 0 ? -1 : nil }   // -1: not our child any more; nil: still running
+            let low = st & 0x7f
+            status = low == 0 ? (st >> 8) & 0xff : low          // WIFEXITED ? WEXITSTATUS : WTERMSIG
+            return status
+        }
     }
 }
