@@ -216,19 +216,72 @@ extension LsofEntry {
     var sizeSort: UInt64 { size ?? 0 }
 }
 
+/// What lsof's all-process run says about one descriptor's other end.
+struct PeerInfo {
+    enum Relation { case otherEnd, clients, alsoOpen }
+    var relation: Relation
+    var ends: [PeerIndex.End]
+    /// There is an other end (a peer address, a local TCP endpoint) but no visible process holds it.
+    var unresolved = false
+
+    static func resolve(_ e: LsofEntry, pid: Int32, in ix: PeerIndex) -> PeerInfo? {
+        switch e.kind {
+        case .pipe, .unix:
+            guard e.device.hasPrefix("0x") else { return nil }
+            let peerAddress = e.name.hasPrefix("->0x") ? String(e.name.dropFirst(2)) : nil
+            let ends = ix.peers(address: e.device, peerAddress: peerAddress, pid: pid, fd: e.fd)
+            if ends.isEmpty { return peerAddress == nil ? nil : PeerInfo(relation: .otherEnd, ends: [], unresolved: true) }
+            return PeerInfo(relation: .otherEnd, ends: ends)
+        case .tcp:
+            let p = e.endpoints
+            if let r = p.remote {
+                let ends = ix.tcpPeers(local: p.local, remote: r, pid: pid, fd: e.fd)
+                if !ends.isEmpty { return PeerInfo(relation: .otherEnd, ends: ends) }
+                // Only a peer on this machine could have been found, and only while the connection is up:
+                // a CLOSED or CLOSE_WAIT socket's other end is usually gone already.
+                guard p.state == nil || p.state == "ESTABLISHED",
+                      let (h, _) = PeerIndex.split(r), ix.localHosts.contains(h) else { return nil }
+                return PeerInfo(relation: .otherEnd, ends: [], unresolved: true)
+            }
+            guard p.state == "LISTEN" else { return nil }
+            let ends = ix.tcpClients(listening: p.local)
+            return ends.isEmpty ? nil : PeerInfo(relation: .clients, ends: ends)
+        case .file, .dir:
+            let pids = ix.alsoOpen(e.name, except: pid)
+            return pids.isEmpty ? nil : PeerInfo(relation: .alsoOpen, ends: pids.map { .init(pid: $0, fd: "") })
+        default:
+            return nil
+        }
+    }
+
+    /// Distinct pids, in the order found.
+    var pids: [Int32] {
+        var seen: Set<Int32> = []
+        return ends.map(\.pid).filter { seen.insert($0).inserted }
+    }
+}
+
 struct LsofView: View {
+    @Environment(Store.self) private var store
     let entries: [LsofEntry]
     let filter: String
+    let pid: Int32
     @State private var kinds: Set<LsofEntry.Kind> = []
     @State private var sort = [KeyPathComparator(\LsofEntry.fdSort)]
+    @State private var index: PeerIndex?
+    @State private var resolved: [Int: PeerInfo] = [:]
+    @State private var loading = false
 
     var body: some View {
         let counts = Dictionary(grouping: entries, by: \.kind).mapValues(\.count)
         let rows = entries.filter {
             (kinds.isEmpty || kinds.contains($0.kind)) &&
-            (filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) || $0.fd.contains(filter) || $0.type.localizedCaseInsensitiveContains(filter))
+            (filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) || $0.fd.contains(filter)
+             || $0.type.localizedCaseInsensitiveContains(filter) || peerMatches($0, filter))
         }.sorted(using: sort)
+        let listeners = entries.filter { $0.kind == .tcp && $0.endpoints.state == "LISTEN" }
         VStack(spacing: 0) {
+            if !listeners.isEmpty { listening(listeners) }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(LsofEntry.Kind.allCases.filter { counts[$0] != nil }) { k in
@@ -265,7 +318,8 @@ struct LsofView: View {
                 }
             }
             .frame(height: 4)
-            .padding(.horizontal, 8).padding(.bottom, 6)
+            .padding(.horizontal, 8).padding(.bottom, 4)
+            peerStatus.padding(.horizontal, 8).padding(.bottom, 4)
             Table(rows, sortOrder: $sort) {
                 TableColumn("FD", value: \.fdSort) { e in
                     HStack(spacing: 4) {
@@ -279,10 +333,118 @@ struct LsofView: View {
                     Label(e.kind == .image ? "mapped" : e.type, systemImage: e.kind.symbol).foregroundStyle(e.kind.color)
                 }.width(min: 96, ideal: 104, max: 140)
                 TableColumn("Name", value: \.name) { e in NameCell(e: e) }
+                TableColumn("Other end") { e in
+                    if let info = resolved[e.id] {
+                        // Re-injected: a Table cell can be rebuilt (on an accessibility press, for one) without
+                        // the window's environment, and ProcessChip's @Environment(Store.self) then traps.
+                        PeerCell(info: info, pid: pid, scope: index?.scope ?? .ownUser).environment(store)
+                    }
+                }.width(min: 90, ideal: 190)
                 TableColumn("Size", value: \.sizeSort) { e in
                     Text(e.size.map { Fmt.bytes($0) } ?? "").monospacedDigit().foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }.width(min: 70, ideal: 80, max: 100)
+            }
+        }
+        // The view is rebuilt for every lsof run (CommandTab's generation), so Re-run resolves again too.
+        .task { await loadIndex(fresh: false) }
+    }
+
+    private func peerMatches(_ e: LsofEntry, _ f: String) -> Bool {
+        guard let info = resolved[e.id] else { return false }
+        return info.pids.contains { store.procs[$0]?.name.localizedCaseInsensitiveContains(f) == true || "\($0)" == f }
+    }
+
+    private func loadIndex(fresh: Bool) async {
+        loading = true
+        let viaHelper = store.helperState.isRunning
+        let ix = await Task.detached { PeerIndexLoader.load(viaHelper: viaHelper, fresh: fresh) }.value
+        guard !Task.isCancelled else { return }
+        var r: [Int: PeerInfo] = [:]
+        for e in entries { if let info = PeerInfo.resolve(e, pid: pid, in: ix) { r[e.id] = info } }
+        index = ix
+        resolved = r
+        loading = false
+    }
+
+    private var peerStatus: some View {
+        HStack(spacing: 6) {
+            if let ix = index {
+                let found = resolved.values.filter { $0.relation != .alsoOpen && !$0.ends.isEmpty }.count
+                let missing = resolved.values.filter(\.unresolved).count
+                Text("Other ends: \(found) found\(missing > 0 ? ", \(missing) not visible" : "") · searched \(ix.processCount) processes\(ix.scope == .ownUser ? " (yours only)" : "") at \(ix.at.formatted(date: .omitted, time: .standard))")
+                    .help(ix.scope == .ownUser
+                          ? "Without the helper (or as a standard user) lsof only sees your own processes, so peers in root daemons and other users' processes aren't found."
+                          : "From one lsof run over every process, as root.")
+            } else {
+                Text("Finding other ends…")
+            }
+            if loading { ProgressView().controlSize(.mini) }
+            Spacer(minLength: 0)
+            Button("Refresh") { Task { await loadIndex(fresh: true) } }
+                .controlSize(.small).disabled(loading)
+                .help("Run lsof over every process again")
+        }
+        .font(.caption).foregroundStyle(.secondary)
+        .frame(height: 18)
+    }
+
+    private func listening(_ ls: [LsofEntry]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                Label("Listening", systemImage: "ear").font(.system(size: 11, weight: .semibold)).foregroundStyle(.blue)
+                ForEach(ls) { e in
+                    let clients = resolved[e.id]?.pids.count ?? 0
+                    Pill(text: e.endpoints.local + (e.type == "IPv6" ? " v6" : "")
+                         + (clients > 0 ? " · \(clients) client\(clients == 1 ? "" : "s")" : ""), color: .blue)
+                        .help("fd \(e.fd), \(e.type)")
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+        }
+        .frame(height: 28)
+    }
+
+    struct PeerCell: View {
+        @Environment(Store.self) private var store
+        let info: PeerInfo
+        let pid: Int32
+        let scope: PeerIndex.Scope
+        private let shown = 2
+
+        var body: some View {
+            if info.unresolved {
+                Text("not visible").foregroundStyle(.tertiary)
+                    .help(scope == .ownUser
+                          ? "No process of yours holds the other end: it is probably in a root daemon or another user's process. Install the helper to search every process."
+                          : "No running process holds the other end: it may be the kernel, or the peer already closed it.")
+            } else {
+                let pids = info.pids
+                HStack(spacing: 4) {
+                    switch info.relation {
+                    case .clients: Text("from").foregroundStyle(.secondary)
+                    case .alsoOpen: Text("also").foregroundStyle(.secondary)
+                    case .otherEnd: EmptyView()
+                    }
+                    ForEach(pids.prefix(shown), id: \.self) { p in
+                        if p == pid {
+                            let fds = info.ends.filter { $0.pid == p }.map(\.fd).joined(separator: ", ")
+                            Text("this process · fd \(fds)").foregroundStyle(.secondary)
+                        } else if let proc = store.procs[p] {
+                            ProcessChip(proc: proc)
+                        } else {
+                            Text(verbatim: "pid \(p)").foregroundStyle(.secondary).strikethrough()
+                        }
+                    }
+                    if pids.count > shown {
+                        Text("+\(pids.count - shown)").foregroundStyle(.secondary)
+                            .help(pids.dropFirst(shown).map { p in
+                                store.procs[p].map { "\($0.name) (\(p))" } ?? "pid \(p)"
+                            }.joined(separator: "\n"))
+                    }
+                }
+                .lineLimit(1)
             }
         }
     }
@@ -314,6 +476,10 @@ struct LsofView: View {
                 }
                 .lineLimit(1).truncationMode(.head)
                 .help(e.name)
+                .contextMenu {
+                    Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: e.name)]) }
+                    Button("Copy Path") { ProcessOutline.Coordinator.copy(e.name) }
+                }
             default:
                 Text(e.name.isEmpty ? "—" : e.name).foregroundStyle(.secondary).lineLimit(1)
             }

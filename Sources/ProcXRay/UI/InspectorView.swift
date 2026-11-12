@@ -45,7 +45,7 @@ struct InspectorView: View {
                     }
                 case .connections:
                     toolTab(.lsof, auto: true, title: "lsof -n -P -p \(proc.pid)",
-                            parse: LsofParser.parse, isEmpty: \.isEmpty) { LsofView(entries: $0, filter: $1) }
+                            parse: LsofParser.parse, isEmpty: \.isEmpty) { [pid = proc.pid] in LsofView(entries: $0, filter: $1, pid: pid) }
                 case .activity:
                     SubPanes(selection: $activityPane, names: ["Logs", "Sample"]) {
                         if activityPane == "Sample" {

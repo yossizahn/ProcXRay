@@ -99,7 +99,7 @@ enum Bench {
         }
     }
 
-    /// `ProcXRay --helper-call <status|argsenv|lsof|vmmap|sample|procinfo|btm> [pid]`: one helper call from
+    /// `ProcXRay --helper-call <status|argsenv|lsof|lsofall|vmmap|sample|procinfo|btm> [pid]`: one helper call from
     /// the shell, for testing the helper without the UI. Only this exact binary is accepted by the helper.
     static func helperCall(_ args: [String]) {
         let c = HelperClient.shared
@@ -107,7 +107,7 @@ enum Bench {
         guard let what = args.first else { return }
         let pid = args.dropFirst().first.flatMap { Int32($0) } ?? 0
         let tools: [String: HelperTool] = ["lsof": .lsof, "vmmap": .vmmap, "sample": .sample,
-                                           "procinfo": .launchctlProcinfo, "btm": .btmDump]
+                                           "procinfo": .launchctlProcinfo, "btm": .btmDump, "lsofall": .lsofAll]
         if what == "argsenv" {
             guard let r = c.argsEnv(pid) else { print("argsEnv: nil"); return }
             print("argsEnv: exec=\(r.execPath) args=\(r.args.count) env=\(r.env.count) cwd=\(r.cwd ?? "nil")")
@@ -115,6 +115,34 @@ enum Bench {
             let out = c.run(t, pid: pid) ?? "helper did not answer"
             print("\(what): \(out.utf8.count) bytes")
             print(out.prefix(400))
+        }
+    }
+
+    /// `ProcXRay --peers [--root] [pid…]`: builds the Connections tab's peer index, then resolves each
+    /// process's descriptors as the tab does (its own `lsof -p` run), and counts how many other ends were
+    /// found per kind. Without pids, every process in the index.
+    static func peers(_ args: [String]) {
+        let viaHelper = args.contains("--root")   // not --helper: that starts the daemon
+        let t0 = Date()
+        let ix = PeerIndexLoader.load(viaHelper: viaHelper, fresh: true)
+        print(String(format: "index: %d processes, %.2f s, scope %@", ix.processCount, -t0.timeIntervalSinceNow,
+                     "\(ix.scope)"))
+        var pids = args.compactMap { Int32($0) }
+        if pids.isEmpty { pids = Array(Set(ix.byAddress.values.flatMap { $0.map(\.pid) })).sorted() }
+        var found: [String: Int] = [:], missing: [String: Int] = [:], none: [String: Int] = [:]
+        for pid in pids {
+            let entries = LsofParser.parse(Shell.run("/usr/sbin/lsof", ["-n", "-P", "-p", "\(pid)"], mergeStderr: false))
+            for e in entries where [.pipe, .unix, .tcp, .file].contains(e.kind) {
+                let k = e.kind.rawValue
+                guard let info = PeerInfo.resolve(e, pid: pid, in: ix) else { none[k, default: 0] += 1; continue }
+                if info.unresolved { missing[k, default: 0] += 1 } else { found[k, default: 0] += 1 }
+                if pids.count <= 3, e.kind != .file {
+                    print("  \(pid) fd \(e.fd) \(e.type) \(e.name) → \(info.unresolved ? "not visible" : info.ends.map { "\($0.pid):\($0.fd)" }.joined(separator: " "))")
+                }
+            }
+        }
+        for k in Set(found.keys).union(missing.keys).union(none.keys).sorted() {
+            print("\(k): \(found[k] ?? 0) found, \(missing[k] ?? 0) not visible, \(none[k] ?? 0) with no other end")
         }
     }
 }

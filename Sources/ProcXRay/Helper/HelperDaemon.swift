@@ -89,7 +89,7 @@ enum HelperDaemon {
                 reply("helper: rejected tool \(tool) pid \(pid)")
                 return
             }
-            guard t == .btmDump ? callerIsAdmin : mayInspect(pid) else {
+            guard t == .btmDump || t == .lsofAll ? callerIsAdmin : mayInspect(pid) else {
                 reply("helper: only an admin user can inspect another user's processes or all background items")
                 return
             }

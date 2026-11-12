@@ -527,7 +527,7 @@ The current `LsofView`, with peers resolved.
 - **Files.** "Also open in" for a selected file, from the same all-process `lsof` run. Reveal in Finder. Group by volume and by location (app bundle, container, `~/Library`, temporary, system).
 - **Listening ports** called out at the top, since that is the usual reason to open this tab.
 
-The all-process `lsof` run is expensive, so it happens only when this tab is open, with a manual refresh. Its cost was not timed.
+The all-process `lsof` run happens only when this tab is open, with a manual refresh, and is reused for 5 s so following a peer doesn't rerun it. It took 0.15–0.3 s over one user's ~450 processes. Implemented (step 9): with the user's own processes, 271 of 272 pipe peers, 336 of 455 unix socket peers and 196 of 200 live localhost TCP peers resolved; `CLOSED` and `CLOSE_WAIT` sockets are not counted as unresolved, since their peer has usually gone. As root through the helper (689 processes, 0.23 s, 1.9 MB): 432 of 432 unix socket peers resolved.
 
 A small graph view (this process in the middle, peers around it, edges labelled pipe, socket, TCP) is a natural later addition once peers are resolved.
 
@@ -592,7 +592,7 @@ Steps 1 and 4 give the most for the least: the tree stops being flat, and the in
 
 ## Not measured
 
-- Time to read `KERN_PROCARGS2` for every helper process, and to run `lsof` across all processes.
+- Time to read `KERN_PROCARGS2` for every helper process. (`lsof -F` across one user's ~450 processes: 0.15–0.3 s, ~2 MB; across all 689 as root through the helper: 0.23 s, 1.9 MB; measured 2026-11-12.)
 - Anything that needs the helper: responsible pid and pid domains for root processes, socket peers in other users' processes.
 - How the category counts look on a machine with a different mix of apps. Every number here is from one machine at one moment.
 - The Firefox process-type argument.

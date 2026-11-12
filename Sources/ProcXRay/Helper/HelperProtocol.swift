@@ -57,7 +57,7 @@ enum HelperConfig {
 
 /// Allowlisted tools; the helper builds the argv itself.
 enum HelperTool: Int, CaseIterable {
-    case lsof = 1, vmmap, sample, launchctlProcinfo, btmDump
+    case lsof = 1, vmmap, sample, launchctlProcinfo, btmDump, lsofAll
 
     func argv(pid: Int32) -> (String, [String])? {
         switch self {
@@ -67,6 +67,9 @@ enum HelperTool: Int, CaseIterable {
         case .sample: return pid > 0 ? ("/usr/bin/sample", ["\(pid)", "1", "-mayDie", "-file", "/dev/stdout"]) : nil
         case .launchctlProcinfo: return pid > 0 ? ("/bin/launchctl", ["procinfo", "\(pid)"]) : nil
         case .btmDump: return ("/usr/bin/sfltool", ["dumpbtm"])
+        // Every process's descriptors in field form (pid, fd, type, address, name, protocol, TCP state), for
+        // resolving the other end of pipes and sockets. ~0.15 s and ~2 MB for one user's processes.
+        case .lsofAll: return ("/usr/sbin/lsof", ["-n", "-P", "-F", "pftdnPT"])
         }
     }
 
@@ -75,7 +78,7 @@ enum HelperTool: Int, CaseIterable {
         switch self {
         case .sample: 45   // 1 s of sampling, then symbolication: ~13 s for a 39-thread daemon
         case .vmmap, .btmDump: 30
-        case .lsof: 20
+        case .lsof, .lsofAll: 20
         case .launchctlProcinfo: 10
         }
     }
