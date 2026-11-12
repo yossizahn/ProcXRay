@@ -158,9 +158,14 @@ final class Store {
     @ObservationIgnored private var signing = false
     var helperState: HelperClient.State = .notInstalled
     var helperError: String?
-    @ObservationIgnored private var lastProbe = Date.distantPast
+    @ObservationIgnored private var probeTimer: Timer?
 
     init() {
+        // A dropped helper connection (helper died, disabled, replaced): re-probe right away rather than
+        // keep showing it as running until the next probe.
+        HelperClient.shared.onConnectionLost = { [weak self] in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.probeHelper() } }
+        }
         probeHelper()
         refresh()
         schedule()
@@ -192,20 +197,35 @@ final class Store {
         onScreen = visible
         if ProcessInfo.processInfo.environment["PROCXRAY_DEBUG"] != nil { NSLog("ProcXRay on screen: %d", visible ? 1 : 0) }
         if visible {
-            // A CPU % averaged over the whole off-screen stretch would be misleading: start a fresh
-            // baseline and take the second sample shortly after so the column fills in quickly.
-            prevCPU = [:]
-            refresh()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refresh(full: false) }
+            probeHelper()
+            // Paused means frozen: coming back on screen must not swap in new figures (Resume or Refresh does).
+            if !paused {
+                // A CPU % averaged over the whole off-screen stretch would be misleading: start a fresh
+                // baseline and take the second sample shortly after so the column fills in quickly.
+                prevCPU = [:]
+                refresh()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    guard let self, !self.paused else { return }
+                    self.refresh(full: false)
+                }
+            }
         }
         schedule()
     }
 
+    /// Only the latest probe may publish: an older one still in flight (up to 3 s) would otherwise
+    /// overwrite a newer answer, e.g. "running" landing after Uninstall.
+    @ObservationIgnored private var probeGen = 0
+
     func probeHelper() {
-        lastProbe = Date()
+        probeGen &+= 1
+        let gen = probeGen
         Task.detached {
             let s = HelperClient.shared.probe()
-            await MainActor.run { self.helperState = s }
+            await MainActor.run {
+                guard gen == self.probeGen else { return }
+                if self.helperState != s { self.helperState = s }
+            }
         }
     }
 
@@ -234,7 +254,16 @@ final class Store {
     func schedule() {
         timer?.invalidate()
         timer = nil
+        probeTimer?.invalidate()
+        probeTimer = nil
         guard onScreen else { return }
+        // Its own timer, which Pause doesn't stop: a frozen table must not hide that the helper went away.
+        let pt = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.probeHelper() }
+        }
+        pt.tolerance = 2
+        RunLoop.main.add(pt, forMode: .common)
+        probeTimer = pt
         let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, !self.paused else { return }
@@ -262,7 +291,6 @@ final class Store {
         ticksSinceSlow = readSlow ? 0 : ticksSinceSlow + 1
         let ls = readSlow ? nil : lsApps
         let jobs = readSlow ? nil : self.jobs
-        if Date().timeIntervalSince(lastProbe) > 10 { probeHelper() }
         Task.detached(priority: .userInitiated) {
             let t0 = DispatchTime.now().uptimeNanoseconds
             // Ask the helper first, but collect local data while it answers; the snapshot waits for the
@@ -418,12 +446,20 @@ final class Store {
         }
         let priv = privSource()
         for (pid, var p) in out {
-            if p.rss == nil, let m = priv?[pid] {
-                p.rss = m.rss; p.virt = m.virt; p.threads = m.threads; p.cpuNanos = m.cpuNanos
-                p.footprint = m.footprint; p.diskRead = m.diskRead; p.diskWrite = m.diskWrite
-                p.energyNJ = m.energyNJ; p.wakeups = m.wakeups
+            if let m = priv?[pid] {
+                // Field by field: a value read locally stays, and the helper fills only what's missing.
+                // (task info and rusage can fail independently, and the helper's own entry may be empty.)
+                var took = false
+                func fill<T>(_ kp: WritableKeyPath<ProcInfo, T?>, _ v: T?) {
+                    guard p[keyPath: kp] == nil, let v else { return }
+                    p[keyPath: kp] = v
+                    took = true
+                }
+                fill(\.rss, m.rss); fill(\.virt, m.virt); fill(\.threads, m.threads); fill(\.cpuNanos, m.cpuNanos)
+                fill(\.footprint, m.footprint); fill(\.diskRead, m.diskRead); fill(\.diskWrite, m.diskWrite)
+                fill(\.energyNJ, m.energyNJ); fill(\.wakeups, m.wakeups)
+                p.viaHelper = took
                 if p.responsible == nil { p.responsible = m.responsible }
-                p.viaHelper = m.rss != nil || m.footprint != nil
             }
             if let c = p.cpuNanos {
                 if let (pc, pw) = prevCPU[p.key], now > pw, c >= pc {

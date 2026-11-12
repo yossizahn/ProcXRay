@@ -7,6 +7,9 @@ final class HelperClient: @unchecked Sendable {
 
     private let lock = NSLock()
     private var connection: NSXPCConnection?
+    /// Called (on an XPC queue) when the shared connection is interrupted or invalidated: the helper
+    /// died, was disabled or was replaced, so whoever shows its state should probe again.
+    var onConnectionLost: (@Sendable () -> Void)?
 
     var service: SMAppService { SMAppService.daemon(plistName: HelperConfig.plistName) }
 
@@ -66,8 +69,24 @@ final class HelperClient: @unchecked Sendable {
         return try? JSONDecoder().decode(PrivArgsEnv.self, from: data)
     }
 
+    /// Runs on a connection of its own: when the caller's `Shell.Cancel` fires (the window closed, the
+    /// selection moved on), the connection is invalidated and the helper stops the tool, as the local path
+    /// does. On the shared connection the helper would run it to completion as root for nobody.
     func run(_ tool: HelperTool, pid: Int32 = 0, timeout: Double = 60) -> String? {
-        call({ p, done in p.runTool(tool.rawValue, pid: pid) { done($0) } }, timeout: timeout)
+        let cancel = Shell.Cancel.current
+        let c = makeConnection()
+        defer { c.invalidate() }
+        let lock = NSLock()
+        var out: String?
+        let sem = DispatchSemaphore(value: 0)
+        guard let p = c.remoteObjectProxyWithErrorHandler({ _ in sem.signal() }) as? HelperProtocol else { return nil }
+        p.runTool(tool.rawValue, pid: pid) { v in lock.lock(); out = v; lock.unlock(); sem.signal() }
+        let deadline = DispatchTime.now() + timeout
+        while sem.wait(timeout: .now() + 0.1) == .timedOut {
+            if cancel?.isCancelled == true || DispatchTime.now() >= deadline { break }
+        }
+        lock.lock(); defer { lock.unlock() }
+        return out
     }
 
     // MARK: plumbing
@@ -87,20 +106,30 @@ final class HelperClient: @unchecked Sendable {
     private func proxy(_ onError: @escaping (Error) -> Void) -> HelperProtocol? {
         lock.lock(); defer { lock.unlock() }
         if connection == nil {
-            let c = NSXPCConnection(machServiceName: HelperConfig.machService, options: .privileged)
-            c.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
-            // Only talk to a helper that is our own signed binary.
-            c.setCodeSigningRequirement(HelperConfig.peerRequirement)
-            c.invalidationHandler = { [weak self] in self?.dropConnection() }
-            c.interruptionHandler = { [weak self] in self?.dropConnection() }
-            c.resume()
+            let c = makeConnection()
+            c.invalidationHandler = { [weak self] in self?.dropConnection(c) }
+            c.interruptionHandler = { [weak self] in self?.dropConnection(c) }
             connection = c
         }
         return connection?.remoteObjectProxyWithErrorHandler(onError) as? HelperProtocol
     }
 
-    private func dropConnection() {
-        lock.lock(); connection = nil; lock.unlock()
+    private func makeConnection() -> NSXPCConnection {
+        let c = NSXPCConnection(machServiceName: HelperConfig.machService, options: .privileged)
+        c.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
+        // Only talk to a helper that is our own signed binary.
+        c.setCodeSigningRequirement(HelperConfig.peerRequirement)
+        c.resume()
+        return c
+    }
+
+    private func dropConnection(_ c: NSXPCConnection) {
+        lock.lock()
+        let current = connection === c
+        if current { connection = nil }
+        let notify = onConnectionLost
+        lock.unlock()
+        if current { notify?() }
     }
 
     private func invalidate() {

@@ -23,7 +23,14 @@ struct InspectorView: View {
     var exited = false
     /// Signing details the window saw while the process ran; the store drops them once it's gone.
     var lastSign: SignInfo?
-    @AppStorage("inspectorTab") private var tab: InspectorTab = .general
+    /// The tab is remembered per window: a click in one Inspector must not switch (and so discard the
+    /// collected output of) the others. The app-wide value is only the default for a new window.
+    @AppStorage("inspectorTab") private var lastTab: InspectorTab = .general
+    @SceneStorage("inspectorTab") private var windowTab: String?
+    private var tab: Binding<InspectorTab> {
+        Binding(get: { windowTab.flatMap(InspectorTab.init(rawValue:)) ?? lastTab },
+                set: { windowTab = $0.rawValue; lastTab = $0 })
+    }
 
     private var sign: SignInfo? { store.signInfo(for: proc) ?? lastSign }
 
@@ -42,10 +49,10 @@ struct InspectorView: View {
             }
             .frame(height: 22)
             .padding(.horizontal, 10).padding(.top, 4)
-            InspectorTabStrip(selection: $tab)
+            InspectorTabStrip(selection: tab)
             Divider()
             Group {
-                switch tab {
+                switch tab.wrappedValue {
                 case .general: GeneralTab(proc: proc, exited: exited)
                 case .lineage: LineageTab(proc: proc)
                 case .signature: SignatureTab(sign: sign, exited: exited)
@@ -82,6 +89,8 @@ struct InspectorView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        // Pin a new window to the tab in use when it opened; from then on other windows don't move it.
+        .onAppear { if windowTab == nil { windowTab = lastTab.rawValue } }
     }
 
     /// lsof / vmmap / sample need root (or task_for_pid rights) for most processes: route them through
@@ -230,7 +239,8 @@ struct GeneralTab: View {
         if let l = p.launchdLabel { rows.append(("launchd label", l)) }
         if let a = p.lsAppName { rows.append(("LaunchServices", "\(a) \(p.lsTags.joined(separator: " "))")) }
         // Re-read on an exec and on every manual refresh: a `cd` changes nothing else we watch.
-        return KV(rows: rows).task(id: "\(p.codeKey)|\(store.fullRefreshGen)|\(exited)") {
+        // …and when the helper comes or goes, since it reads what we can't.
+        return KV(rows: rows).task(id: "\(p.codeKey)|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
             guard !exited else { return }   // keep the last value; the pid may be someone else's now
             let pid = p.pid, start = p.start, key = p.key
             let helper = store.helperState.isRunning
@@ -362,7 +372,7 @@ struct ArgsTab: View {
             }
         }
         // codeKey: an exec keeps pid and start time but replaces path, argv and environment.
-        .task(id: "\(proc.codeKey)|\(store.fullRefreshGen)|\(exited)") {
+        .task(id: "\(proc.codeKey)|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
             guard !exited else { return }   // keep what was shown; the pid may be someone else's now
             if loadedKey != proc.key { info = nil; loaded = false }   // a different process: no stale rows
             let pid = proc.pid, start = proc.start, key = proc.key
@@ -525,7 +535,7 @@ struct LaunchTab: View {
             }
         }
         // Reload when the process registers with LaunchServices or launchd, execs, or on a manual refresh.
-        .task(id: "\(proc.codeKey)|\(proc.lsAppName ?? "")|\(proc.launchdLabel ?? "")|\(store.fullRefreshGen)|\(exited)") {
+        .task(id: "\(proc.codeKey)|\(proc.lsAppName ?? "")|\(proc.launchdLabel ?? "")|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
             guard !exited else { return }   // keep what was shown; the pid may be someone else's now
             if loadedKey != proc.key { loading = true }   // a different process: don't show the old one's
             let label = proc.launchdLabel, key = proc.key

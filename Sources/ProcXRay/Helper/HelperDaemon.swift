@@ -21,9 +21,11 @@ enum HelperDaemon {
 
         func listener(_ listener: NSXPCListener, shouldAcceptNewConnection c: NSXPCConnection) -> Bool {
             c.exportedInterface = NSXPCInterface(with: HelperProtocol.self)
-            c.exportedObject = Service(callerUID: c.effectiveUserIdentifier)
+            let service = Service(callerUID: c.effectiveUserIdentifier)
+            c.exportedObject = service
             q.sync { live += 1 }
-            c.invalidationHandler = { [weak self] in self?.connectionEnded() }
+            // The app drops a tool's connection when nobody waits for the result any more: stop the tool.
+            c.invalidationHandler = { [weak self] in service.cancel.cancel(); self?.connectionEnded() }
             c.resume()
             return true
         }
@@ -45,6 +47,8 @@ enum HelperDaemon {
     final class Service: NSObject, HelperProtocol {
         private let callerUID: uid_t
         private let callerIsAdmin: Bool
+        /// Fired when this connection ends; terminates tools still running for it.
+        let cancel = Shell.Cancel()
 
         init(callerUID: uid_t) {
             self.callerUID = callerUID
@@ -101,8 +105,12 @@ enum HelperDaemon {
                 reply("helper: only an admin user can inspect another user's processes or all background items")
                 return
             }
+            let cancel = self.cancel
             DispatchQueue.global(qos: .userInitiated).async {
-                reply(Shell.exec(path, args, timeout: t.timeout, maxBytes: HelperTool.maxOutput).annotated)
+                let r = Shell.Cancel.$current.withValue(cancel) {
+                    Shell.exec(path, args, timeout: t.timeout, maxBytes: HelperTool.maxOutput)
+                }
+                reply(r.annotated)
             }
         }
     }

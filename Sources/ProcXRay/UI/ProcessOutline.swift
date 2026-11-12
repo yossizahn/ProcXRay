@@ -319,6 +319,14 @@ struct ProcessOutline: NSViewRepresentable {
                 // Nothing selected, or a target this outline doesn't show: never leave another row
                 // highlighted, or Inspect and Return would act on different processes.
                 outline.deselectAll(nil)
+                // A target the search hides (or that exited) isn't selected any more either: otherwise the
+                // toolbar's Inspect and the inspector pane would act on a row nobody can see.
+                if let id = parent.selection {
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.parent.selection == id, self.byID[id] == nil else { return }
+                        self.parent.selection = nil
+                    }
+                }
             }
         }
 
