@@ -425,7 +425,8 @@ extension Store {
     /// "App · XPC service", "Extension · Widgets": the Smart tree's category of the process's unit, then its role.
     func kind(of p: ProcInfo) -> String? {
         if kindCache?.gen != dataGen {
-            kindCache = (dataGen, SmartTree.kinds(.init(procs: procs, lsApps: lsApps)))
+            let k = SmartTree.kinds(.init(procs: procs, lsApps: lsApps))
+            kindCache = (dataGen, k.kinds, k.roots)
         }
         return kindCache?.map[p.pid]
     }
@@ -441,6 +442,7 @@ extension Store {
 @MainActor
 enum BundleInfo {
     private static var cache: [String: String?] = [:]
+    static var versions: [String: String?] = [:]
     static func identifier(_ bundle: String) -> String? {
         if let hit = cache[bundle] { return hit }
         let plist = NSDictionary(contentsOfFile: bundle + "/Contents/Info.plist") ?? NSDictionary(contentsOfFile: bundle + "/Info.plist")

@@ -214,7 +214,7 @@ final class Store {
     /// Bumped whenever an input of nodes() changes, so the table's tree is only rebuilt when needed.
     @ObservationIgnored private(set) var dataGen = 0
     /// The Kind column's labels, rebuilt when the data changes (see `kind(of:)`).
-    @ObservationIgnored var kindCache: (gen: Int, map: [pid_t: String])?
+    @ObservationIgnored var kindCache: (gen: Int, map: [pid_t: String], roots: [pid_t: pid_t])?
     /// Bumps each time nodes() actually rebuilds, so views can skip work when it returned the cached tree.
     @ObservationIgnored private(set) var nodesVersion = 0
     @ObservationIgnored private var nodesCache: (gen: Int, grouping: Grouping, filter: String, sort: ColumnSort,

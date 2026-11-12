@@ -270,8 +270,9 @@ enum SmartTree {
         return rootOf
     }
 
-    /// "App · Renderer", "Extension · Widgets", "System service": the Kind column, per pid.
-    static func kinds(_ input: Input) -> [pid_t: String] {
+    /// "App · XPC service", "Extension · Widgets", "System service": the Kind column, per pid; and each
+    /// pid's unit root.
+    static func kinds(_ input: Input) -> (kinds: [pid_t: String], roots: [pid_t: pid_t]) {
         let rootOf = unitRoots(input)
         var out: [pid_t: String] = [:]
         for p in input.procs.values {
@@ -287,7 +288,7 @@ enum SmartTree {
             }
             out[p.pid] = s
         }
-        return out
+        return (out, rootOf)
     }
 
     private static func hidingExtensionPoint(_ n: ProcNode) -> ProcNode {

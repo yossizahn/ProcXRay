@@ -1,20 +1,6 @@
 import AppKit
 import SwiftUI
 
-enum InspectorTab: String, CaseIterable, Identifiable {
-    case general = "General"
-    case lineage = "Lineage"
-    case signature = "Signature"
-    case entitlements = "Entitlements"
-    case args = "Args & Env"
-    case files = "Files & Sockets"
-    case memory = "Memory Map"
-    case sample = "Sample"
-    case logs = "Logs"
-    case launch = "launchd / LS"
-    var id: String { rawValue }
-}
-
 struct InspectorView: View {
     @Environment(Store.self) var store
     let proc: ProcInfo
@@ -25,74 +11,69 @@ struct InspectorView: View {
     var lastSign: SignInfo?
     /// The tab is remembered per window: a click in one Inspector must not switch (and so discard the
     /// collected output of) the others. The app-wide value is only the default for a new window.
-    @AppStorage("inspectorTab") private var lastTab: InspectorTab = .general
+    @AppStorage("inspectorTab") private var lastTab: InspectorTab = .overview
     @SceneStorage("inspectorTab") private var windowTab: String?
     private var tab: Binding<InspectorTab> {
         Binding(get: { windowTab.flatMap(InspectorTab.init(rawValue:)) ?? lastTab },
                 set: { windowTab = $0.rawValue; lastTab = $0 })
     }
+    /// Which pane Resources and Activity show; each holds two of the old tabs until steps 8 and 12.
+    @AppStorage("inspector.resourcesPane") private var resourcesPane = "Counters"
+    @AppStorage("inspector.activityPane") private var activityPane = "Logs"
 
     private var sign: SignInfo? { store.signInfo(for: proc) ?? lastSign }
-    @Environment(\.inspectorLinks) private var links
 
     var body: some View {
         VStack(spacing: 0) {
-            // Fixed-height header: a missing icon or path must not shift the tab strip below it.
-            HStack(spacing: 6) {
-                if let links { HistoryButtons(links: links) }
-                Group {
-                    if let img = IconCache.icon(for: proc) { Image(nsImage: img) } else { Image(systemName: "terminal") }
-                }
-                .frame(width: 16, height: 16)
-                Text(proc.name).font(.headline).lineLimit(1)
-                Text(verbatim: "pid \(proc.pid)").foregroundStyle(.secondary).monospacedDigit()
-                Text(proc.path ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 0)
-            }
-            .frame(height: 22)
-            .padding(.horizontal, 10).padding(.top, 4)
+            // Fixed height: a missing icon, owner or badge must not shift the tab strip below it.
+            InspectorHeader(proc: proc, exited: exited, sign: sign)
             InspectorTabStrip(selection: tab)
             Divider()
             Group {
                 switch tab.wrappedValue {
-                case .general: GeneralTab(proc: proc, exited: exited)
-                case .lineage: LineageTab(proc: proc)
-                case .signature: SignatureTab(sign: sign, exited: exited)
-                case .entitlements:
-                    let xml = sign?.entitlementsXML
-                    let none = sign == nil && exited ? "Entitlements weren't read before the process exited."
-                                                     : "No entitlements (or not yet loaded)."
-                    OutputPane(raw: xml ?? none, filterable: true) { f in
-                        EntitlementsView(xml: xml, filter: f)
+                case .overview: OverviewTab(proc: proc, exited: exited, sign: sign) { tab.wrappedValue = $0 }
+                case .origin: OriginTab(proc: proc, exited: exited)
+                case .trust: TrustTab(proc: proc, sign: sign, exited: exited)
+                case .resources:
+                    SubPanes(selection: $resourcesPane, names: ["Counters", "Memory map"]) {
+                        if resourcesPane == "Memory map" {
+                            toolTab(.vmmap, auto: false, title: "vmmap --summary \(proc.pid)",
+                                    parse: VmmapParser.parse, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
+                        } else {
+                            CountersTab(proc: proc)
+                        }
                     }
-                case .args: ArgsTab(proc: proc, exited: exited)
-                case .files:
+                case .connections:
                     toolTab(.lsof, auto: true, title: "lsof -n -P -p \(proc.pid)",
                             parse: LsofParser.parse, isEmpty: \.isEmpty) { LsofView(entries: $0, filter: $1) }
-                case .memory:
-                    toolTab(.vmmap, auto: false, title: "vmmap --summary \(proc.pid)",
-                            parse: VmmapParser.parse, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
-                case .sample:
-                    toolTab(.sample, auto: false, title: "sample \(proc.pid) 1 (all thread stacks for 1s)",
-                            parse: SampleParser.parse, isEmpty: \.threads.isEmpty) { SampleView(report: $0, filter: $1) }
-                case .logs:
-                    let pid = proc.pid
-                    // `log show` reads history, not the process, so it still works after an exit.
-                    CommandTab(key: "log\(proc.key)", auto: false,
-                               title: "/usr/bin/log show --last 10m — events from pid \(pid) or mentioning it",
-                               command: {
-                                   // Full path on purpose: zsh has a `log` builtin that silently shadows /usr/bin/log.
-                                   Shell.run("/usr/bin/log", ["show", "--last", "10m", "--style", "compact", "--info",
-                                       "--predicate", "processID == \(pid) OR eventMessage CONTAINS \"\(pid)\""], timeout: 120)
-                               },
-                               parse: LogParser.parse, isEmpty: \.isEmpty) { LogView(entries: $0, filter: $1) }
-                case .launch: LaunchTab(proc: proc, exited: exited)
+                case .activity:
+                    SubPanes(selection: $activityPane, names: ["Logs", "Sample"]) {
+                        if activityPane == "Sample" {
+                            toolTab(.sample, auto: false, title: "sample \(proc.pid) 1 (all thread stacks for 1s)",
+                                    parse: SampleParser.parse, isEmpty: \.threads.isEmpty) { SampleView(report: $0, filter: $1) }
+                        } else {
+                            logs
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         // Pin a new window to the tab in use when it opened; from then on other windows don't move it.
         .onAppear { if windowTab == nil { windowTab = lastTab.rawValue } }
+    }
+
+    private var logs: some View {
+        let pid = proc.pid
+        // `log show` reads history, not the process, so it still works after an exit.
+        return CommandTab(key: "log\(proc.key)", auto: false,
+                          title: "/usr/bin/log show --last 10m — events from pid \(pid) or mentioning it",
+                          command: {
+                              // Full path on purpose: zsh has a `log` builtin that silently shadows /usr/bin/log.
+                              Shell.run("/usr/bin/log", ["show", "--last", "10m", "--style", "compact", "--info",
+                                  "--predicate", "processID == \(pid) OR eventMessage CONTAINS \"\(pid)\""], timeout: 120)
+                          },
+                          parse: LogParser.parse, isEmpty: \.isEmpty) { LogView(entries: $0, filter: $1) }
     }
 
     /// lsof / vmmap / sample need root (or task_for_pid rights) for most processes: route them through
@@ -207,32 +188,14 @@ struct KV: View {
     }
 }
 
-struct GeneralTab: View {
-    @Environment(Store.self) var store
+/// What the process has used: memory, CPU and I/O counters, lifetime totals. (Step 8 turns this into
+/// the Resources tab proper, with rates beside the totals.)
+struct CountersTab: View {
     let proc: ProcInfo
-    var exited = false
-    @State private var cwd: (key: String, path: String?)?
 
     var body: some View {
         let p = proc
-        // A parent started after its child is a later process that reused the pid.
-        let parent = store.procs[p.ppid].flatMap { $0.start <= p.start ? $0 : nil }
-        let respProc = store.responsibleProcess(p)
-        let coalMembers = p.coalition.map { c in store.procs.values.filter { $0.coalition == c }.count } ?? 0
-        let jetMembers = p.jetsamCoalition.map { c in store.procs.values.filter { $0.jetsamCoalition == c }.count } ?? 0
-        var rows: [(String, String)] = [
-            ("Path", p.path ?? "— (\(p.comm))"),
-            ("Working dir", cwd?.key == p.key ? cwd?.path ?? "—" : "—"),
-            ("Coalition", p.coalition.map { "resource \($0) (\(coalMembers) member(s)) · jetsam \(p.jetsamCoalition.map(String.init) ?? "—") (\(jetMembers) member(s))" } ?? "—"),
-            ("Process group", "\(p.pgid)"),
-            ("User", "\(p.user) (uid \(p.uid))"),
-            ("Started", Fmt.shownStart(p.start) == p.start
-                ? "\(Fmt.date.string(from: p.start))  (\(Fmt.age(p.start)) ago)"
-                : "at boot, before the clock was set (\(Fmt.date.string(from: Fmt.shownStart(p.start))), \(Fmt.age(p.start)) ago)"),
-            ("State", stateText(p)),
-            ("Sandboxed", p.sandboxed.map { $0 ? "yes" : "no" } ?? "unknown"),
-            ("Rosetta", p.isTranslated ? "yes (x86_64 translated)" : "no"),
-        ]
+        var rows: [(String, String)] = []
         if p.isInspectable {
             let c = p.counters
             rows += [
@@ -270,38 +233,25 @@ struct GeneralTab: View {
             rows.append(("Task info", "not accessible (owned by \(p.user)) — install the privileged helper to read it"))
         }
         if p.viaHelper { rows.append(("Source", "task metrics read as root via the privileged helper")) }
-        if let l = p.launchdLabel { rows.append(("launchd label", l)) }
-        if let a = p.lsAppName { rows.append(("LaunchServices", "\(a) \(p.lsTags.joined(separator: " "))")) }
-        // Re-read on an exec and on every manual refresh: a `cd` changes nothing else we watch.
-        // …and when the helper comes or goes, since it reads what we can't.
-        var all: [(String, KVValue)] = rows.map { ($0.0, .text($0.1)) }
-        let links: [(String, KVValue)] = [
-            ("Parent", parent.map { .process($0) } ?? .text(p.ppid == p.pid ? "none" : "not running (\(p.ppid))")),
-            ("Responsible", respProc.map { .process($0) } ?? .text(store.responsibleDescription(p))),
-        ]
-        all.insert(contentsOf: links, at: 2)
-        return KV(rows: all).task(id: "\(p.codeKey)|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
-            guard !exited else { return }   // keep the last value; the pid may be someone else's now
-            let pid = p.pid, start = p.start, key = p.key
-            let helper = store.helperState.isRunning
-            let c = await Task.detached { () -> String? in
-                let c = Native.cwd(pid) ?? (helper ? HelperClient.shared.argsEnv(pid)?.cwd : nil)
-                return Native.isSame(pid, start: start) ? c : nil
-            }.value
-            // The detached load doesn't stop when the selection changes; drop a result for an old one.
-            guard !Task.isCancelled else { return }
-            cwd = (key, c)
-        }
+        return KV(rows: rows)
     }
+}
 
-    private func stateText(_ p: ProcInfo) -> String {
-        switch p.stat {
-        case 1: "idle (being created)"
-        case 2: "runnable"
-        case 3: "sleeping"
-        case 4: "stopped"
-        case 5: "zombie"
-        default: "\(p.stat)"
+/// Two panes in one tab, picked with a small segmented control above them.
+struct SubPanes<Content: View>: View {
+    @Binding var selection: String
+    let names: [String]
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $selection) {
+                ForEach(names, id: \.self) { Text($0).tag($0) }
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .padding(.vertical, 6)
+            Divider()
+            content().frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
@@ -327,164 +277,8 @@ extension Store {
     }
 }
 
-struct LineageTab: View {
-    @Environment(Store.self) var store
-    let proc: ProcInfo
-
-    var body: some View {
-        let ancestors: [ProcInfo] = {
-            var out: [ProcInfo] = []
-            var cur = proc
-            var seen: Set<pid_t> = [proc.pid]
-            // A "parent" started after its child reused the parent's pid; the chain ends there.
-            while let par = store.procs[cur.ppid], par.start <= cur.start, !seen.contains(par.pid) {
-                out.append(par); seen.insert(par.pid); cur = par
-            }
-            return out
-        }()
-        // Started before this process: then the pid it points at was someone else's (shown for an exited one).
-        let children = store.procs.values.filter { $0.ppid == proc.pid && $0.pid != proc.pid && $0.start >= proc.start }.sorted { $0.pid < $1.pid }
-        let attributed = store.procs.values.filter { $0.responsible == proc.pid && $0.pid != proc.pid && $0.start >= proc.start }.sorted { $0.pid < $1.pid }
-        let coal = proc.coalition.map { c in store.procs.values.filter { $0.coalition == c && $0.pid != proc.pid }.sorted { $0.pid < $1.pid } } ?? []
-        // Jetsam-mates outside the resource coalition: typically the host app and its extensions.
-        let jet = proc.jetsamCoalition.map { j in
-            store.procs.values.filter { $0.jetsamCoalition == j && $0.pid != proc.pid && $0.coalition != proc.coalition }
-                .sorted { $0.pid < $1.pid }
-        } ?? []
-        List {
-            section("parent", "Parent chain (ppid → launchd)", count: ancestors.count) { ForEach(ancestors) { row($0) } }
-            section("children", "Children (\(children.count))", count: children.count) { ForEach(children) { row($0) } }
-            section("responsible", "Responsible process", count: 1) {
-                if let rp = store.responsibleProcess(proc) { row(rp) }
-                else { Text(store.responsibleDescription(proc)).foregroundStyle(.secondary) }
-            }
-            section("attributed", "Processes this one is responsible for (\(attributed.count))", count: attributed.count) { ForEach(attributed) { row($0) } }
-            section("coalition", "Same resource coalition (\(coal.count))", count: coal.count) { ForEach(coal) { row($0) } }
-            section("jetsam", "Same jetsam coalition, other resource coalitions (\(jet.count))", count: jet.count) { ForEach(jet) { row($0) } }
-        }
-        .onChange(of: proc.key) { expanded = [:] }   // another process: back to the size-based defaults
-    }
-
-    /// Sections longer than this start collapsed, until the user opens them.
-    private static let collapseAbove = 5
-
-    /// The user's open/closed choice per section, for the process shown; sections without one
-    /// follow their size.
-    @State private var expanded: [String: Bool] = [:]
-
-    private func section<Content: View>(_ id: String, _ title: String, count: Int,
-                                        @ViewBuilder content: () -> Content) -> some View {
-        // A plain Section with our own chevron: Section(isExpanded:) only shows its control on hover.
-        let open = expanded[id] ?? (count <= Self.collapseAbove)
-        return SwiftUI.Section {
-            if open { content() }
-        } header: {
-            Button { expanded[id] = !open } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.semibold))
-                        .rotationEffect(.degrees(open ? 90 : 0))
-                        .frame(width: 10)
-                    Text(title)
-                    Spacer()
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(title)
-            .accessibilityValue(open ? "expanded" : "collapsed")
-        }
-    }
-
-    private func row(_ p: ProcInfo) -> some View {
-        HStack {
-            ProcessChip(proc: p)
-            Spacer()
-            Text(p.path ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-        }
-    }
-}
-
-// MARK: - Signature
-
-struct SignatureTab: View {
-    let sign: SignInfo?
-    let exited: Bool
-    var body: some View {
-        if let s = sign {
-            KV(rows: [
-                ("Signer", s.shortSigner),
-                ("Identifier", s.identifier ?? "—"),
-                ("Team ID", s.teamID ?? "—"),
-                ("Authority", s.authority.isEmpty ? "—" : s.authority.joined(separator: "\n")),
-                ("Valid now", s.valid.map { $0 ? "yes" : "NO" } ?? "unknown"),
-                ("CDHash", s.cdHash ?? "—"),
-                ("Static flags", s.staticFlagNames.joined(separator: " ").ifEmpty("none")),
-                ("Runtime status", s.runtimeStatus.map { String(format: "0x%08x  ", $0) + s.runtimeFlagNames.joined(separator: " ") } ?? "—"),
-                ("Entitlements", s.entitlementKeys.isEmpty ? "none" : s.entitlementKeys.joined(separator: "\n")),
-                ("Requirement", s.designatedRequirement ?? "—"),
-                ("Error", s.error ?? "—"),
-            ])
-        } else if exited {
-            Text("The process exited before its code signature was read.").foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ProgressView("Reading code signature…").frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-}
-
 extension String {
     func ifEmpty(_ s: String) -> String { isEmpty ? s : self }
-}
-
-// MARK: - Args & env
-
-struct ArgsTab: View {
-    @Environment(Store.self) var store
-    let proc: ProcInfo
-    var exited = false
-    @State private var info: Native.ArgsEnv?
-    @State private var loaded = false
-    @State private var loadedKey: String?
-
-    var body: some View {
-        Group {
-            if let info {
-                OutputPane(raw: "exec: \(info.execPath)\n\n── argv (\(info.args.count)) ──\n"
-                         + info.args.enumerated().map { "[\($0)] \($1)" }.joined(separator: "\n")
-                         + "\n\n── environment (\(info.env.count)) ──\n" + info.env.sorted().joined(separator: "\n"),
-                           filterable: true) { f in
-                    ArgsEnvView(info: info, filter: f)
-                }
-            } else if loaded || exited {
-                Text(exited ? "The process has exited; its arguments can't be read any more."
-                            : "Arguments not readable (other user's process, or it has exited).")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ProgressView()
-            }
-        }
-        // codeKey: an exec keeps pid and start time but replaces path, argv and environment.
-        .task(id: "\(proc.codeKey)|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
-            guard !exited else { return }   // keep what was shown; the pid may be someone else's now
-            if loadedKey != proc.key { info = nil; loaded = false }   // a different process: no stale rows
-            let pid = proc.pid, start = proc.start, key = proc.key
-            let helper = store.helperState.isRunning
-            let a = await Task.detached { () -> Native.ArgsEnv? in
-                let a: Native.ArgsEnv? = Native.argsEnv(pid) ?? {
-                    guard helper, let r = HelperClient.shared.argsEnv(pid) else { return nil }
-                    return Native.ArgsEnv(execPath: r.execPath, args: r.args, env: r.env)
-                }()
-                return Native.isSame(pid, start: start) ? a : nil
-            }.value
-            guard !Task.isCancelled else { return }
-            info = a
-            loaded = true
-            loadedKey = key
-        }
-    }
 }
 
 // MARK: - Shell-backed tabs
@@ -582,95 +376,6 @@ struct CommandTab<Parsed, Visual: View>: View {
             generation += 1
             running = false
         }
-    }
-}
-
-struct LaunchTab: View {
-    @Environment(Store.self) var store
-    let proc: ProcInfo
-    var exited = false
-    @State private var loadedKey: String?
-    @State private var ls: String?
-    @State private var job: (title: String, text: String)?
-    @State private var procinfo: (title: String, text: String)?
-    @State private var loading = true
-
-    private var raw: String {
-        var s = ""
-        if let ls { s += "── LaunchServices (lsappinfo) ──\n\(ls)\n\n" }
-        else { s += "── LaunchServices ──\nnot registered as an app with LaunchServices\n\n" }
-        if let job { s += "── \(job.title) ──\n\(job.text)\n" }
-        if let procinfo { s += "\n── \(procinfo.title) ──\n\(procinfo.text)" }
-        return s
-    }
-
-    var body: some View {
-        Group {
-            if loading && exited {
-                Text("The process has exited; this can't be read any more.").foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if loading {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                OutputPane(raw: raw, filterable: true) { f in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 14) {
-                            section("LaunchServices", "app.badge") {
-                                if let ls { LSRecordContent(raw: ls, filter: f) }
-                                else { note("Not registered as an app with LaunchServices.") }
-                            }
-                            if let job {
-                                section(job.title, "gearshape.2") {
-                                    let nodes = LaunchctlParser.parse(job.text)
-                                    if nodes.count > 1 { KVTreeContent(nodes: nodes, filter: f) } else { note(job.text) }
-                                }
-                            }
-                            if let procinfo {
-                                section(procinfo.title, "person.badge.shield.checkmark") {
-                                    let nodes = LaunchctlParser.parse(procinfo.text)
-                                    if nodes.count > 1 { KVTreeContent(nodes: nodes, filter: f) } else { note(procinfo.text) }
-                                }
-                            }
-                        }
-                        .padding(10)
-                    }
-                }
-            }
-        }
-        // Reload when the process registers with LaunchServices or launchd, execs, or on a manual refresh.
-        .task(id: "\(proc.codeKey)|\(proc.lsAppName ?? "")|\(proc.launchdLabel ?? "")|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
-            guard !exited else { return }   // keep what was shown; the pid may be someone else's now
-            if loadedKey != proc.key { loading = true }   // a different process: don't show the old one's
-            let label = proc.launchdLabel, key = proc.key
-            let lsRaw = store.lsApps.first { $0.pid == proc.pid }?.raw
-            let pid = proc.pid
-            let helper = store.helperState.isRunning
-            let (j, p) = await Task.detached { () -> ((String, String), (String, String)) in
-                let j = label.map { ("launchctl print \($0)", Launchd.printJob($0)) }
-                    ?? ("launchd", "pid \(pid) is not the main process of a launchd job in your domain.")
-                let p = helper
-                    ? ("launchctl procinfo \(pid) (as root via helper)", HelperClient.shared.run(.launchctlProcinfo, pid: pid) ?? "helper did not answer")
-                    : ("launchctl procinfo", "`launchctl procinfo \(pid)` shows full launchd attribution — install the privileged helper to see it.")
-                return (j, p)
-            }.value
-            guard !Task.isCancelled else { return }
-            ls = lsRaw
-            job = (j.0, j.1)
-            procinfo = (p.0, p.1)
-            loading = false
-            loadedKey = key
-        }
-    }
-
-    private func section<C: View>(_ title: String, _ icon: String, @ViewBuilder _ c: () -> C) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(title, systemImage: icon).font(.title3.weight(.semibold))
-            c()
-        }
-    }
-
-    private func note(_ s: String) -> some View {
-        Text(s).foregroundStyle(.secondary).font(.callout).textSelection(.enabled)
     }
 }
 
