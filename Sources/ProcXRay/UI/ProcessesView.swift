@@ -23,6 +23,7 @@ struct ProcessesView: View {
     @State private var selection: ProcNode.ID?
     @State private var sort = [KeyPathComparator(\ProcNode.pidKey)]
     @State private var pendingSignal: (ProcInfo, Int32, String)?
+    @State private var signalError: String?
 
     // This body must not read per-refresh data (store.procs, nodes): then it would re-render every tick,
     // and each re-render pushes SwiftUI's environment through every cell view of the outline. The outline
@@ -39,7 +40,10 @@ struct ProcessesView: View {
             ProcessOutline(store: store, grouping: grouping, filter: search,
                            selection: $selection, sort: $sort,
                            onOpen: { p in inspect(p) },
-                           onSignal: { p, sig, label in pendingSignal = (p, sig, label) })
+                           onSignal: { p, sig, label in
+                               // Resume is harmless: send it at once. The rest are confirmed first.
+                               if sig == SIGCONT { send(sig, label, to: p) } else { pendingSignal = (p, sig, label) }
+                           })
                 // A grouping switch re-parents nearly every row; start from a fresh outline (all expanded).
                 .id(grouping)
         } bottom: {
@@ -73,12 +77,31 @@ struct ProcessesView: View {
         .confirmationDialog(pendingSignal.map { "Send \($0.2) to \($0.0.name) (pid \($0.0.pid))?" } ?? "",
                             isPresented: Binding(get: { pendingSignal != nil }, set: { if !$0 { pendingSignal = nil } })) {
             Button(pendingSignal?.2 ?? "Send", role: .destructive) {
-                if let (p, sig, _) = pendingSignal {
-                    if let err = store.send(sig, to: p) { NSSound.beep(); NSLog("signal failed: %@", err) }
-                    store.refresh()
-                }
+                if let (p, sig, label) = pendingSignal { send(sig, label, to: p) }
                 pendingSignal = nil
             }
+        }
+        .signalFailureAlert($signalError)
+    }
+
+    private func send(_ sig: Int32, _ label: String, to p: ProcInfo) {
+        if let err = store.send(sig, to: p) {
+            // Next turn of the run loop: the confirmation dialog is still being dismissed here.
+            let msg = "Couldn't send \(label) to \(p.name) (pid \(p.pid)).\n\n\(err)"
+            DispatchQueue.main.async { signalError = msg }
+        }
+        store.refresh()
+    }
+}
+
+extension View {
+    /// Says why a signal wasn't sent; a beep alone left people guessing whether anything happened.
+    func signalFailureAlert(_ message: Binding<String?>) -> some View {
+        alert("Signal not sent", isPresented: Binding(get: { message.wrappedValue != nil },
+                                                     set: { if !$0 { message.wrappedValue = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(message.wrappedValue ?? "")
         }
     }
 }

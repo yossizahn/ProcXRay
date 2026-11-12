@@ -67,6 +67,12 @@ enum HelperDaemon {
             var out: [PrivMetrics] = []
             for k in Native.allProcesses() where k.pid > 0 {
                 var m = PrivMetrics(pid: k.pid)
+                defer { out.append(m) }
+                m.responsible = Native.responsible(k.pid)
+                m.sandboxed = Native.sandboxed(k.pid, start: k.start)
+                // Usage of another user's process is root-only in the kernel (proc_pid_rusage checks
+                // same-user): a standard user gets it for their own processes only, as without the helper.
+                guard mayInspect(k.pid) else { continue }
                 if let ti = Native.taskInfo(k.pid) {
                     m.rss = ti.pti_resident_size
                     m.virt = ti.pti_virtual_size
@@ -81,9 +87,6 @@ enum HelperDaemon {
                     m.wakeups = ru.ri_pkg_idle_wkups &+ ru.ri_interrupt_wkups
                     if m.cpuNanos == nil { m.cpuNanos = Native.machToNanos(ru.ri_user_time &+ ru.ri_system_time) }
                 }
-                m.responsible = Native.responsible(k.pid)
-                m.sandboxed = Native.sandboxed(k.pid, start: k.start)
-                out.append(m)
             }
             reply((try? JSONEncoder().encode(out)) ?? Data())
         }

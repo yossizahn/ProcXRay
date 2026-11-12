@@ -419,7 +419,7 @@ struct ProcessOutline: NSViewRepresentable {
                 add("Terminate (SIGTERM)") { parent.onSignal(p, SIGTERM, "SIGTERM") }
                 add("Kill (SIGKILL)") { parent.onSignal(p, SIGKILL, "SIGKILL") }
                 add("Suspend (SIGSTOP)") { parent.onSignal(p, SIGSTOP, "SIGSTOP") }
-                add("Resume (SIGCONT)") { _ = parent.store.send(SIGCONT, to: p) }
+                add("Resume (SIGCONT)") { parent.onSignal(p, SIGCONT, "SIGCONT") }   // sent without asking
                 menu.addItem(.separator())
             }
             if let path = p.path {

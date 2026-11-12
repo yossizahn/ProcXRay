@@ -428,10 +428,18 @@ struct CommandTab<Parsed, Visual: View>: View {
             .padding(6)
             Divider()
             if let output {
-                if showRaw {
+                if let parsed, !isEmpty(parsed) {
+                    // The visual view stays alive under Raw (hidden), so the Raw switch, which every window
+                    // shares, doesn't wipe chips or expansion in other windows.
+                    ZStack {
+                        visual(parsed, filter).id(generation)   // fresh view state (expansion, chips) per run
+                            .opacity(showRaw ? 0 : 1)
+                            .allowsHitTesting(!showRaw)
+                            .accessibilityHidden(showRaw)
+                        if showRaw { MonoText(text: filterLines(output, filter)) }
+                    }
+                } else if showRaw {
                     MonoText(text: filterLines(output, filter))
-                } else if let parsed, !isEmpty(parsed) {
-                    visual(parsed, filter).id(generation)   // fresh view state (expansion, chips) per run
                 } else if parsed != nil {
                     UnparsedNote(raw: output)
                 } else {

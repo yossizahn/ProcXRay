@@ -713,7 +713,10 @@ final class Store {
         guard p.pid > 0 else { return "pid \(p.pid) can't be signalled" }
         guard let live = Native.process(p.pid) else { return "process \(p.pid) has exited" }
         guard live.start == p.start else { return "pid \(p.pid) now belongs to a different process" }
-        return kill(p.pid, sig) == 0 ? nil : String(cString: strerror(errno))
+        guard kill(p.pid, sig) != 0 else { return nil }
+        let e = errno
+        return e == EPERM ? "Operation not permitted: the process belongs to another user or is protected by macOS."
+                          : String(cString: strerror(e))
     }
 }
 

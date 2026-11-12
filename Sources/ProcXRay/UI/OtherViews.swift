@@ -14,6 +14,7 @@ struct PanePlaceholder: View {
 struct GhostsView: View {
     @Environment(Store.self) var store
     @State private var selection: pid_t?
+    @State private var signalError: String?
 
     var body: some View {
         let ghosts = store.ghosts
@@ -33,7 +34,10 @@ struct GhostsView: View {
                                 Text(verbatim: "started \(Fmt.age(p.start)) ago").foregroundStyle(.secondary)
                                 Spacer()
                                 Text(Fmt.bytes(p.footprint)).monospacedDigit()
-                                Button("Terminate") { _ = store.send(SIGTERM, to: p); store.refresh() }
+                                Button("Terminate") {
+                                    if let e = store.send(SIGTERM, to: p) { signalError = "Couldn't send SIGTERM to \(p.name) (pid \(p.pid)).\n\n\(e)" }
+                                    store.refresh()
+                                }
                                     .controlSize(.small)
                             }
                             .tag(p.pid)
@@ -61,6 +65,7 @@ struct GhostsView: View {
         }
         .navigationTitle("Left Behind")
         .navigationSubtitle("macOS keeps an app 'running in background' while these live")
+        .signalFailureAlert($signalError)
     }
 }
 

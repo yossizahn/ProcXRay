@@ -247,6 +247,7 @@ struct LsofView: View {
                             .background(on ? AnyShapeStyle(k.color) : AnyShapeStyle(k.color.opacity(0.14)), in: Capsule())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityAddTraits(on ? .isSelected : [])
                     }
                     if !kinds.isEmpty { Button("Show all") { kinds = [] }.controlSize(.small) }
                     Spacer(minLength: 0)
@@ -526,7 +527,14 @@ extension CallNode {
     /// Samples where this frame itself was on top of the stack.
     var selfCount: Int { max(0, count - children.map(\.count).reduce(0, +)) }
     func leaves() -> [CallNode] { children.isEmpty ? [self] : children.flatMap { $0.leaves() } }
-    var busySamples: Int { leaves().filter { !$0.isIdleLeaf }.map(\.count).reduce(0, +) }
+    /// Samples spent on top of the stack in a frame that isn't a known wait: a leaf's samples, and an
+    /// inner frame's own (self) samples too. Counting leaves only called a thread spinning in `hot_loop`
+    /// with one blocking callee "idle". The wait list is a heuristic: a busy `read` still counts as waiting.
+    var busySamples: Int {
+        var own = isThread || idleLeaves.contains(symbol) ? 0 : selfCount
+        for c in children { own += c.busySamples }
+        return own
+    }
 }
 
 struct SampleView: View {
@@ -597,8 +605,14 @@ struct SampleView: View {
             }
             .padding(8)
             HStack(spacing: 10) {
-                Button("Expand all") { var s: Set<Int> = []; func a(_ n: CallNode) { s.insert(n.id); n.children.forEach(a) }; report.threads.forEach(a); expanded = s }
-                Button("Collapse all") { expanded = [] }
+                // A search shows every matching path open whatever the expansion; these would change
+                // state that isn't shown, only to surface when the search is cleared.
+                Group {
+                    Button("Expand all") { var s: Set<Int> = []; func a(_ n: CallNode) { s.insert(n.id); n.children.forEach(a) }; report.threads.forEach(a); expanded = s }
+                    Button("Collapse all") { expanded = [] }
+                }
+                .disabled(!filter.isEmpty)
+                .help(filter.isEmpty ? "" : "While filtering, every matching branch is shown open")
                 Toggle("Hide idle threads", isOn: $hideIdle).toggleStyle(.checkbox)
                 Spacer()
                 HStack(spacing: 4) { Circle().fill(.orange).frame(width: 6, height: 6); Text("on CPU") }
@@ -639,6 +653,7 @@ struct SampleView: View {
     private func row(_ r: Row) -> some View {
         let n = r.node
         let open = expanded.contains(n.id) || !filter.isEmpty
+        let canToggle = !n.children.isEmpty && filter.isEmpty
         let frac = Double(n.count) / Double(r.total)
         HStack(spacing: 6) {
             Color.clear.frame(width: CGFloat(r.depth) * 12, height: 1)
@@ -646,6 +661,7 @@ struct SampleView: View {
                 .font(.system(size: n.children.isEmpty ? 4 : 9, weight: .bold))
                 .foregroundStyle(n.children.isEmpty ? (n.isIdleLeaf ? Color.gray : Color.orange) : Color.secondary)
                 .frame(width: 12)
+                .accessibilityHidden(true)
             Text(verbatim: "\(n.count)").monospacedDigit().font(.system(size: 11)).foregroundStyle(.secondary)
                 .frame(width: 40, alignment: .trailing)
             MiniBar(fraction: frac, color: n.isThread ? .accentColor : (n.busySamples > 0 ? .orange : .gray), width: 44)
@@ -672,17 +688,23 @@ struct SampleView: View {
         .padding(.horizontal, 6)
         .background(n.isThread ? Color.secondary.opacity(0.08) : .clear)
         .contentShape(Rectangle())
-        .onTapGesture {
-            guard !n.children.isEmpty else { return }
-            if expanded.contains(n.id) { expanded.remove(n.id); return }
-            // Open the whole linear chain down to the next branch point (sample trees are mostly chains).
-            var cur: CallNode? = n
-            while let c = cur {
-                expanded.insert(c.id)
-                cur = c.children.count == 1 ? c.children[0] : nil
-            }
-        }
+        .onTapGesture { if canToggle { toggle(n) } }
         .help("\(n.symbol)\(n.library.map { " (in \($0))" } ?? "") — \(n.count) samples")
+        // One VoiceOver element per row: its text, an expanded/collapsed value and a press action.
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(n.children.isEmpty ? "" : (open ? "expanded" : "collapsed"))
+        .accessibilityAddTraits(canToggle ? .isButton : [])
+        .accessibilityAction { if canToggle { toggle(n) } }
+    }
+
+    private func toggle(_ n: CallNode) {
+        if expanded.contains(n.id) { expanded.remove(n.id); return }
+        // Open the whole linear chain down to the next branch point (sample trees are mostly chains).
+        var cur: CallNode? = n
+        while let c = cur {
+            expanded.insert(c.id)
+            cur = c.children.count == 1 ? c.children[0] : nil
+        }
     }
 }
 
@@ -780,6 +802,7 @@ struct LogView: View {
                             .background(on ? AnyShapeStyle(l.color) : AnyShapeStyle(l.color.opacity(0.14)), in: Capsule())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(on ? .isSelected : [])
                 }
                 Spacer()
                 if v.key != key { ProgressView().controlSize(.small) }   // a newer filter is being applied
@@ -1045,14 +1068,21 @@ struct ArgsEnvView: View {
             guard let eq = e.firstIndex(of: "=") else { return (e, "") }
             return (String(e[..<eq]), String(e[e.index(after: eq)...]))
         }.filter { filter.isEmpty || $0.0.localizedCaseInsensitiveContains(filter) || $0.1.localizedCaseInsensitiveContains(filter) }
+        // The filter narrows every section, as it does the Raw lines; argument numbers stay the original ones.
+        let args = Array(info.args.enumerated()).filter { filter.isEmpty || $0.element.localizedCaseInsensitiveContains(filter) }
+        let showExec = filter.isEmpty || info.execPath.localizedCaseInsensitiveContains(filter)
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                Card(title: "Executable", systemImage: "terminal") {
-                    Text(info.execPath).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                if showExec {
+                    Card(title: "Executable", systemImage: "terminal") {
+                        Text(info.execPath).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                    }
                 }
-                Card(title: "Arguments", systemImage: "list.number", trailing: "\(info.args.count)") {
+                if !args.isEmpty {
+                Card(title: "Arguments", systemImage: "list.number",
+                     trailing: filter.isEmpty ? "\(info.args.count)" : "\(args.count) of \(info.args.count)") {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(info.args.enumerated()), id: \.offset) { i, a in
+                        ForEach(args, id: \.offset) { i, a in
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Text(verbatim: "\(i)").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22, alignment: .trailing)
                                 Text(a).font(.system(.body, design: .monospaced)).textSelection(.enabled)
@@ -1061,7 +1091,10 @@ struct ArgsEnvView: View {
                         }
                     }
                 }
-                Card(title: "Environment", systemImage: "leaf", trailing: "\(env.count)") {
+                }
+                if !env.isEmpty || filter.isEmpty {
+                Card(title: "Environment", systemImage: "leaf",
+                     trailing: filter.isEmpty ? "\(env.count)" : "\(env.count) of \(info.env.count)") {
                     Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
                         ForEach(Array(env.enumerated()), id: \.offset) { _, kv in
                             GridRow(alignment: .firstTextBaseline) {
@@ -1070,6 +1103,11 @@ struct ArgsEnvView: View {
                             }
                         }
                     }
+                }
+                }
+                if !showExec && args.isEmpty && env.isEmpty {
+                    Text("Nothing matches \u{201C}\(filter)\u{201D}.").foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity).padding(.top, 20)
                 }
             }
             .padding(10)

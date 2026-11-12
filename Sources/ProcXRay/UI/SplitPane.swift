@@ -62,7 +62,25 @@ struct SplitPane<Top: View, Bottom: View>: View {
                             }
                             .onEnded { _ in dragStartTop = nil }
                     )
+                    // Without a pointer: VoiceOver adjusts it like a native splitter, and with keyboard
+                    // focus (Full Keyboard Access, or Tab when "Keyboard navigation" is on) ↑/↓ move it.
+                    // Exposed as a slider (top pane's share of the height), which VoiceOver reads with
+                    // its value and adjusts with VO-↑/↓; a bare adjustable element came out as AXUnknown.
+                    .accessibilityRepresentation {
+                        Slider(value: Binding(get: { Double(topHeight / max(total, 1) * 100).rounded() },
+                                              set: { fraction = Double(clamp(total * $0 / 100, total) / max(total, 1)) }),
+                               in: 0...100, step: 5) { Text("Split") }
+                    }
+                    .focusable()
+                    .onKeyPress(.upArrow) { nudge(-1, total: total, topHeight: topHeight); return .handled }
+                    .onKeyPress(.downArrow) { nudge(1, total: total, topHeight: topHeight); return .handled }
             }
             .zIndex(1)
+    }
+
+    /// One step of 5% of the height (positive moves the divider down).
+    private func nudge(_ steps: Int, total: CGFloat, topHeight: CGFloat) {
+        guard total > 0 else { return }
+        fraction = Double(clamp(topHeight + CGFloat(steps) * total * 0.05, total) / total)
     }
 }
