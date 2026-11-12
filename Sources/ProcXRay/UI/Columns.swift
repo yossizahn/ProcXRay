@@ -229,7 +229,7 @@ private let catalogue: [Column] = [
     Column(id: "user", title: "User", tooltip: "User the process runs as.",
            section: .identity, width: 70, rule: .same(noun: "user")) { p, _ in .text(p.user) },
     Column(id: "kind", title: "Kind",
-           tooltip: "Where the Smart tree puts it: category, then the role inside its app (\"App · Renderer\", \"Extension · Widgets\").",
+           tooltip: "Where the Smart tree puts it: category, then the role inside its app (\"App · XPC service\", \"Extension · Widgets\").",
            section: .identity, width: 150, rule: .same(noun: "kind")) { p, s in text(s.kind(of: p)) },
     Column(id: "bundleID", title: "Bundle ID",
            tooltip: "Bundle identifier of the app or extension bundle that holds the executable. App rows: the app's.",
@@ -393,7 +393,7 @@ private let catalogue: [Column] = [
 // MARK: - Store lookups for columns
 
 extension Store {
-    /// "App · Renderer", "Extension · Widgets": the Smart tree's category of the process's unit, then its role.
+    /// "App · XPC service", "Extension · Widgets": the Smart tree's category of the process's unit, then its role.
     func kind(of p: ProcInfo) -> String? {
         if kindCache?.gen != dataGen {
             kindCache = (dataGen, SmartTree.kinds(.init(procs: procs, lsApps: lsApps)))

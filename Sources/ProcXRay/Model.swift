@@ -45,9 +45,6 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var tty: Int32?
     /// NSExtensionPointIdentifier of the app extension this process runs (see ExtensionInfo).
     var extensionPoint: String?
-    /// Chromium / Electron `--type=` ("renderer", "gpu-process", "utility", or "network" for the network
-    /// utility) or Firefox's process type ("tab", "socket", "rdd", …), from argv (see ProcessType).
-    var processType: String?
     var lsTags: [String] = []
     var signer: String?
     var signID: String?
@@ -510,7 +507,6 @@ final class Store {
             if let a = lsByPid[k.pid] { p.lsAppName = a.name; p.lsTags = a.stateTags; p.lsType = a.type }
             if k.tty != -1 { p.tty = k.tty }   // NODEV: no controlling terminal
             if let path = p.path { p.extensionPoint = ExtensionInfo.point(forExecutable: path) }
-            p.processType = ProcessType.read(p)
             if let s = signCache[p.codeKey] { p.signer = s.shortSigner; p.signID = s.identifier }
             out[k.pid] = p
         }
@@ -532,7 +528,6 @@ final class Store {
             if !p.isZombie { p.sandboxed = Native.sandboxed(pid, start: p.start) ?? priv?[pid]?.sandboxed }
             out[pid] = p
         }
-        ProcessType.prune(keeping: Set(out.values.map(\.key)))
         return Snapshot(procs: out, ls: ls, jobs: jobs, otherJobs: otherJobs, cpu: cpu)
     }
 

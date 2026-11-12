@@ -1,6 +1,6 @@
 # Proposal: a grouped process tree, pickable columns and a linked inspector
 
-Status: proposal, written 2026-11-12. Steps 1–5, 13 and 14 of the order of work are implemented: Smart tree with roll-ups, launchd labels from all three domains, Extensions with extension points, role groups and terminal sessions inside units (see `SmartTree.swift`), process chips with back/forward in the current tabs (see `UI/InspectorNavigation.swift`), the header menu and View ▸ Columns, and the column catalogue's "have" columns as descriptors with group-row rules (see `UI/Columns.swift`). Deviations: the `.appex/` rule is checked before the LaunchServices `UIElement`/`BackgroundOnly` rules, because Finder Sync and Quick Look extensions register as `BackgroundOnly` and otherwise filled Background apps. The chip's hover card is a tooltip rather than a popover, so it never covers what the pointer is moving towards; chips also have a context menu (Show, Open in New Window, Copy PID, Copy Path, Reveal in Finder). Step 5 differs in four places, from measuring on 2026-11-12. The Firefox process type is the last argument of `plugin-container` (22 `tab`, 2 `utility`, 1 `rdd`, 1 `socket`), so content processes are `tab` only and the others go to Utility and Network. Electron's plain `… Helper` runs both the GPU process and utilities, so `--type=` from argv decides, read once per process and only for executables named like helpers; the bundle-name suffix is the fallback when argv can't be read. Terminal sessions are found anywhere in a unit, not only among the root's direct children: Claude's 11 shells hang off a pty-host utility helper. A terminal whose only process is its shell gets no tty row (the Context column and the search name the tty), and no role group is made when every member would land in the same one. Step 13 keeps the hidden columns in its own app-wide setting (`hiddenColumns`) rather than in AppKit's autosave, because View ▸ Columns and every open window need one shared value; the autosave still keeps order and width. The two coalition columns start hidden. "Thr", "Res. coal." and "Jetsam" became "Threads", "Res. coalition" and "Jetsam coalition", and default widths are at least the width of the header when sorted (bold title plus arrow), which "CPU %" did not fit before. Step 14 differs as follows. Visibility is stored as the list of *shown* columns (`shownColumns`, migrated once from `hiddenColumns`), so a column added later starts hidden, as the persistence rules require. State's running/sleeping comes from the running-thread count, because `p_stat` says runnable for nearly every process (143 of 143 app processes when measured). Hardened runtime shows "platform" for Apple platform binaries, which don't set the flag, and group rows leave them out of the count. A "same" group value is shown only when every member has it; otherwise the row counts the different values. A column switched on from View ▸ Columns goes just before Context, from the header menu next to the column that was right-clicked. Measured with `--bench` on 729 processes: building the Smart tree went from 12 ms to 15 ms with the default columns shown and 30 ms with all 42; hidden columns cost nothing. Chips so far appear in General (parent, responsible), Lineage and the group summary pane; the header, Origin and socket peers come with steps 7 and 9.
+Status: proposal, written 2026-11-12. Steps 1–5, 13 and 14 of the order of work are implemented and step 6 is dropped: Smart tree with roll-ups, launchd labels from all three domains, Extensions with extension points, exact groups (extensions, XPC services, terminal sessions) inside units (see `SmartTree.swift`), process chips with back/forward in the current tabs (see `UI/InspectorNavigation.swift`), the header menu and View ▸ Columns, and the column catalogue's "have" columns as descriptors with group-row rules (see `UI/Columns.swift`). Deviations: the `.appex/` rule is checked before the LaunchServices `UIElement`/`BackgroundOnly` rules, because Finder Sync and Quick Look extensions register as `BackgroundOnly` and otherwise filled Background apps. The chip's hover card is a tooltip rather than a popover, so it never covers what the pointer is moving towards; chips also have a context menu (Show, Open in New Window, Copy PID, Copy Path, Reveal in Finder). Step 5 keeps only groups the system defines exactly (see Categories in detail). Terminal sessions are found anywhere in a unit, not only among the root's direct children: Claude's 11 shells hang off a pty-host utility helper. A terminal whose only process is its shell gets no tty row (the Context column and the search name the tty), and no group is made when every member would land in the same one. Step 13 keeps the hidden columns in its own app-wide setting (`hiddenColumns`) rather than in AppKit's autosave, because View ▸ Columns and every open window need one shared value; the autosave still keeps order and width. The two coalition columns start hidden. "Thr", "Res. coal." and "Jetsam" became "Threads", "Res. coalition" and "Jetsam coalition", and default widths are at least the width of the header when sorted (bold title plus arrow), which "CPU %" did not fit before. Step 14 differs as follows. Visibility is stored as the list of *shown* columns (`shownColumns`, migrated once from `hiddenColumns`), so a column added later starts hidden, as the persistence rules require. State's running/sleeping comes from the running-thread count, because `p_stat` says runnable for nearly every process (143 of 143 app processes when measured). Hardened runtime shows "platform" for Apple platform binaries, which don't set the flag, and group rows leave them out of the count. A "same" group value is shown only when every member has it; otherwise the row counts the different values. A column switched on from View ▸ Columns goes just before Context, from the header menu next to the column that was right-clicked. Measured with `--bench` on 729 processes: building the Smart tree went from 12 ms to 15 ms with the default columns shown and 30 ms with all 42; hidden columns cost nothing. Chips so far appear in General (parent, responsible), Lineage and the group summary pane; the header, Origin and socket peers come with steps 7 and 9.
 
 This covers three changes that build on each other:
 
@@ -60,21 +60,19 @@ That is 532 units in 7 visible categories. The top level goes from 553 rows to 7
 
 ### Categories in detail
 
-**Apps.** One row per foreground app, with its helpers grouped by role rather than listed flat. The largest units today are Claude (67 processes), Firefox (34), MarkEdit (12) and Slack (9), so the role groups matter more than the category itself.
+**Apps.** One row per foreground app, with its helpers under it. The largest units today are Claude (67 processes), Firefox (34), MarkEdit (12) and Slack (9).
 
-Role of a child, first match:
+Groups inside an app, decided 2026-11-12: only where the system defines the answer exactly.
 
-| Role group | Signal | Notes |
+| Group | Signal | Why it is exact |
 |---|---|---|
-| Renderers, GPU, Network, Utility | bundle name suffix such as `Helper (Renderer)`, or `--type=` in argv | Chromium and Electron. Measured in argv now: 12 utility, 4 renderer, 3 gpu-process. The bundle-name suffix needs no argv read. |
-| Web content | executable name `com.apple.WebKit.WebContent`, `.Networking`, `.GPU` | WebKit apps |
-| Content processes | `plugin-container` (24 running) | Firefox. I believe the process type is in argv, but did not check; without it these stay one group. |
-| Extensions | `.appex/` | only the app's own, by rule 3 |
-| XPC services | `XPCServices/` | |
-| Terminal sessions | has a controlling tty | sub-grouped by tty, then process group, so a pipeline is one row |
-| Helpers | anything else | |
+| Extensions | executable inside an `.appex` bundle | bundle layout; only the app's own, by rule 3 |
+| XPC services | executable at `XPCServices/<name>.xpc/Contents/MacOS/` | bundle layout. WebKit's content, networking and GPU processes land here, since they are XPC services of WebKit.framework |
+| Terminal sessions | has a controlling tty | kernel data; sub-grouped by tty, then process group, so a pipeline is one row |
 
-A role group is only created when it would hold two or more processes. A lone helper sits directly under the app.
+Every other helper is a plain row under its app. A group is only created when it would hold two or more processes, and not when every helper would land in the same one.
+
+Dropped: Renderers, GPU, Network and Utility (from Chromium's `--type=` argument or the helper bundle's name suffix), Content processes (Firefox's `plugin-container` and its last argument) and Web content (executable names). The bundle-name suffixes and executable names are guesses, and the argv types are specific to Chromium and Firefox, so the tree would treat one browser engine's processes differently from every other app's.
 
 Terminal sessions are a role group and not a top-level category because every process with a tty already belongs to an app: all 10 tty processes measured sit under Claude or Ghostty through the responsible pid. A top-level category would pull them away from the app that owns the window. `tty` is already read from `kinfo_proc` and unused.
 
@@ -98,7 +96,9 @@ Group titles should be readable names ("Widgets", "App Intents", "Wallpaper", "Q
 
 **System interface.** Apple processes registered with LaunchServices as `UIElement` or `BackgroundOnly`: Dock, Control Center, Notification Centre, WindowManager and similar. 90 processes carry those types (47 and 43), in 42 units. They are kept apart from System services because they are the Apple processes with visible UI, and the ones users most often want to restart.
 
-**System services.** 344 units, 337 of them a single process. This category is useless without sub-groups, and the two obvious automatic keys do not work:
+**System services.** Decided 2026-11-12: no sub-groups. The keyword table below is a guess by construction, so step 6 is dropped and System services stays one flat category, sortable by any column. The measurements are kept for reference.
+
+344 units, 337 of them a single process. This category is useless without sub-groups, and the two obvious automatic keys do not work:
 
 | Sub-group key | Buckets | Singletons |
 |---|---|---|
@@ -141,7 +141,7 @@ Expanded:
 ▾ Apps
   ▾ Firefox                    34 processes                 12.0 %   3.1 GB
       firefox                  pid 2211
-    ▸ Content processes        24
+      plugin-container         pid 2240   (and 23 more rows)
     ▸ XPC services             3
   ▾ Ghostty                    7 processes
       ghostty                  pid 4410
@@ -238,7 +238,7 @@ Group-row rules:
 | Name | icon, name, badges; always first, cannot be hidden | title | have |
 | PID | | root | have |
 | User | | same | have |
-| Kind | category and role: "App · Renderer", "Extension · Widgets", "System service · Networking" | same | have (role and subsystem arrive with steps 5 and 6) |
+| Kind | category, then role inside the app: "App · XPC service", "App · Terminal", "Extension · Widgets" | same | have |
 | Bundle ID | | root | have for LaunchServices apps; new otherwise (`Info.plist`, cached per bundle) |
 | Path | executable path, middle-truncated | root | have |
 | Architecture | arm64, or x86_64 (Rosetta) | same | have |
@@ -575,7 +575,7 @@ Each step is usable on its own. Sizes are relative.
 | 3 | Extensions category with extension points | S | 1 |
 | 4 | Process chips and back/forward in the current tabs | M | — |
 | 5 | Role groups inside apps, terminal sessions | M | 1 |
-| 6 | System services subsystem table | M | 1, 2 |
+| 6 | ~~System services subsystem table~~ dropped: a keyword table is a guess | — | — |
 | 7 | Tab regroup: header, Overview, Origin, Trust | L | 4 |
 | 8 | Resources with rates and sparklines | M | 7 |
 | 9 | Connections peer resolution | M | 4 |

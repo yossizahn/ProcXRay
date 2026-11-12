@@ -128,31 +128,23 @@ enum SmartTree {
 
     // MARK: Roles inside a unit
 
-    /// What a helper does for its app, from its bundle name, executable and process type.
+    /// A helper's role, only where the bundle layout says it exactly: an app extension runs from an
+    /// `.appex` bundle, an XPC service from an `.xpc` bundle in an `XPCServices` folder. Everything else
+    /// is a plain helper. (Guessing renderers or GPU processes from names was dropped as unreliable.)
     static func role(of p: ProcInfo) -> ProcRole {
         if isExtension(p) { return .extensions }
-        let name = p.name
-        if name.hasPrefix("com.apple.WebKit.") { return .webContent }
-        switch p.processType {
-        case "renderer": return .renderers
-        case "tab": return .contentProcesses
-        case "gpu-process", "gpu": return .gpu
-        case "network", "socket": return .network
-        case .some: return .utility   // utility, rdd, plugin, gmplugin, …
-        case nil: break
-        }
-        // argv unreadable (another user's process): the helper bundle's suffix still says most of it.
-        if name.hasSuffix("(Renderer)") { return .renderers }
-        if name.hasSuffix("(GPU)") || name.hasSuffix(" GPU Helper") { return .gpu }
-        if name.hasSuffix("(Plugin)") { return .utility }
-        if name == "plugin-container" { return .contentProcesses }
-        if p.path?.contains("/XPCServices/") == true { return .xpcServices }
+        if isXPCService(p) { return .xpcServices }
         return .helpers
     }
 
-    /// The members directly under a unit's root, grouped by role. A role group is made only when it would
-    /// hold two or more processes, and not when every member would land in the same one (it would only
-    /// add a level). Terminal sessions (`sessionRoots`, from anywhere in the unit) are grouped by tty, then
+    static func isXPCService(_ p: ProcInfo) -> Bool {
+        guard let path = p.path, let r = path.range(of: "/XPCServices/") else { return false }
+        return path[r.upperBound...].contains(".xpc/Contents/MacOS/")
+    }
+
+    /// The members directly under a unit's root: extensions and XPC services grouped when there are two
+    /// or more, and not when every member would land in the same group (it would only add a level). Other
+    /// helpers stay plain rows. Terminal sessions (`sessionRoots`, from anywhere in the unit) are grouped by tty, then
     /// by process group, so a pipeline is one row.
     static func roleGroups(_ root: pid_t, direct: [ProcInfo], sessionRoots: [ProcInfo], kids: [pid_t: [ProcInfo]],
                            node: (ProcInfo) -> ProcNode) -> [ProcNode] {
@@ -207,7 +199,7 @@ enum SmartTree {
 
         let onlyOneRole = byRole.count == 1 && sessionCount < 2
         for (r, ps) in byRole {
-            guard ps.count >= 2, !onlyOneRole else { out += ps.map(node); continue }
+            guard r != .helpers, ps.count >= 2, !onlyOneRole else { out += ps.map(node); continue }
             var g = ProcNode(id: roleID(root, "role\(r.rawValue)"), proc: nil, title: r.title, children: ps.map(node))
             g.kind = .group
             g.fixedOrder = 1 + r.rawValue
@@ -441,18 +433,12 @@ enum ExtensionInfo {
     static func title(_ point: String) -> String { titles[point] ?? point }
 }
 
-/// Role of a helper inside its app's unit, in display order.
+/// Role of a helper inside its app's unit, in display order. Only the first three form groups.
 enum ProcRole: Int, CaseIterable, Sendable {
-    case renderers, contentProcesses, webContent, gpu, network, utility, extensions, xpcServices, terminalSessions, helpers
+    case extensions, xpcServices, terminalSessions, helpers
 
     var title: String {
         switch self {
-        case .renderers: "Renderers"
-        case .contentProcesses: "Content processes"
-        case .webContent: "Web content"
-        case .gpu: "GPU"
-        case .network: "Network"
-        case .utility: "Utility"
         case .extensions: "Extensions"
         case .xpcServices: "XPC services"
         case .terminalSessions: "Terminal sessions"
@@ -462,61 +448,10 @@ enum ProcRole: Int, CaseIterable, Sendable {
 
     var singular: String {
         switch self {
-        case .renderers: "Renderer"
-        case .contentProcesses: "Content process"
-        case .webContent: "Web content"
-        case .gpu: "GPU"
-        case .network: "Network"
-        case .utility: "Utility"
         case .extensions: "Extension"
         case .xpcServices: "XPC service"
         case .terminalSessions: "Terminal"
         case .helpers: "Helper"
         }
-    }
-}
-
-/// Chromium, Electron and Firefox helpers say what they are in argv. Read once per process (argv is
-/// fixed until an exec, which a helper doesn't do) and only for executables that look like such helpers.
-enum ProcessType {
-    nonisolated(unsafe) private static var cache: [String: String?] = [:]
-    private static let lock = NSLock()
-
-    static func isCandidate(_ p: ProcInfo) -> Bool {
-        let n = p.name
-        return n == "plugin-container" || n.hasSuffix(" Helper") || n.contains(" Helper (")
-    }
-
-    static func read(_ p: ProcInfo) -> String? {
-        guard isCandidate(p) else { return nil }
-        lock.lock()
-        if let hit = cache[p.key] { lock.unlock(); return hit }
-        lock.unlock()
-        guard let args = Native.argsEnv(p.pid)?.args else { return nil }   // not cached: the helper may come later
-        let t = parse(args, firefox: p.name == "plugin-container")
-        lock.lock(); cache[p.key] = .some(t); lock.unlock()
-        return t
-    }
-
-    static func parse(_ args: [String], firefox: Bool) -> String? {
-        if firefox {
-            // `plugin-container … <type>`: the last argument, a bare word.
-            guard let last = args.last, !last.hasPrefix("-"), last.count <= 24,
-                  last.allSatisfy({ $0.isLetter || $0 == "_" }) else { return nil }
-            return last
-        }
-        guard let t = args.first(where: { $0.hasPrefix("--type=") })?.dropFirst(7) else { return nil }
-        if t == "utility", let sub = args.first(where: { $0.hasPrefix("--utility-sub-type=") }),
-           sub.contains("network.mojom.NetworkService") {
-            return "network"
-        }
-        return String(t)
-    }
-
-    /// Forgets processes that are gone.
-    static func prune(keeping live: Set<String>) {
-        lock.lock(); defer { lock.unlock() }
-        guard cache.count > live.count + 64 else { return }
-        cache = cache.filter { live.contains($0.key) }
     }
 }
