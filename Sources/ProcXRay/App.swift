@@ -174,9 +174,14 @@ struct HelperBadge: View {
                 Text(verbatim: store.helperState.label).lineLimit(2)
             }
             switch store.helperState {
-            case .notInstalled, .unreachable:
+            case .notInstalled:
                 Button("Install Privileged Helper…") { store.installHelper() }
                     .help("Registers a root daemon (SMAppService) for reading other users' processes. macOS asks you to approve it once in Login Items.")
+            case .unreachable:
+                // Registered but not answering. Registering again is a no-op, so offer to remove it instead;
+                // e.g. launchd may still point at another copy of the app that took over the registration.
+                Button("Uninstall Helper") { store.uninstallHelper() }
+                    .help("Removes the helper's registration so it can be installed again from this copy of the app.")
             case .needsApproval:
                 Button("Open Login Items to Approve") { HelperClient.shared.openLoginItems(); store.probeHelper() }
             case .running:
