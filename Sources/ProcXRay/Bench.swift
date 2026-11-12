@@ -1,5 +1,7 @@
+import AppKit
 import Darwin
 import Foundation
+import SwiftUI
 
 /// `ProcXRay --bench`: times each stage of a refresh tick, in wall-clock and this process's CPU time.
 /// Child-process CPU (lsappinfo, launchctl) is reported separately via RUSAGE_CHILDREN.
@@ -323,6 +325,45 @@ enum Bench {
     }
 
     /// `ProcXRay --qos <pid>`: CPU time by QoS class against total CPU time, over 2 s.
+    /// The Sandbox card's checks for each pid, as a table (0 allowed, 1 denied, ? unknown), and their cost.
+    static func sandbox(_ pids: [pid_t]) {
+        func v(_ x: SandboxProbes.Verdict) -> String { switch x { case .allowed: "0"; case .denied: "1"; case .unknown: "?" } }
+        for pid in pids {
+            guard let p = Native.process(pid) else { print("pid \(pid): not found"); continue }
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            guard let r = SandboxProbes.run(pid: pid, start: p.start) else { print("pid \(pid): gone"); continue }
+            let us = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000
+            print("pid \(pid) sandboxed=\(String(describing: Native.sandboxed(pid, start: p.start))) \(String(format: "%.0f", us)) µs")
+            for l in r.locations { print("  \(l.id.padding(toLength: 30, withPad: " ", startingAt: 0)) read \(v(l.read)) write \(v(l.write))") }
+            for c in r.capabilities { print("  \(c.id.padding(toLength: 30, withPad: " ", startingAt: 0)) \(v(c.verdict))") }
+            if let dir = ProcessInfo.processInfo.environment["SANDBOX_PNG_DIR"] { renderSandbox(pid, r, dir: dir) }
+        }
+    }
+
+    /// The Sandbox card's contents for `pid`, rendered to <dir>/sandbox-<pid>.png (2x), to check the layout.
+    private static func renderSandbox(_ pid: pid_t, _ r: SandboxProbes.Report, dir: String) {
+        let ent: [String: Any] = Native.path(pid).flatMap { path in
+            let out = Shell.exec("/usr/bin/codesign", ["-d", "--entitlements", "-", "--xml", path], mergeStderr: false).output
+            return out.data(using: .utf8).flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }
+        } ?? [:]
+        MainActor.assumeIsolated {
+            let view = Card(title: "Sandbox", systemImage: "square.dashed") {
+                Text(SandboxCard.summary(true, entitlements: ent)).fixedSize(horizontal: false, vertical: true)
+                SandboxProbeTable(report: r, entitlements: ent, recheck: {})
+            }
+            .frame(width: 560).padding(10).background(Color(nsColor: .windowBackgroundColor))
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            guard let img = renderer.nsImage, let tiff = img.tiffRepresentation,
+                  let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
+                print("  render failed"); return
+            }
+            let url = URL(fileURLWithPath: dir).appendingPathComponent("sandbox-\(pid).png")
+            try? png.write(to: url)
+            print("  rendered \(url.path) \(Int(img.size.width))x\(Int(img.size.height)) pt")
+        }
+    }
+
     static func qos(_ pid: pid_t) {
         if pid == 0 {
             // Every process: the QoS rates should add up to CPU %, both from one pair of snapshots.

@@ -822,9 +822,7 @@ struct TrustTab: View {
                 Card(title: "Signature", systemImage: "signature") {
                     FactGrid(rows: signatureRows(s))
                 }
-                Card(title: "Sandbox", systemImage: "square.dashed") {
-                    Text(proc.sandboxed.map { $0 ? "Sandboxed (App Sandbox)." : "Not sandboxed." } ?? "Unknown: the sandbox state couldn't be read.")
-                }
+                SandboxCard(proc: proc, exited: exited, entitlements: dict)
                 entitlements(dict, platform: s.isPlatform || s.isAppleSigned)
                 if !team.isEmpty, let t = s.teamID {
                     Card(title: "Same team (\(t))", systemImage: "person.3", trailing: "\(team.count)") { ChipFlow(procs: team) }
