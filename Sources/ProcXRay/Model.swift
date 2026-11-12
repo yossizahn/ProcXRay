@@ -1078,6 +1078,7 @@ struct Sample: Sendable {
     var at: UInt64                    // uptime nanoseconds
     var cpu, waiting, diskRead, diskWrite, energy, wakeups: UInt64?
     var pCore, instructions, cycles, logicalWrites, gpu: UInt64?
+    var qos: [UInt64]?
     var contextSwitches, faults, pageins, machMsgsSent, machMsgsReceived, unixSyscalls, machSyscalls: UInt32?
 
     init(_ p: ProcInfo, at: UInt64) {
@@ -1090,6 +1091,7 @@ struct Sample: Sendable {
         unixSyscalls = c?.unixSyscalls; machSyscalls = c?.machSyscalls
         pCore = c?.pCoreNanos; instructions = c?.instructions; cycles = c?.cycles; logicalWrites = c?.logicalWrites
         gpu = p.gpuNanos
+        qos = c?.qosNanos
     }
 }
 
@@ -1114,6 +1116,8 @@ struct Rates: Hashable, Sendable {
     var instructions: Double?
     /// GPU time over the interval, as a percentage of the interval.
     var gpuPercent: Double?
+    /// CPU per QoS class over the interval, percent of one core, in `Counters.qosClasses` order.
+    var qosPercent: [Double]?
 
     init(from a: Sample, to b: Sample) {
         let secs = Double(b.at - a.at) / 1e9
@@ -1151,6 +1155,9 @@ struct Rates: Hashable, Sendable {
         cycles = d64(a.cycles, b.cycles).map { $0 / secs }
         // A process that starts using the GPU has no earlier reading: count it from zero.
         if b.gpu != nil { gpuPercent = d64(a.gpu ?? 0, b.gpu).map { $0 / 1e9 / secs * 100 } }
+        if let qa = a.qos, let qb = b.qos, qa.count == qb.count {
+            qosPercent = zip(qa, qb).map { (d64($0, $1) ?? 0) / 1e9 / secs * 100 }
+        }
         instructions = d64(a.instructions, b.instructions).map { $0 / secs }
     }
 }

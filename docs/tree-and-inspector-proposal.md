@@ -525,7 +525,7 @@ Four sections, each a small table with a "now" column (rate since the last tick)
 
 Rates need the previous `Counters` kept per process, the same way `prevCPU` is kept now. The `proc_taskinfo` counters wrap at 2^32, so a negative delta must be treated as a wrap, not shown.
 
-Cheap additions listed in `process-info-sources.md` that belong here: open file descriptor count (`PROC_PIDLISTFDS`), power assertions (`IOPMCopyAssertionsByProcess`; 4 assertion holders right now), CPU time per QoS class.
+Cheap additions listed in `process-info-sources.md` that belong here: open file descriptor count (`PROC_PIDLISTFDS`), power assertions (`IOPMCopyAssertionsByProcess`; 4 assertion holders right now), CPU time per QoS class. Implemented: CPU time per QoS class is its own section, read with the other `rusage` counters each refresh so its "now" column covers the same interval as CPU %; over 498 processes the classes add up to CPU % with no difference above 0.01 points (computing it in the inspector between its own readings, a few hundred ms apart, read 20 % for a process at 6 %).
 
 ### Connections
 
@@ -533,12 +533,12 @@ The current `LsofView`, with peers resolved.
 
 - **Pipes and unix sockets.** `lsof` prints each endpoint's kernel address and its peer's (`->0x…`). Running `lsof -u <uid>` once and matching addresses resolved 272 of 274 pipe peers and 366 of 500 unix socket peers. The 134 unresolved socket peers are presumably in other users' processes, which this run could not see; running `lsof` through the helper should cover them, untested.
 - **TCP on localhost.** 134 localhost TCP descriptors are visible. Matching local and remote port pairs across processes names both ends.
-- **Files.** "Also open in" for a selected file, from the same all-process `lsof` run. Reveal in Finder. Group by volume and by location (app bundle, container, `~/Library`, temporary, system).
+- **Files.** "Also open in" for a selected file, from the same all-process `lsof` run. Reveal in Finder. Group by volume and by location (app bundle, container, `~/Library`, temporary, system). Implemented as a sortable Location column and a row of location chips that filter the table: own app, other apps, containers, `~/Library`, home, temporary, local software (`/opt`, `/usr/local`), `/Library`, system, and each mounted volume by name. Over every process's open files (~10,000) none fall outside these.
 - **Listening ports** called out at the top, since that is the usual reason to open this tab.
 
 The all-process `lsof` run happens only when this tab is open, with a manual refresh, and is reused for 5 s so following a peer doesn't rerun it. It took 0.15–0.3 s over one user's ~450 processes. Implemented (step 9): with the user's own processes, 271 of 272 pipe peers, 336 of 455 unix socket peers and 196 of 200 live localhost TCP peers resolved; `CLOSED` and `CLOSE_WAIT` sockets are not counted as unresolved, since their peer has usually gone. As root through the helper (689 processes, 0.23 s, 1.9 MB): 432 of 432 unix socket peers resolved.
 
-A small graph view (this process in the middle, peers around it, edges labelled pipe, socket, TCP) is a natural later addition once peers are resolved.
+A small graph view (this process in the middle, peers around it, edges labelled pipe, socket, TCP) is a natural later addition once peers are resolved. Implemented as a Table / Graph switch: up to 24 peer processes, most-connected first, each a clickable chip, with one edge per peer coloured by its main kind and labelled with the counts ("unix 3 · pipe 1").
 
 ### Activity
 

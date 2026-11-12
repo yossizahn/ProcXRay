@@ -136,6 +136,10 @@ struct Counters: Codable, Hashable, Sendable {
     var neuralFootprint: UInt64?
     /// rusage's billed energy, kept apart from the process's own energy (see `energyNJ`).
     var billedEnergyNJ: UInt64?
+    /// CPU time per QoS class, nanoseconds, in `Counters.qosClasses` order.
+    var qosNanos: [UInt64]?
+
+    static let qosClasses = ["User interactive", "User initiated", "Default", "Utility", "Background", "Maintenance", "Legacy"]
 }
 
 extension PrivMetrics {
@@ -180,6 +184,9 @@ extension PrivMetrics {
             c.logicalWrites = ru.ri_logical_writes
             c.peakFootprint = ru.ri_lifetime_max_phys_footprint
             c.neuralFootprint = ru.ri_neural_footprint
+            c.qosNanos = [ru.ri_cpu_time_qos_user_interactive, ru.ri_cpu_time_qos_user_initiated, ru.ri_cpu_time_qos_default,
+                          ru.ri_cpu_time_qos_utility, ru.ri_cpu_time_qos_background, ru.ri_cpu_time_qos_maintenance,
+                          ru.ri_cpu_time_qos_legacy].map(Native.machToNanos)
             any = true
         }
         if any { m.counters = c }

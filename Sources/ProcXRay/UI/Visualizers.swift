@@ -271,11 +271,21 @@ struct LsofView: View {
     @State private var index: PeerIndex?
     @State private var resolved: [Int: PeerInfo] = [:]
     @State private var loading = false
+    @State private var locations: Set<String> = []
+    @AppStorage("connections.view") private var view = "Table"
 
     var body: some View {
+        let bundle = store.procs[pid]?.bundlePath
+        let entries = self.entries.map { e -> LsofEntry in
+            var e = e
+            e.location = FileLocation.of(e, ownBundle: bundle)
+            return e
+        }
         let counts = Dictionary(grouping: entries, by: \.kind).mapValues(\.count)
+        let locCounts = Dictionary(grouping: entries.filter { !$0.location.isEmpty }, by: \.location).mapValues(\.count)
         let rows = entries.filter {
             (kinds.isEmpty || kinds.contains($0.kind)) &&
+            (locations.isEmpty || locations.contains($0.location)) &&
             (filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) || $0.fd.contains(filter)
              || $0.type.localizedCaseInsensitiveContains(filter) || peerMatches($0, filter))
         }.sorted(using: sort)
@@ -319,7 +329,11 @@ struct LsofView: View {
             }
             .frame(height: 4)
             .padding(.horizontal, 8).padding(.bottom, 4)
+            if !locCounts.isEmpty { locationChips(locCounts) }
             peerStatus.padding(.horizontal, 8).padding(.bottom, 4)
+            if view == "Graph" {
+                PeerGraph(center: pid, entries: entries, resolved: resolved).environment(store)
+            } else {
             Table(rows, sortOrder: $sort) {
                 TableColumn("FD", value: \.fdSort) { e in
                     HStack(spacing: 4) {
@@ -333,6 +347,9 @@ struct LsofView: View {
                     Label(e.kind == .image ? "mapped" : e.type, systemImage: e.kind.symbol).foregroundStyle(e.kind.color)
                 }.width(min: 96, ideal: 104, max: 140)
                 TableColumn("Name", value: \.name) { e in NameCell(e: e) }
+                TableColumn("Location", value: \.location) { e in
+                    Text(e.location).foregroundStyle(.secondary).lineLimit(1)
+                }.width(min: 70, ideal: 110, max: 180)
                 TableColumn("Other end") { e in
                     if let info = resolved[e.id] {
                         // Re-injected: a Table cell can be rebuilt (on an accessibility press, for one) without
@@ -344,6 +361,7 @@ struct LsofView: View {
                     Text(e.size.map { Fmt.bytes($0) } ?? "").monospacedDigit().foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }.width(min: 70, ideal: 80, max: 100)
+            }
             }
         }
         // The view is rebuilt for every lsof run (CommandTab's generation), so Re-run resolves again too.
@@ -381,12 +399,48 @@ struct LsofView: View {
             }
             if loading { ProgressView().controlSize(.mini) }
             Spacer(minLength: 0)
+            Picker("", selection: $view) {
+                Text("Table").tag("Table")
+                Text("Graph").tag("Graph")
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize().controlSize(.small)
+            .help("Graph: this process in the middle and the processes on the other end of its pipes and sockets around it")
             Button("Refresh") { Task { await loadIndex(fresh: true) } }
                 .controlSize(.small).disabled(loading)
                 .help("Run lsof over every process again")
         }
         .font(.caption).foregroundStyle(.secondary)
         .frame(height: 18)
+    }
+
+    private func locationChips(_ counts: [String: Int]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                Label("Files in", systemImage: "folder").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                ForEach(FileLocation.order.filter { counts[$0] != nil } + counts.keys.filter { !FileLocation.order.contains($0) }.sorted(),
+                        id: \.self) { loc in
+                    let on = locations.contains(loc)
+                    Button {
+                        if on { locations.remove(loc) } else { locations.insert(loc) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(loc)
+                            Text(verbatim: "\(counts[loc] ?? 0)").bold().monospacedDigit()
+                        }
+                        .font(.system(size: 11))
+                        .padding(.horizontal, 8).frame(height: 20)
+                        .foregroundStyle(on ? Color.white : Color.primary)
+                        .background(on ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.secondary.opacity(0.12)), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                }
+                if !locations.isEmpty { Button("All locations") { locations = [] }.controlSize(.small) }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+        }
+        .frame(height: 26)
     }
 
     private func listening(_ ls: [LsofEntry]) -> some View {
@@ -1170,5 +1224,132 @@ struct PlistValue: View {
         } else {
             Text(String(describing: value)).foregroundStyle(.secondary)
         }
+    }
+}
+
+// MARK: - File locations
+
+/// Where an open file lives, in a few places people recognise. Mapped images are included: which
+/// frameworks a process loaded from outside the system is often the interesting part.
+enum FileLocation {
+    static let order = ["Own app", "Other apps", "Containers", "~/Library", "Home", "Temporary", "Local software", "/Library", "System", "Other"]
+    private static let home = NSHomeDirectory()
+
+    static func of(_ e: LsofEntry, ownBundle: String?) -> String {
+        guard [.file, .dir, .image].contains(e.kind), e.name.hasPrefix("/") else { return "" }
+        return of(path: e.name, ownBundle: ownBundle)
+    }
+
+    static func of(path p: String, ownBundle: String?) -> String {
+        // A folder counts as inside itself: /Users/me is Home, /System is System.
+        func under(_ dir: String) -> Bool { p == dir || p.hasPrefix(dir + "/") }
+        if let b = ownBundle, under(b) { return "Own app" }
+        if p.hasPrefix("/Volumes/") {
+            let name = p.dropFirst("/Volumes/".count).prefix { $0 != "/" }
+            return "Volume \(name)"
+        }
+        if under(home + "/Library/Containers") || under(home + "/Library/Group Containers") { return "Containers" }
+        if under(home + "/Library") { return "~/Library" }
+        if p.contains(".app/") || p.hasSuffix(".app") || under("/Applications") { return "Other apps" }
+        if under(home) { return "Home" }
+        if ["/private/var/folders", "/var/folders", "/private/tmp", "/tmp"].contains(where: under) { return "Temporary" }
+        if under("/usr/local") || under("/opt") { return "Local software" }   // Homebrew and the like
+        if under("/Library/Apple") { return "System" }
+        if under("/Library") { return "/Library" }
+        if p == "/" || ["/System", "/usr", "/bin", "/sbin", "/private", "/var", "/dev", "/Users", "/etc", "/cores"].contains(where: under) {
+            return "System"
+        }
+        return "Other"
+    }
+}
+
+// MARK: - Peer graph
+
+/// This process in the middle, the processes on the other end of its pipes, unix sockets and TCP
+/// connections around it, one edge each, labelled with how many of each kind.
+struct PeerGraph: View {
+    @Environment(Store.self) private var store
+    let center: Int32
+    let entries: [LsofEntry]
+    let resolved: [Int: PeerInfo]
+    private let maxPeers = 24
+
+    private struct Peer: Identifiable {
+        let id: Int32
+        var kinds: [LsofEntry.Kind: Int] = [:]
+        var total: Int { kinds.values.reduce(0, +) }
+        var label: String {
+            LsofEntry.Kind.allCases.compactMap { k in kinds[k].map { "\(Self.short(k)) \($0)" } }.joined(separator: " · ")
+        }
+        var main: LsofEntry.Kind { kinds.max { $0.value < $1.value }?.key ?? .unix }
+        static func short(_ k: LsofEntry.Kind) -> String {
+            switch k { case .pipe: "pipe"; case .unix: "unix"; case .tcp: "TCP"; case .udp: "UDP"; default: k.rawValue }
+        }
+    }
+
+    private var peers: [Peer] {
+        var by: [Int32: Peer] = [:]
+        for e in entries {
+            guard let info = resolved[e.id], info.relation != .alsoOpen else { continue }
+            for pid in info.pids where pid != center {
+                by[pid, default: Peer(id: pid)].kinds[e.kind, default: 0] += 1
+            }
+        }
+        return by.values.sorted { $0.total != $1.total ? $0.total > $1.total : $0.id < $1.id }
+    }
+
+    var body: some View {
+        let all = peers
+        let shown = Array(all.prefix(maxPeers))
+        GeometryReader { g in
+            let mid = CGPoint(x: g.size.width / 2, y: g.size.height / 2)
+            let rx = max(60, g.size.width / 2 - 110), ry = max(40, g.size.height / 2 - 30)
+            let spots = shown.indices.map { i -> CGPoint in
+                let a = -Double.pi / 2 + 2 * Double.pi * Double(i) / Double(max(shown.count, 1))
+                return CGPoint(x: mid.x + rx * cos(a), y: mid.y + ry * sin(a))
+            }
+            ZStack {
+                ForEach(Array(shown.enumerated()), id: \.element.id) { i, p in
+                    Path { path in path.move(to: mid); path.addLine(to: spots[i]) }
+                        .stroke(p.main.color.opacity(0.55), lineWidth: min(1 + Double(p.total) / 2, 5))
+                    Text(p.label)
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .padding(.horizontal, 3)
+                        .background(Color(nsColor: .windowBackgroundColor).opacity(0.85), in: RoundedRectangle(cornerRadius: 3))
+                        .position(x: (mid.x + spots[i].x) / 2, y: (mid.y + spots[i].y) / 2)
+                }
+                ForEach(Array(shown.enumerated()), id: \.element.id) { i, p in
+                    node(p.id).position(spots[i])
+                }
+                node(center).scaleEffect(1.15).position(mid)
+                if all.count > shown.count {
+                    Text("+\(all.count - shown.count) more, in the table").font(.caption).foregroundStyle(.secondary)
+                        .position(x: g.size.width - 90, y: g.size.height - 12)
+                }
+                if all.isEmpty {
+                    let hidden = resolved.values.filter(\.unresolved).count
+                    Text(resolved.isEmpty ? "Finding other ends…"
+                         : hidden > 0 ? "\(hidden) other end\(hidden == 1 ? "" : "s") not visible: in processes lsof can't see from here."
+                         : "No other process on the end of its pipes or sockets.")
+                        .foregroundStyle(.secondary).position(x: mid.x, y: mid.y + 40)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Peer graph: \(all.count) processes")
+    }
+
+    /// A solid backing, so edges pass behind the chip instead of through its translucent capsule.
+    private func node(_ pid: Int32) -> some View {
+        Group {
+            if let p = store.procs[pid] {
+                ProcessChip(proc: p)
+            } else {
+                Text(verbatim: "pid \(pid)").font(.caption).foregroundStyle(.secondary).strikethrough()
+                    .padding(.horizontal, 6)
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor), in: Capsule())
     }
 }

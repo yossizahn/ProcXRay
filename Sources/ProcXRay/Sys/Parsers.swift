@@ -59,6 +59,8 @@ struct LsofEntry: Identifiable, Hashable, Sendable {
     var node: String
     var name: String
     var kind: Kind
+    /// Where a file lives (FileLocation), set by the view; empty for sockets, pipes and devices.
+    var location = ""
 
     /// TCP/UDP endpoint split: "a->b (STATE)".
     var endpoints: (local: String, remote: String?, state: String?) {

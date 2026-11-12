@@ -130,8 +130,17 @@ enum Bench {
         var pids = args.compactMap { Int32($0) }
         if pids.isEmpty { pids = Array(Set(ix.byAddress.values.flatMap { $0.map(\.pid) })).sorted() }
         var found: [String: Int] = [:], missing: [String: Int] = [:], none: [String: Int] = [:]
+        var locs: [String: Int] = [:]
+        var otherSamples: [String] = []
         for pid in pids {
             let entries = LsofParser.parse(Shell.run("/usr/sbin/lsof", ["-n", "-P", "-p", "\(pid)"], mergeStderr: false))
+            let bundle = Native.path(pid).flatMap { path in path.range(of: ".app/", options: .backwards).map { String(path[..<$0.lowerBound]) + ".app" } }
+            for e in entries {
+                let l = FileLocation.of(e, ownBundle: bundle)
+                guard !l.isEmpty else { continue }
+                locs[l, default: 0] += 1
+                if l == "Other", otherSamples.count < 8 { otherSamples.append(e.name) }
+            }
             for e in entries where [.pipe, .unix, .tcp, .file].contains(e.kind) {
                 let k = e.kind.rawValue
                 guard let info = PeerInfo.resolve(e, pid: pid, in: ix) else { none[k, default: 0] += 1; continue }
@@ -141,6 +150,8 @@ enum Bench {
                 }
             }
         }
+        print("file locations: " + locs.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+        if !otherSamples.isEmpty { print("  Other, e.g.: " + otherSamples.joined(separator: "  ")) }
         for k in Set(found.keys).union(missing.keys).union(none.keys).sorted() {
             print("\(k): \(found[k] ?? 0) found, \(missing[k] ?? 0) not visible, \(none[k] ?? 0) with no other end")
         }
@@ -309,5 +320,36 @@ enum Bench {
         let names = b.procs.mapValues(\.name)
         let busiest = net.sorted { $0.value.inPerSec + $0.value.outPerSec > $1.value.inPerSec + $1.value.outPerSec }.prefix(5)
         print("network: \(net.count) processes with rates; " + busiest.map { "\(names[$0.key] ?? "?") in \(Int($0.value.inPerSec)) B/s out \(Int($0.value.outPerSec)) B/s" }.joined(separator: "; "))
+    }
+
+    /// `ProcXRay --qos <pid>`: CPU time by QoS class against total CPU time, over 2 s.
+    static func qos(_ pid: pid_t) {
+        if pid == 0 {
+            // Every process: the QoS rates should add up to CPU %, both from one pair of snapshots.
+            let a = Store.snapshot(prev: [:], signCache: [:])
+            Thread.sleep(forTimeInterval: 2)
+            let b = Store.snapshot(prev: a.samples, signCache: [:])
+            var n = 0, off = 0, worst = 0.0, busy = 0
+            for p in b.procs.values {
+                guard let c = p.rates?.cpuPercent, let q = p.rates?.qosPercent else { continue }
+                n += 1
+                let d = abs(q.reduce(0, +) - c)
+                if c > 1 { busy += 1 }
+                if d > 0.5 { off += 1 }
+                worst = max(worst, d)
+            }
+            print(String(format: "%d processes compared (%d above 1 %% CPU); %d differ by more than 0.5 points; largest difference %.2f points", n, busy, off, worst))
+            return
+        }
+        guard let a = Native.rusage(pid), let qa = Native.cpuTimeByQoS(pid) else { print("unreadable"); return }
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        Thread.sleep(forTimeInterval: 2)
+        guard let b = Native.rusage(pid), let qb = Native.cpuTimeByQoS(pid) else { return }
+        let secs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e9
+        let cpu = Double(Native.machToNanos((b.ri_user_time &+ b.ri_system_time) &- (a.ri_user_time &+ a.ri_system_time)))
+        let q = zip(qa, qb).map { (x, y) in (x.0, Double(y.1 &- x.1)) }
+        print(String(format: "CPU %.1f %%; QoS sum %.1f %%", cpu / 1e9 / secs * 100, q.reduce(0) { $0 + $1.1 } / 1e9 / secs * 100))
+        for (n, v) in q where v > 0 { print(String(format: "  %@ %.1f %%", n as NSString, v / 1e9 / secs * 100)) }
+        print("totals: cpu \(Native.machToNanos(b.ri_user_time &+ b.ri_system_time) / 1_000_000) ms, qos sum \(qb.reduce(0) { $0 + $1.1 } / 1_000_000) ms")
     }
 }

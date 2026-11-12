@@ -482,6 +482,7 @@ struct UsageTab: View {
                      c.flatMap { c in c.instructions.flatMap { i in c.cycles.flatMap { $0 > 0 ? String(format: "%.2f", Double(i) / Double($0)) : nil } } } ?? "—"),
                     ("Context switches", rate(r?.contextSwitches), Fmt.count(c?.contextSwitches)),
                 ])
+                qosSection(p)
                 Self.section("Memory", "memorychip", h?.memory, fromZero: false, format: { Fmt.bytes(UInt64($0)) }, rows: [
                     ("Footprint", Fmt.bytes(p.footprint), c?.peakFootprint.map { "peak " + Fmt.bytes($0) } ?? "—"),
                     ("Resident", Fmt.bytes(p.rss), ""),
@@ -522,6 +523,23 @@ struct UsageTab: View {
             }.value
             guard !Task.isCancelled, let got else { return }
             extra = (key, got.0, got.1, got.2)
+        }
+    }
+
+    /// CPU time by quality-of-service class: which kind of work the CPU went to (rusage ri_cpu_time_qos_*).
+    /// Read with the rest of the counters each refresh, so "now" covers the same interval as CPU %.
+    @ViewBuilder private func qosSection(_ p: ProcInfo) -> some View {
+        if let q = p.counters?.qosNanos {
+            let total = q.reduce(0, +)
+            let now = p.rates?.qosPercent
+            let rows: [Row] = q.indices.filter { q[$0] > 0 }.map { i in
+                let share = total > 0 ? String(format: " (%.0f %%)", Double(q[i]) / Double(total) * 100) : ""
+                return (Counters.qosClasses[i], now.map { "\(Fmt.pct($0[i])) %" } ?? "—", Fmt.secs(q[i]) + share)
+            }
+            if !rows.isEmpty {
+                Self.section("CPU by QoS class", "dial.medium", nil, format: { _ in "" }, rows: rows)
+                    .help("The quality-of-service class threads ran at. \"Now\" is the share of one core over the last refresh, as CPU % above.")
+            }
         }
     }
 
@@ -568,21 +586,6 @@ struct UsageTab: View {
                     ("Open files", .text(e?.files.map { "\($0) descriptors (files, sockets, pipes)" } ?? (exited ? "—" : "not readable"))),
                     ("Power assertions", .text(e.map { $0.assertions.isEmpty ? "none" : $0.assertions.map { "\($0.0)\($0.1.isEmpty ? "" : ": \($0.1)")" }.joined(separator: "\n") } ?? "—")),
                 ])
-                if let q = e?.qos {
-                    let total = q.reduce(0) { $0 + $1.1 }
-                    Collapsible(title: "CPU time by QoS class", startsOpen: false) {
-                        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 3) {
-                            ForEach(q.filter { $0.1 > 0 }, id: \.0) { name, ns in
-                                GridRow {
-                                    Text(name).foregroundStyle(.secondary)
-                                    Text(Fmt.secs(ns)).monospacedDigit().gridColumnAlignment(.trailing)
-                                    Text(total > 0 ? String(format: "%.0f %%", Double(ns) / Double(total) * 100) : "")
-                                        .monospacedDigit().foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
     }

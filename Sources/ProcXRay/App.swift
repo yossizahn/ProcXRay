@@ -41,6 +41,10 @@ struct ProcXRayApp: App {
             Bench.rates(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--qos") {
+            Bench.qos(pid_t(CommandLine.arguments[i + 1]) ?? 0)
+            exit(0)
+        }
         if CommandLine.arguments.contains("--extras") {
             Bench.extras(root: CommandLine.arguments.contains("--root"))
             exit(0)
