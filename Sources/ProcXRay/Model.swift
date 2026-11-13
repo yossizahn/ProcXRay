@@ -1034,6 +1034,9 @@ enum Fmt {
 
     static func pct(_ v: Double?) -> String {
         guard let v else { return "—" }
+        // Keep "didn't run" (exactly 0) apart from "ran a little" (would round to 0.0).
+        if v == 0 { return "0" }
+        if v > 0 && v < 0.05 { return "<0.1" }
         return String(format: "%.1f", v)
     }
     static let date: DateFormatter = {
