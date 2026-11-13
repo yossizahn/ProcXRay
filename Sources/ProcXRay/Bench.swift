@@ -165,7 +165,21 @@ enum Bench {
         for t in s.taskRights.filter({ $0.flavor == "control" && !s.isCommonTaskHolder($0.holder) }).prefix(8) {
             print("  \(Native.process(t.holder)?.comm ?? "\(t.holder)") holds \(Native.process(t.target)?.comm ?? "\(t.target)")'s control port")
         }
+        func top(_ title: String, _ v: (MachPortCounts) -> Int) {
+            let all = s.counts.map { ($0.key, v($0.value)) }
+            let sorted = all.map(\.1).sorted()
+            print("\(title): median \(sorted.isEmpty ? 0 : sorted[sorted.count / 2]), total \(sorted.reduce(0, +)), "
+                  + all.sorted { $0.1 > $1.1 }.prefix(5).map { "\(Native.process($0.0)?.comm ?? "\($0.0)") \($0.1)" }.joined(separator: ", "))
+        }
+        var without = s; without.counts = [:]
+        let size = (try? JSONEncoder().encode(s).count) ?? 0, sizeWithout = (try? JSONEncoder().encode(without).count) ?? 0
+        print("reply: \(size) bytes, \(size - sizeWithout) of them port counts")
+        top("ports", \.total)
+        top("dead names", \.deadNames)
+        top("replies owed", \.sendOnce)
+        top("full queues", \.fullQueues)
         for pid in pids {
+            if let c = s.counts[pid] { print("pid \(pid) ports: \(c)") }
             let ps = s.peers(of: pid)
             print("pid \(pid): \(ps.count) peers, \(ps.filter(\.common).count) common")
             for p in ps.prefix(15) {

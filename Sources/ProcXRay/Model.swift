@@ -47,6 +47,8 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     /// Network bytes per second from nettop's latest pair of samples (NetSampler).
     var netIn: Double?
     var netOut: Double?
+    /// Port space totals from the last lsmp snapshot (MachLoader); nil for a process started after it.
+    var machPorts: MachPortCounts?
     /// Per-second rates over the last refresh interval (nil on a process's first sample).
     var rates: Rates?
 
@@ -725,6 +727,7 @@ final class Store {
         let gpu = extras.contains(.gpu) ? ExtraRead.gpuNanosByPid() : nil
         NetSampler.shared.want(extras.contains(.network))
         let net = extras.contains(.network) ? NetSampler.shared.current() : nil
+        let mach = extras.contains(.machPorts) ? MachLoader.current() : nil
 
         let now = DispatchTime.now().uptimeNanoseconds
         var users: [uid_t: String] = [:]
@@ -758,6 +761,8 @@ final class Store {
             // A process with no GPU clients has used no GPU time, and one nettop didn't list had no sockets.
             if let gpu { p.gpuNanos = gpu[k.pid] ?? 0 }
             if let net { p.netIn = net[k.pid]?.inPerSec ?? 0; p.netOut = net[k.pid]?.outPerSec ?? 0 }
+            // A pid reused since the snapshot would get another process's ports.
+            if let mach, p.start <= mach.at { p.machPorts = mach.counts[k.pid] }
             out[k.pid] = p
         }
         let priv = privSource()

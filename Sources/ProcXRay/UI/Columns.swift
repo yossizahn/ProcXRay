@@ -56,7 +56,7 @@ struct ColumnSort: Hashable, Sendable {
 
 struct Column: Identifiable {
     enum Section: Int, CaseIterable {
-        case identity, ownership, cpu, memory, disk, network, energy, security, time
+        case identity, ownership, cpu, memory, disk, network, mach, energy, security, time
         var title: String {
             switch self {
             case .identity: "Identity"
@@ -65,6 +65,7 @@ struct Column: Identifiable {
             case .memory: "Memory"
             case .disk: "Disk"
             case .network: "Network"
+            case .mach: "Mach ports"
             case .energy: "Energy and activity"
             case .security: "Security"
             case .time: "Time"
@@ -191,6 +192,7 @@ private func num(_ v: Double?, _ f: (Double) -> String) -> CellValue { v.map { .
 private func text(_ s: String?) -> CellValue { s.map { .text($0) } ?? .empty }
 private let bytesFormat: (Double) -> String = { Fmt.bytes(UInt64(max(0, $0))) }
 private let countFormat: (Double) -> String = { Fmt.count(Int64($0)) }
+private let machNote = " From lsmp, run as root by the helper (admins only) about every 30 s while a Mach ports column is shown; — for a process started since. Group rows: the sum."
 private let secsFormat: (Double) -> String = { Fmt.secs(UInt64(max(0, $0))) }
 /// Events per second: one decimal below 10, whole numbers above.
 let perSecFormat: (Double) -> String = { $0 == 0 ? "0" : $0 < 10 ? String(format: "%.1f/s", $0) : "\(Fmt.count(Int64($0.rounded())))/s" }
@@ -431,6 +433,20 @@ private let catalogue: [Column] = [
     .amount(id: "netOut", title: "Sent/s",
             tooltip: "Network bytes sent per second, from nettop, which is sampled about every 5 s while this column is shown. Covers the sockets open at each sample. Group rows: the sum.",
             section: .network, width: 80, reads: .network, format: bytesPerSecFormat) { $0.netOut },
+
+    // Mach ports
+    .amount(id: "machPorts", title: "Ports",
+            tooltip: "Mach port names in the process's port space: send, receive and send-once rights, port sets and dead names (lsmp's total; Activity Monitor's Ports)." + machNote,
+            section: .mach, width: 62, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.total) } },
+    .amount(id: "machDeadNames", title: "Dead names",
+            tooltip: "Rights the process still holds to ports whose receiver has died. Thousands that keep growing are a leak: the process never deallocates them." + machNote,
+            section: .mach, width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.deadNames) } },
+    .amount(id: "machRepliesOwed", title: "Replies owed",
+            tooltip: "Send-once rights the process holds: mostly replies it owes to processes that sent it a request. Thousands that keep growing are requests it never answers." + machNote,
+            section: .mach, width: 76, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.sendOnce) } },
+    .amount(id: "machFullQueues", title: "Full queues",
+            tooltip: "Ports the process receives on whose message queue is full (messages waiting ≥ queue limit): senders block or time out until it receives." + machNote,
+            section: .mach, width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.fullQueues) } },
 
     // Energy
     .amount(id: "power", title: "Power",

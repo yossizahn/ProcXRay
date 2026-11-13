@@ -481,7 +481,12 @@ struct LsofView: View {
                 let peers = s.peers(of: pid)
                 let common = peers.filter(\.common).count
                 let queued = peers.reduce(0) { $0 + $1.queuedHere }
-                Text("Mach ports: \(peers.count) processes\(common > 0 ? ", \(common) of them common services" : "")\(queued > 0 ? " · \(queued) message\(queued == 1 ? "" : "s") queued here" : "") · snapshot of \(s.processCount) processes at \(s.at.formatted(date: .omitted, time: .standard))")
+                let own = s.counts[pid].map { c in
+                    " · \(Fmt.count(c.total)) ports" + (c.fullQueues > 0 ? ", \(c.fullQueues) full queue\(c.fullQueues == 1 ? "" : "s")" : "")
+                        + (c.sendOnce > 0 ? ", \(Fmt.count(c.sendOnce)) repl\(c.sendOnce == 1 ? "y" : "ies") owed" : "")
+                        + (c.deadNames > 0 ? ", \(Fmt.count(c.deadNames)) dead name\(c.deadNames == 1 ? "" : "s")" : "")
+                } ?? ""
+                Text("Mach ports: \(peers.count) processes\(common > 0 ? ", \(common) of them common services" : "")\(queued > 0 ? " · \(queued) message\(queued == 1 ? "" : "s") queued here" : "") \(own) · snapshot of \(s.processCount) processes at \(s.at.formatted(date: .omitted, time: .standard))")
                     .help("From lsmp, as root: which processes can send to which. A right to a port means \"can talk\", not traffic. Common services are peers at least \(Int(MachSnapshot.commonShare * 100)) % of processes can send to; the graph leaves them out.")
             case .unavailable(let why)?:
                 Text(why)

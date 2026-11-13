@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 4
+    static let protocolVersion = 5   // 5: MachSnapshot.counts
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.

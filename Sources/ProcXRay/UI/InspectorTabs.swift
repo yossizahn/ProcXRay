@@ -505,7 +505,7 @@ struct UsageTab: View {
                     ("Mach system calls", rate(r?.machSyscalls), Fmt.count(c?.machSyscalls)),
                     ("Mach messages sent", rate(r?.machMsgsSent), Fmt.count(c?.machMsgsSent)),
                     ("Mach messages received", rate(r?.machMsgsReceived), Fmt.count(c?.machMsgsReceived)),
-                ])
+                ] + machPortRows(p))
                 voucherSection(p)
                 other(p)
                 if p.viaHelper { Text("Task metrics read as root through the privileged helper.").font(.caption).foregroundStyle(.secondary) }
@@ -562,6 +562,20 @@ struct UsageTab: View {
     }
 
     private func rate(_ v: Double?) -> String { v.map(perSecFormat) ?? "—" }
+
+    /// The process's port space from the last lsmp snapshot (the Mach ports columns' or the Connections
+    /// tab's, whichever ran); none until one has been taken. Counts at that moment, so under "Now".
+    private func machPortRows(_ p: ProcInfo) -> [(String, String, String)] {
+        guard let m = p.machPorts
+                ?? MachLoader.peek().flatMap({ s in p.start <= s.at ? s.counts[p.pid] : nil }) else { return [] }
+        return [
+            ("Mach ports", Fmt.count(m.total),
+             "\(Fmt.count(m.receive)) receive · \(Fmt.count(m.send)) send · \(Fmt.count(m.portSets)) sets"),
+            ("Replies owed (send-once)", Fmt.count(m.sendOnce), ""),
+            ("Dead names", Fmt.count(m.deadNames), ""),
+            ("Full queues", Fmt.count(m.fullQueues), ""),
+        ]
+    }
     private static let metricWidth: CGFloat = 180, nowWidth: CGFloat = 90, totalWidth: CGFloat = 240
 
     /// One section: metric, now and since start in fixed-width columns, and its sparkline. The group

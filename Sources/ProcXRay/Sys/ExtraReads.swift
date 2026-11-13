@@ -14,6 +14,8 @@ struct ExtraReads: OptionSet, Hashable, Sendable {
     static let gpu = ExtraReads(rawValue: 8)
     static let compressed = ExtraReads(rawValue: 16)
     static let network = ExtraReads(rawValue: 64)
+    /// Per-process port counts from the helper's lsmp snapshot (MachLoader.current), at most ~30 s old.
+    static let machPorts = ExtraReads(rawValue: 128)
     /// What the helper can read for other users' processes. (A Mach port count was tried and dropped: even
     /// root got a task inspect port for 13 of 727 processes, and asking cost the helper ~11 ms per refresh.)
     static let viaHelper: ExtraReads = [.openFiles, .nice, .compressed]

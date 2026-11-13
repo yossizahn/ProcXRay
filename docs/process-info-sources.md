@@ -239,7 +239,8 @@ Column and inspector labels taken from Activity Monitor's bundled strings (`Acti
 | Neural footprint | yes |
 | % GPU, GPU Time | yes — IORegistry `AppUsage` |
 | Preventing Sleep, Assertions | yes — `IOPMCopyAssertionsByProcess` |
-| Ports, Compressed Memory, Purgeable Memory, Private / Shared Memory, Real Private (RPRVT) / Real Shared (RSHRD) | no — task port (root); the Ports count is also in `taskinfo` via the helper (~120–160 ms/process) |
+| Ports | yes — lsmp's per-process `total` from the helper's Mach snapshot (admins, ~30 s old); also in `taskinfo` |
+| Compressed Memory, Purgeable Memory, Private / Shared Memory, Real Private (RPRVT) / Real Shared (RSHRD) | no — task port (root) |
 | Sent / Received Bytes, Sent / Received Packets | bytes per second from `nettop`, sampled about every 5 s; packets no |
 | Energy Impact, Avg Energy Impact, 12 hr Power | the instantaneous Energy Impact is available from `powermetrics --samplers tasks` via the helper (~780 ms/sample, whole machine); the averages and 12 hr history are not |
 | App Nap, Requires High Perf GPU, Recent hangs | no — source not identified |

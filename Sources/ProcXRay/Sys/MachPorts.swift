@@ -34,12 +34,31 @@ struct TaskPortRight: Codable, Hashable, Sendable {
     let flavor: String
 }
 
+/// One process's port space, from lsmp's per-process totals (`total` is Activity Monitor's "Ports").
+struct MachPortCounts: Codable, Hashable, Sendable {
+    var total = 0
+    var send = 0
+    var receive = 0
+    /// Send-once rights held: mostly replies this process owes to whoever sent it a request. Tens of
+    /// thousands is a reply leak (1Password Browser Helper: 14,561, measured 2026-11-13).
+    var sendOnce = 0
+    var portSets = 0
+    /// Rights to ports whose receiver died, not yet released (WindowServer: 21,173).
+    var deadNames = 0
+    var deadNameRequests = 0
+    var vouchers = 0
+    /// Receive rights whose queue is full (msg_count ≥ queue_limit): senders block or time out.
+    var fullQueues = 0
+}
+
 struct MachSnapshot: Codable, Sendable {
     var links: [MachLink] = []
     /// Per receiver, how many other processes can send to it.
     var senders: [Int32: Int] = [:]
     var processCount = 0
     var at = Date()
+    /// Per process, its port space totals.
+    var counts: [Int32: MachPortCounts] = [:]
 
     // Kernel objects: rights to ports the kernel receives on, which pair with no process.
 
@@ -102,12 +121,17 @@ struct MachSnapshot: Codable, Sendable {
         var iokit: [Int32: [String: Int]] = [:]
         var kobjects: [Int32: [String: Int]] = [:]
         var memory: [String: (holders: Set<Int32>, bytes: UInt64?)] = [:]
+        var fullQueues: [Int32: Int] = [:]
         // Task ports by flavor: ipc-object → holders, and each process's lowest-named right of the flavor.
         var taskHolders: [String: [String: Set<Int32>]] = [:]
         var lowestTask: [String: [Int32: (name: UInt64, obj: String)]] = [:]
         func walk(_ pid: Int32, _ q: [String: Any]) {
             if let o = q["ipc-object"] as? String, let r = q["rights"] as? [String] {
-                if r.contains("recv") { recv[o] = (pid, (q["msg_count"] as? NSNumber)?.intValue ?? 0) }
+                if r.contains("recv") {
+                    let queued = (q["msg_count"] as? NSNumber)?.intValue ?? 0
+                    recv[o] = (pid, queued)
+                    if let limit = (q["queue_limit"] as? NSNumber)?.intValue, limit > 0, queued >= limit { fullQueues[pid, default: 0] += 1 }
+                }
                 if r.contains("send") || r.contains("send once") {
                     sends.append((pid, o))
                     // A typed right is a kernel object; "port" / "UNKNOWN" are ports a process receives on.
@@ -146,6 +170,14 @@ struct MachSnapshot: Codable, Sendable {
         }
         var snap = MachSnapshot()
         snap.processCount = procs.count
+        for p in procs {
+            guard let pid = (p["pid"] as? NSNumber)?.int32Value else { continue }
+            func n(_ k: String) -> Int { (p[k] as? NSNumber)?.intValue ?? 0 }
+            snap.counts[pid] = MachPortCounts(total: n("total"), send: n("send_rights"), receive: n("receive_rights"),
+                                              sendOnce: n("send_once_rights"), portSets: n("port_sets"), deadNames: n("dead_names"),
+                                              deadNameRequests: n("dead_name requests"), vouchers: n("vouchers"),
+                                              fullQueues: fullQueues[pid] ?? 0)
+        }
         snap.links = ports.map { k, objs in
             MachLink(from: k.from, to: k.to, ports: objs.count, queued: objs.reduce(0) { $0 + (recv[$1]?.queued ?? 0) })
         }
@@ -264,7 +296,35 @@ enum MachLoader {
     }
     private static let lock = NSLock()
     nonisolated(unsafe) private static var cached: MachSnapshot?
+    nonisolated(unsafe) private static var refreshing = false
+    nonisolated(unsafe) private static var failedAt: Date?
     static let maxAge: TimeInterval = 30
+
+    /// The last snapshot, whatever its age, without waiting; for the process table's Mach columns. When it is
+    /// older than `maxAge` a new one is taken in the background, unless the last try failed (no helper, not
+    /// an admin) less than `maxAge` ago.
+    static func current() -> MachSnapshot? {
+        lock.lock(); defer { lock.unlock() }
+        let stale = cached.map { -$0.at.timeIntervalSinceNow >= maxAge } ?? true
+        let backingOff = failedAt.map { -$0.timeIntervalSinceNow < maxAge } ?? false
+        if stale, !refreshing, !backingOff {
+            refreshing = true
+            DispatchQueue.global(qos: .utility).async {
+                let r = HelperClient.shared.machPorts()
+                lock.lock()
+                refreshing = false
+                switch r {
+                case .success(let s): cached = s; failedAt = nil
+                case .failure: failedAt = Date()
+                }
+                lock.unlock()
+            }
+        }
+        return cached
+    }
+
+    /// The last snapshot, if any, without starting one.
+    static func peek() -> MachSnapshot? { lock.lock(); defer { lock.unlock() }; return cached }
 
     static func load(fresh: Bool = false) -> Result {
         lock.lock()

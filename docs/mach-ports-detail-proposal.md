@@ -26,6 +26,8 @@ The per-process counts come for free with the snapshot already taken. Median `to
 
 Proposal: a **Ports** column (and a line in the Resources tab) from the cached snapshot, read only while shown, like other columns that need extra reads. Blank without the helper. Its tooltip says it is up to 30 s old.
 
+**Done** (`MachSnapshot.counts`, `MachLoader.current`): a Mach ports column section (Ports, Dead names, Replies owed, Full queues), rows in the Resources tab's "System calls and IPC" card, and the process's own counts on the Connections tab's Mach line. Checked on MarkEdit: 508 ports and 2 dead names in all three places. Note that a port name can hold both a receive and a send right, so receive plus send exceeds the total (214 + 361 against 508).
+
 ### 3. Leak and backlog signals
 
 All three are per process or per port, and each names the other side.
@@ -34,7 +36,7 @@ All three are per process or per port, and each names the other side.
 - **Outstanding send-once rights** (replies owed): `1Password Browser Helper` holds 14,561, of which 10,426 are replies owed to `1Password-BrowserSupport` and 4,135 to processes lsmp couldn't name. Next is `launchd` with 568. A count this large is a reply leak.
 - **Full queues** (`msg_count` ≥ `queue_limit`): 231 receive ports. Senders block or get `MACH_SEND_TIMED_OUT`. Examples: `launchd` 6/6 with `universalaccessd`, `identityservicesd` and `biomed` the only senders; `powerd` 6/6 from `analyticsd`; `cfbackd` five ports at 1/1 from `diskarbitrationd`; `gamepolicyd` 16/16 from `notifyd`.
 
-Proposal: three columns hidden by default (Dead names, Replies owed, Full queues), and in Connections a per-peer note, "queue full (6 of 6)", "owes 10,426 replies". A badge on the Mach status line when this process has any full queue.
+**Columns and process totals done** with finding 2. Proposal still open: in Connections a per-peer note, "queue full (6 of 6)", "owes 10,426 replies". A badge on the Mach status line when this process has any full queue.
 
 ### 4. Who is the client: send-once rights and no-senders requests
 
@@ -80,7 +82,7 @@ Selecting a Mach peer row opens its ports: our name for each, rights and referen
 
 ## Cost
 
-No extra lsmp run: 1–6 all come from the run the helper already does. The reply grows by per-process counts (802 × 8 integers), exception routes (~523), owed replies and full queues per pair, and boosts: estimated well under 100 KB on top of today's ~1 MB, not measured. Parsing reads fields of entries it already walks.
+No extra lsmp run: 1–6 all come from the run the helper already does. The reply grows by per-process counts (802 × 8 integers), exception routes (~523), owed replies and full queues per pair, and boosts: estimated well under 100 KB on top of today's ~1 MB. Measured after step 2: the per-process counts alone add **106 KB** (1.23 MB reply for 806 processes), since JSON repeats every key per process; an array encoding would cut that if the reply size starts to matter. Parsing reads fields of entries it already walks.
 
 ## Order
 
