@@ -101,15 +101,16 @@ enum Bench {
         }
     }
 
-    /// `ProcXRay --helper-call <status|argsenv|lsof|lsofall|vmmap|sample|procinfo|btm> [pid]`: one helper call from
-    /// the shell, for testing the helper without the UI. Only this exact binary is accepted by the helper.
+    /// `ProcXRay --helper-call <status|argsenv|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|powermetrics> [pid] [--full]`:
+    /// one helper call from the shell, for testing the helper without the UI. Only this exact binary is accepted by the helper.
     static func helperCall(_ args: [String]) {
         let c = HelperClient.shared
         print(c.probe().label)
         guard let what = args.first else { return }
         let pid = args.dropFirst().first.flatMap { Int32($0) } ?? 0
         let tools: [String: HelperTool] = ["lsof": .lsof, "vmmap": .vmmap, "sample": .sample,
-                                           "procinfo": .launchctlProcinfo, "btm": .btmDump, "lsofall": .lsofAll]
+                                           "procinfo": .launchctlProcinfo, "btm": .btmDump, "lsofall": .lsofAll,
+                                           "taskinfo": .taskinfo, "powermetrics": .powermetrics]
         if what == "mach" {
             let t0 = Date()
             switch c.machPorts() {
@@ -122,9 +123,12 @@ enum Bench {
             guard let r = c.argsEnv(pid) else { print("argsEnv: nil"); return }
             print("argsEnv: exec=\(r.execPath) args=\(r.args.count) env=\(r.env.count) cwd=\(r.cwd ?? "nil")")
         } else if let t = tools[what] {
+            let t0 = Date()
             let out = c.run(t, pid: pid) ?? "helper did not answer"
-            print("\(what): \(out.utf8.count) bytes")
-            print(out.prefix(400))
+            let ms = -t0.timeIntervalSinceNow * 1000
+            print(String(format: "%@: %d bytes in %.0f ms", what, out.utf8.count, ms))
+            let preview = args.contains("--full") ? out[...] : out.prefix(2000)
+            print(preview)
         }
     }
 

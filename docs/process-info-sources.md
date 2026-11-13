@@ -180,8 +180,8 @@ NewOSXBook's entitlement database (`ent.php`, macOS 15 data) lists 24 holders of
 |---|---|---|
 | `lsmp -a -j` | used (Mach links) | Much more than we parse; see "lsmp JSON we don't read yet" |
 | `vmmap --summary`, `sample` | used | — |
-| `powermetrics --samplers tasks` | not used; not run yet (root) | Apple's per-process energy impact, CPU ms/s, interrupt and idle wakeups, disk and network, time per QoS |
-| `taskinfo` | not used; not run yet (root, text only, cost unknown) | Requested and effective policy (role, App Nap suppression, darwin BG, QoS clamp and ceiling, I/O tier, runningboard managed, runaway daemon mitigation); boosts and "boosted by"; importance donor / receiver; **CPU time billed to others / billed to me by others** (voucher accounting: who a daemon works for); `extmod` (task-for-pid, thread injection and set-state counts by other processes); P / E core time and switches; Mach port count and occupancy; per-thread dispatch queue names (`--threads --dq`). Fields from the binary's format strings |
+| `powermetrics --samplers tasks` | not used; **measured** through the helper 2026-11-13 | Apple's per-process **Energy Impact** (the number Activity Monitor shows), CPU ms/s, User %, timer-deadline counts, interrupt and idle wakeups, SFI time; `--show-process-energy`, `--show-process-netstats`, `--show-process-io` add energy, network and disk columns. One sample is a time window: `-n 1 -i 500` cost **~780 ms wall** (570 ms of it the sample interval) and ~20 KB for the whole machine. Not per-pid; it lists every task in one run |
+| `taskinfo` | not used; **measured** through the helper 2026-11-13 | Requested and effective policy (role, App Nap suppression, darwin BG, QoS clamp and ceiling, I/O tier, runningboard managed); boosts and "boosted by"; importance donor / receiver; **CPU time billed to others / billed to me by others** (voucher accounting: who a daemon works for); P / E core time, cycles, instructions, IPC and switches; **Mach port count and occupancy** (e.g. WindowServer 27,077, 94 % occupied — Activity Monitor's "Ports"); QoS time per class; coalition IDs; `cs_flags`; per-thread dispatch queue names and QoS (`--threads --dq`). **~120–160 ms** per process as root, including root-owned processes (WindowServer, launchd); 8–31 KB text, no JSON. The `extmod` line (task-for-pid / thread-injection counts) was not present in this build's output |
 | `footprint -j` | not used | Per-category dirty / swapped / clean / reclaimable / wired bytes as JSON. **Works unprivileged for the user's own processes** (Finder: 0.07 s); others and `-a` need root. Overlaps `vmmap --summary`, but faster and JSON; `--sample` for a time series |
 | `spindump` | not used | Every thread's stack, and possibly what a thread blocked in `mach_msg` waits on (owner pid). Heavy; not verified |
 | `heap`, `leaks`, `stringdups`, `malloc_history`, `atos`, `symbols` | not used | Malloc and symbolication tools; `leaks` suspends the target, `malloc_history` needs MallocStackLogging. At most an on-demand per-class object count from `heap` |
@@ -240,9 +240,9 @@ Column and inspector labels taken from Activity Monitor's bundled strings (`Acti
 | Neural footprint | yes |
 | % GPU, GPU Time | yes — IORegistry `AppUsage` |
 | Preventing Sleep, Assertions | yes — `IOPMCopyAssertionsByProcess` |
-| Ports, Compressed Memory, Purgeable Memory, Private / Shared Memory, Real Private (RPRVT) / Real Shared (RSHRD) | no — task port (root) |
+| Ports, Compressed Memory, Purgeable Memory, Private / Shared Memory, Real Private (RPRVT) / Real Shared (RSHRD) | no — task port (root); the Ports count is also in `taskinfo` via the helper (~120–160 ms/process) |
 | Sent / Received Bytes, Sent / Received Packets | bytes per second from `nettop`, sampled about every 5 s; packets no |
-| Energy Impact, Avg Energy Impact, 12 hr Power | no — unpublished formula, history kept by the system |
+| Energy Impact, Avg Energy Impact, 12 hr Power | the instantaneous Energy Impact is available from `powermetrics --samplers tasks` via the helper (~780 ms/sample, whole machine); the averages and 12 hr history are not |
 | App Nap, Requires High Perf GPU, Recent hangs | no — source not identified |
 | Spindump | no |
 

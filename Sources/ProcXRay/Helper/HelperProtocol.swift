@@ -84,7 +84,7 @@ enum SyscallTraceConfig {
 
 /// Allowlisted tools; the helper builds the argv itself.
 enum HelperTool: Int, CaseIterable {
-    case lsof = 1, vmmap, sample, launchctlProcinfo, btmDump, lsofAll, pidDomain
+    case lsof = 1, vmmap, sample, launchctlProcinfo, btmDump, lsofAll, pidDomain, taskinfo, powermetrics
 
     func argv(pid: Int32) -> (String, [String])? {
         switch self {
@@ -99,6 +99,11 @@ enum HelperTool: Int, CaseIterable {
         case .lsofAll: return ("/usr/sbin/lsof", ["-n", "-P", "-F", "pftdnPT"])
         // The launchd domain this process owns: the services it has launched (an extension host's extensions).
         case .pidDomain: return pid > 0 ? ("/bin/launchctl", ["print", "pid/\(pid)"]) : nil
+        // Scheduling policy, boosts, billed CPU, per-thread dispatch queues. Root reads it for any process.
+        case .taskinfo: return pid > 0 ? ("/usr/bin/taskinfo", ["\(pid)", "--threads", "--dq"]) : nil
+        // Machine-wide per-process energy/CPU/wakeups over one 500 ms sample.
+        case .powermetrics: return ("/usr/bin/powermetrics", ["--samplers", "tasks", "--show-process-energy",
+                                                               "--show-process-wait-times", "-n", "1", "-i", "500"])
         }
     }
 
@@ -108,7 +113,8 @@ enum HelperTool: Int, CaseIterable {
         case .sample: 45   // 1 s of sampling, then symbolication: ~13 s for a 39-thread daemon
         case .vmmap, .btmDump: 30
         case .lsof, .lsofAll: 20
-        case .launchctlProcinfo, .pidDomain: 10
+        case .powermetrics: 15
+        case .launchctlProcinfo, .pidDomain, .taskinfo: 10
         }
     }
     /// Output beyond this is dropped: it goes back as one XPC reply and the app parses all of it.
