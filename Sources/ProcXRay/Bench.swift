@@ -159,7 +159,10 @@ enum Bench {
         var flavors: [String: Int] = [:]
         for t in s.taskRights { flavors[t.flavor, default: 0] += 1 }
         print("task ports of other processes: \(s.taskRights.count): \(flavors)")
-        for t in s.taskRights.filter({ $0.flavor == "control" }).prefix(8) {
+        let holders = Dictionary(grouping: s.taskRights, by: \.holder).mapValues { Set($0.map(\.target)).count }
+        print("  holders: " + holders.sorted { $0.value > $1.value }.prefix(8)
+            .map { "\(Native.process($0.key)?.comm ?? "\($0.key)") \($0.value)\(s.isCommonTaskHolder($0.key) ? " (common)" : "")" }.joined(separator: ", "))
+        for t in s.taskRights.filter({ $0.flavor == "control" && !s.isCommonTaskHolder($0.holder) }).prefix(8) {
             print("  \(Native.process(t.holder)?.comm ?? "\(t.holder)") holds \(Native.process(t.target)?.comm ?? "\(t.target)")'s control port")
         }
         for pid in pids {

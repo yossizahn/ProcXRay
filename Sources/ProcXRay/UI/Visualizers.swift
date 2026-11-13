@@ -446,7 +446,11 @@ struct LsofView: View {
             add("Memory", "\(w) memory entr\(w == 1 ? "y" : "ies") held by more than \(MachSnapshot.fewHolders) processes", .sharedMemory)
         }
         for t in s.taskRights where t.holder == pid { add("Task →", "its \(t.flavor) port", peer: t.target, .taskPort) }
-        for t in s.taskRights where t.target == pid { add("Task ←", "holds our \(t.flavor) port", peer: t.holder, .taskPort) }
+        for t in s.taskRights where t.target == pid {
+            let note = s.isCommonTaskHolder(t.holder)
+                ? " · common holder, has \(Int((Double(s.taskTargets(of: t.holder)) / Double(s.processCount) * 100).rounded())) % of processes' task ports" : ""
+            add("Task ←", "holds our \(t.flavor) port" + note, peer: t.holder, .taskPort)
+        }
         for (type, n) in (s.kernelObjects[pid] ?? [:]).sorted(by: { ($0.value, $1.key) > ($1.value, $0.key) }) {
             add("Object", type + times(n), .kobject)
         }
@@ -1461,7 +1465,8 @@ struct PeerGraph: View {
         for t in mach?.taskRights ?? [] where t.holder == center || t.target == center {
             // Its port held here: "task control"; ours held there: "task ← control".
             let other = t.holder == center ? t.target : t.holder
-            guard other != center else { continue }
+            // coreservicesd holds most processes' task ports: on every map, so left out like a common service.
+            guard other != center, !(t.target == center && mach?.isCommonTaskHolder(other) == true) else { continue }
             by[other, default: Peer(id: other)].taskPorts.append(t.holder == center ? t.flavor : "← \(t.flavor)")
         }
         for m in mach?.sharedMemory(of: center) ?? [] { by[m.pid, default: Peer(id: m.pid)].sharedMemory += m.entries }

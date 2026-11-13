@@ -26,8 +26,8 @@ struct SharedMemoryEntry: Codable, Hashable, Sendable {
     var bytes: UInt64?
 }
 
-/// `holder` has a right to `target`'s task port: control (can read and write its memory, start threads),
-/// read, inspect or name, by lsmp's type.
+/// `holder` has a right to `target`'s task port: control (can read and write its memory, start threads), read
+/// or inspect, by lsmp's type. Name ports (identity only) and ID tokens are only counted in `kernelObjects`.
 struct TaskPortRight: Codable, Hashable, Sendable {
     let holder: Int32
     let target: Int32
@@ -50,6 +50,15 @@ struct MachSnapshot: Codable, Sendable {
     var widelyShared: [Int32: Int] = [:]
     /// Task ports a process holds for another process.
     var taskRights: [TaskPortRight] = []
+
+    /// Holders of so many processes' task ports (coreservicesd: 63 % of them) that holding ours says
+    /// nothing about this process; folded like a common service. Same share as `commonShare`.
+    func isCommonTaskHolder(_ pid: Int32) -> Bool {
+        guard processCount > 0 else { return false }
+        let n = Set(taskRights.lazy.filter { $0.holder == pid }.map(\.target)).count
+        return Double(n) >= Self.commonShare * Double(processCount)
+    }
+    func taskTargets(of pid: Int32) -> Int { Set(taskRights.lazy.filter { $0.holder == pid }.map(\.target)).count }
     /// Per process, every kernel object type it holds rights to → count (threads, semaphores, vouchers, its own
     /// task port, memory entries…), except IOKit connections, which `iokit` lists by class.
     var kernelObjects: [Int32: [String: Int]] = [:]
@@ -93,7 +102,9 @@ struct MachSnapshot: Codable, Sendable {
         var iokit: [Int32: [String: Int]] = [:]
         var kobjects: [Int32: [String: Int]] = [:]
         var memory: [String: (holders: Set<Int32>, bytes: UInt64?)] = [:]
-        var tasks: Set<TaskPortRight> = []
+        // Task ports by flavor: ipc-object → holders, and each process's lowest-named right of the flavor.
+        var taskHolders: [String: [String: Set<Int32>]] = [:]
+        var lowestTask: [String: [Int32: (name: UInt64, obj: String)]] = [:]
         func walk(_ pid: Int32, _ q: [String: Any]) {
             if let o = q["ipc-object"] as? String, let r = q["rights"] as? [String] {
                 if r.contains("recv") { recv[o] = (pid, (q["msg_count"] as? NSNumber)?.intValue ?? 0) }
@@ -110,8 +121,12 @@ struct MachSnapshot: Codable, Sendable {
                         if t.contains("MEMORY") {
                             memory[o, default: ([], Self.size(desc))].holders.insert(pid)
                         }
-                        if t.hasPrefix("TASK-"), let target = (q["pid"] as? NSNumber)?.int32Value, target > 0, target != pid {
-                            tasks.insert(TaskPortRight(holder: pid, target: target, flavor: String(t.dropFirst(5)).lowercased()))
+                        if Self.taskFlavors.contains(t) {
+                            taskHolders[t, default: [:]][o, default: []].insert(pid)
+                            if let n = (q["name"] as? String).flatMap({ UInt64($0.dropFirst(2), radix: 16) }),
+                               n < lowestTask[t]?[pid]?.name ?? .max {
+                                lowestTask[t, default: [:]][pid] = (n, o)
+                            }
                         }
                     }
                 }
@@ -137,7 +152,7 @@ struct MachSnapshot: Codable, Sendable {
         for l in snap.links { snap.senders[l.to, default: 0] += 1 }
         snap.iokit = iokit
         snap.kernelObjects = kobjects
-        snap.taskRights = Array(tasks)
+        snap.taskRights = Self.taskRights(holders: taskHolders, lowest: lowestTask)
         for m in memory.values where m.holders.count > 1 {
             if m.holders.count <= fewHolders {
                 snap.sharedMemory.append(SharedMemoryEntry(holders: m.holders.sorted(), bytes: m.bytes))
@@ -146,6 +161,28 @@ struct MachSnapshot: Codable, Sendable {
             }
         }
         return snap
+    }
+
+    /// Task port types paired across processes.
+    static let taskFlavors: Set<String> = ["TASK-CONTROL", "TASK-READ", "TASK-INSPECT"]
+
+    /// Who holds whose task port. lsmp's `pid` on a task right is the holder's own pid, not the target's, so
+    /// the target comes from the join: a process's own task port (mach_task_self) is its lowest-named right
+    /// of that flavor, `0x203` for most and `0x103` for a few. Measured on 802 processes: every one of the 801
+    /// control ports got exactly one owner, and 565 rights to another process's control port were found.
+    static func taskRights(holders: [String: [String: Set<Int32>]],
+                           lowest: [String: [Int32: (name: UInt64, obj: String)]]) -> [TaskPortRight] {
+        var out: Set<TaskPortRight> = []
+        for (type, objs) in holders {
+            var owner: [String: Int32] = [:]
+            for (pid, own) in lowest[type] ?? [:] { owner[own.obj] = pid }
+            let flavor = String(type.dropFirst(5)).lowercased()
+            for (obj, pids) in objs where pids.count > 1 {
+                guard let target = owner[obj] else { continue }
+                for h in pids where h != target { out.insert(TaskPortRight(holder: h, target: target, flavor: flavor)) }
+            }
+        }
+        return Array(out)
     }
 
     /// "RootDomainUserClient(0x100001031)" → "RootDomainUserClient".
