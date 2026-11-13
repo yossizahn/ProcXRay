@@ -131,7 +131,7 @@ Grouped by how hard it is to get. "Same user" means the call worked for another 
 
 ### Needs root (the helper)
 
-- `task_for_pid` (or the inspect / read variants) → a task port. Measured: works only for our own process, not even for another process of the same user. With a task port:
+- `task_for_pid` (or the inspect / read variants) → a task port. Measured: works only for our own process, not even for another process of the same user. Root is not enough either: the helper got an inspect port for 13 of 727 processes (see "Task-port entitlements" below). So the list that follows is only reachable through Apple tools that carry the entitlement. With a task port:
   - `mach_port_space_basic_info` → **Mach port count** (top's `ports`, Activity Monitor's "Ports")
   - `task_info(TASK_VM_INFO)` → **compressed** and **purgeable** memory, internal / external memory
   - `task_policy_get(TASK_POLICY_STATE)` → importance **boosts** (top's `boosts`; not verified)
@@ -141,8 +141,69 @@ Grouped by how hard it is to get. "Same user" means the call worked for another 
 ### Other sources
 
 - Per-process network bytes and packets: the private NetworkStatistics framework (what `nettop` uses), or parsing `nettop -P -L 1`. Not tried.
-- Energy Impact: Apple doesn't publish the formula; it could be approximated from CPU, wakeups, GPU, disk and network.
-- App Nap state, Recent hangs: source not identified.
+- Energy Impact: Apple doesn't publish the formula; it could be approximated from CPU, wakeups, GPU, disk and network. `powermetrics --samplers tasks` (below) prints Apple's own per-process energy impact.
+- App Nap state, Recent hangs: source not identified. `taskinfo` (below) prints the App Nap suppression policy.
+
+## Task-port entitlements: what root cannot do, and the Apple tools that can
+
+Checked on 2026-11-13 (macOS 27, Apple silicon).
+
+### Why the helper cannot read task ports itself
+
+Most per-process kernel detail (Mach port space, VM regions, thread state, exception ports, vouchers) starts from a task port of the target. Being root does not give one: the helper got a task inspect port for 13 of 727 processes (`ExtraReads.swift`), and a read port is stricter still. Apple's tools get them through the `com.apple.system-task-ports.*` entitlements, which AMFI only honours on Apple-signed platform binaries; our Apple Development–signed helper would not launch with one. `com.apple.security.cs.debugger` does not help, since it only reaches targets that set `get-task-allow`. Injecting into the Apple tools is ruled out by library validation.
+
+So the way in is the one the helper already uses for `lsof`, `vmmap`, `sample` and `lsmp`: run an Apple tool that carries the entitlement, as root, and parse its output.
+
+For example, `lsmp` imports `host_processor_set_priv` → `processor_set_tasks_with_flavor` and `task_read_for_pid` (to get every task's read port), then `mach_port_space_info`, `mach_port_get_attributes`, `mach_port_get_context`, `mach_port_get_set_status`, `mach_port_kernel_object`, `mach_port_kobject_description`, `task_get_exception_ports_info`, `thread_get_exception_ports_info`, `task_threads`, `thread_get_mach_voucher` and `mach_voucher_debug_info` (`nm -u /usr/bin/lsmp`). Its only entitlement is `com.apple.system-task-ports.read`.
+
+### Who holds which entitlement on this machine
+
+Found by searching every binary under `/bin`, `/sbin`, `/usr`, `/System`, `/Library/Apple` and Xcode for the string `system-task-ports` (`grep -rlaF`, about 45 s), then reading each match's real entitlements with `codesign -d --entitlements - --xml`. Matches in the kernel, dyld shared caches and `taskgated` only mention the string. 44 binaries hold a variant:
+
+| Entitlement | Holders | Usable from the helper |
+|---|---|---|
+| `system-task-ports` + `.control` + `.token.read` | Xcode's Instruments XPC services `com.apple.dt.instruments.dtarbiter`, `dtsecurity` | No: XPC services for Instruments, not tools |
+| `.read` (+ `.read.safe`) | `atos`, `heap`, `leaks`, `malloc_history`, `sample`, `stringdups`, `vmmap` (system and Xcode copies) | Yes, command-line tools |
+| `.read` | `ps`, `top`, `taskinfo`, `lsmp`, `spindump`, `tailspin`, `symbols` | Yes, command-line tools |
+| `.read` | `sysmond` (Activity Monitor's data source), `tailspind`, `osanalyticshelper`, `PerformanceTraceService`, `TailspinSymbolicationServer` | Daemons and XPC services; whether `sysmond` serves other clients is not checked |
+| `.read.safe` | `footprint` | Yes |
+| `.inspect` | `powermetrics` | Yes |
+| `.name.safe` | `PerfPowerServices`, `PerfPowerServicesExtended`, `perfpowermetricd`, `powerlogHelperd`, `rapportd`, `corespeechd`, `corespeechd_system`, `privatecloudcomputed` | Daemons |
+| `.token.corpse` | `ReportCrash` and its three `ReportCrashService` XPC services | Crash corpses only |
+| `.token.control` | `coreservicesd` | Daemon |
+
+NewOSXBook's entitlement database (`ent.php`, macOS 15 data) lists 24 holders of `com.apple.system-task-ports`. It appears to group every variant under that name (it lists `footprint` and `powermetrics`, which hold `.read.safe` and `.inspect`). Six of its names are not holders here: `log`, `zprint`, `sysdiagnose` and `sysdiagnose_helper` exist on macOS 27 without any task-port entitlement, and `iclouddrivectl` and `thermald` are not installed. Entitlement lists from older releases need re-checking on the current one.
+
+### What each usable tool adds
+
+| Tool | Status | Adds |
+|---|---|---|
+| `lsmp -a -j` | used (Mach links) | Much more than we parse; see "lsmp JSON we don't read yet" |
+| `vmmap --summary`, `sample` | used | — |
+| `powermetrics --samplers tasks` | not used; not run yet (root) | Apple's per-process energy impact, CPU ms/s, interrupt and idle wakeups, disk and network, time per QoS |
+| `taskinfo` | not used; not run yet (root, text only, cost unknown) | Requested and effective policy (role, App Nap suppression, darwin BG, QoS clamp and ceiling, I/O tier, runningboard managed, runaway daemon mitigation); boosts and "boosted by"; importance donor / receiver; **CPU time billed to others / billed to me by others** (voucher accounting: who a daemon works for); `extmod` (task-for-pid, thread injection and set-state counts by other processes); P / E core time and switches; Mach port count and occupancy; per-thread dispatch queue names (`--threads --dq`). Fields from the binary's format strings |
+| `footprint -j` | not used | Per-category dirty / swapped / clean / reclaimable / wired bytes as JSON. **Works unprivileged for the user's own processes** (Finder: 0.07 s); others and `-a` need root. Overlaps `vmmap --summary`, but faster and JSON; `--sample` for a time series |
+| `spindump` | not used | Every thread's stack, and possibly what a thread blocked in `mach_msg` waits on (owner pid). Heavy; not verified |
+| `heap`, `leaks`, `stringdups`, `malloc_history`, `atos`, `symbols` | not used | Malloc and symbolication tools; `leaks` suspends the target, `malloc_history` needs MallocStackLogging. At most an on-demand per-class object count from `heap` |
+| `ps`, `top` | not used | Nothing beyond what `proc_pidinfo` already gives |
+
+`zprint` (no task-port entitlement, but `com.apple.private.memoryinfo`) shows kernel zone usage machine-wide, including memory used for Mach ports in total; not per process.
+
+### lsmp JSON we don't read yet
+
+`MachSnapshot.parse` reads `ipc-object`, `rights`, `msg_count`, `type`, `description`, `pid` and `members`. The binary also writes the keys below (from its strings; not yet checked against a real root snapshot):
+
+- **Kernel object type**, already read but only tallied. About 60 values that group into: process / thread control (`TASK-CONTROL/READ/INSPECT/NAME`, `THREAD-*`, `TASK_RESUME`, `TASK_ID_TOKEN`, `TASK_FATAL`); drivers (`IOKIT-CONNECT/OBJECT/IDENT`, `UEXT_OBJECT`, `MAIN-DEVICE`, `IO-QUEUE-DONE`); memory (`NAMED-MEMORY`, `MEMORY-OBJECT`, `UPL`, `PAGER-REQUEST`, `XMM-*`); sync and timing (`SEMAPHORE`, `LOCK-SET`, `EVENTLINK`, `TIMER`, `CLOCK`, `WORK_INTERVAL`); privilege and host (`HOST`, `HOST-PRIV`, `HOST-SECURITY`, `PROCESSOR(-SET)`, `LEDGER`, `SUID_CRED`, `MACF-LABEL`); other (`VOUCHER`, `FILEPORT`, `HYPERVISOR`, `EXCLAVES_RESOURCE`, `ARCADE_REG`, `UND-REPLY`). Worth flagging: `HOST-PRIV`, `HYPERVISOR`, `FILEPORT`, another process's `THREAD-CONTROL`.
+- `port_status_flags`: guarded, strict guard, importance donation, tempowner, taskptr, revive. Guarded receive rights are likely libxpc / libdispatch connection ports (not verified).
+- `boosts`: importance boost count.
+- `notifications`: dead-name, no-senders and port-destroyed requests. A no-senders request usually marks a server port.
+- `queue_limit`, next to `msg_count`: a full queue means senders block.
+- `send_rights`, `send_once_rights` (reply ports for requests still in flight), `oref`, `context`.
+- `dead_names`: rights to ports whose receiver has died.
+- `exception_ports` for each task and thread: mask (`BAD_ACCESS`, `CRASH`, `GUARD`, `RESOURCE`…), behaviors, flavor and receiver. Shows who handles the process's crashes (ReportCrash, a debugger, a crash reporter SDK); a link type not drawn anywhere yet.
+- `vouchers` with recipes (importance and resource accounting), `threads`.
+
+What lsmp cannot give: names of anonymous ports (nothing in it asks the kernel for service-port info; launchd plists remain the source), and what flows over a port. Mach message IDs, and from them the MIG subsystem, would come from kdebug, which the helper already reads for the Syscalls pane.
 
 ## Compared with `top`
 
