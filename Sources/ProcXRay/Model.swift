@@ -65,6 +65,9 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     /// app (see PidDomain). Its name is kept for the Context column, which only sees this process.
     var domainOwner: pid_t?
     var domainOwnerName: String?
+    /// launchd's `parent bundle identifier` for this process's job: the app that registered it through
+    /// SMAppService. Read once per process (see Store.fillJobParents); nil when none or not read yet.
+    var launchdParentBundle: String?
     var lsTags: [String] = []
     var signer: String?
     var signID: String?
@@ -129,7 +132,7 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
 }
 
 struct Ghost: Identifiable, Sendable {
-    /// Also the row id of this group in the Responsible tree: -pid - 1 for a known dead pid, below
+    /// Also the row id of this group in the Responsible / parent tree: -pid - 1 for a known dead pid, below
     /// -1,000,000 for a previous instance known only by its coalition (process ids are >= 0, pids < 100,000).
     var id: Int
     /// nil when LaunchServices only tells us the coalition of an earlier instance, not its pid.
@@ -140,12 +143,11 @@ struct Ghost: Identifiable, Sendable {
     var survivors: [ProcInfo]
 }
 
+/// What the process list shows with no column sort. Raw values are persisted in @AppStorage("grouping").
 enum Grouping: String, CaseIterable, Identifiable {
     case smart = "Smart"
-    case parent = "Parent tree"
-    case responsible = "Responsible tree"
-    case coalition = "Coalition"   // raw value kept stable: it's persisted in @AppStorage("grouping")
-    case jetsam = "Jetsam coalition"
+    // A process goes under its responsible process when that's another process, else under its parent.
+    case responsible = "Responsible tree"   // raw value kept stable: it's persisted in @AppStorage("grouping")
     case flat = "Flat"
     // The flat list grouped by one field (View ▸ Group ▸ Group flat list by).
     case bySigner = "By signer"
@@ -154,8 +156,8 @@ enum Grouping: String, CaseIterable, Identifiable {
     case bySandbox = "By sandbox"
     case byArch = "By architecture"
     var id: String { rawValue }
-    var label: String { self == .coalition ? "Resource coalition" : rawValue }
-    static let trees: [Grouping] = [.smart, .parent, .responsible, .coalition, .jetsam, .flat]
+    var label: String { self == .responsible ? "Responsible / parent tree" : rawValue }
+    static let trees: [Grouping] = [.smart, .responsible, .flat]
     static let pivots: [Grouping] = [.bySigner, .byUser, .byDomain, .bySandbox, .byArch]
     /// The pivot's field name, for the submenu ("Signer").
     var pivotTitle: String {
@@ -238,7 +240,9 @@ final class Store {
     var jobs: [LaunchdJob] = []
     /// Running jobs of the system and user domains; they only label processes.
     @ObservationIgnored var otherJobs: [LaunchdJob] = []
-    var btm: [BTMItem] = []
+    var btm: [BTMItem] = [] { didSet { btmOwners = BTM.ownerIndex(btm); dataGen &+= 1 } }
+    /// BTM.ownerIndex of btm, for the Smart tree.
+    @ObservationIgnored private(set) var btmOwners: [String: [String]] = [:]
     var btmLoading = false
     /// Set once a load finished and produced a record list (possibly empty), so "nothing loaded yet",
     /// "loaded, no records" and "failed" (btmError) look different.
@@ -268,6 +272,10 @@ final class Store {
     /// argv doesn't change while the same code runs. nil: tried and couldn't be read.
     @ObservationIgnored private var argvCache: [String: String?] = [:]
     @ObservationIgnored private var readingArgv = false
+    /// `parent bundle identifier` of each third-party launchd job's process, by process key (nil: the job has
+    /// none). ~6 ms per job and ~25 such jobs, so read once per process in the background.
+    @ObservationIgnored private var jobParentCache: [String: String?] = [:]
+    @ObservationIgnored private var readingJobParents = false
     /// launchd pid domains read so far, by host key: the keys of the services running in it (nil: couldn't
     /// be read, e.g. a root process without the helper). See fillPidDomains.
     @ObservationIgnored private var domainReads: [String: [String]?] = [:]
@@ -359,6 +367,8 @@ final class Store {
                         self.domainReads = self.domainReads.filter { $0.value != nil }
                     }
                     self.helperState = s
+                    // As root, sfltool doesn't prompt, so Background Items can be read up front instead of on request.
+                    if s.isRunning, !self.btmLoaded { self.loadBTM() }
                 }
             }
         }
@@ -422,6 +432,7 @@ final class Store {
         let prev = prevSamples
         let cache = signCache
         let argv = argvCache
+        let jobParents = jobParentCache
         let hosts = domainHostOf
         let extras = extraReads
         let useHelper = helperState.isRunning
@@ -435,7 +446,7 @@ final class Store {
             // Ask the helper first, but collect local data while it answers; the snapshot waits for the
             // helper only after that, and never longer than helperBudget (it normally takes ~10 ms).
             let priv = useHelper ? Pending { HelperClient.shared.allMetrics(extras: extras, timeout: Self.helperBudget) } : nil
-            var marked = Self.snapshot(prev: prev, signCache: cache, argvCache: argv, domainHosts: hosts, extras: extras, priv: { priv?.wait() },
+            var marked = Self.snapshot(prev: prev, signCache: cache, argvCache: argv, jobParents: jobParents, domainHosts: hosts, extras: extras, priv: { priv?.wait() },
                                        ls: ls, jobs: jobs, otherJobs: otherJobs)
             Self.markLeftBehind(&marked.procs, lsApps: marked.ls)
             let snap = marked
@@ -463,6 +474,7 @@ final class Store {
                 self.fillSignatures()
                 self.fillCommandLines()
                 self.fillPidDomains()
+                self.fillJobParents()
             }
         }
     }
@@ -593,6 +605,38 @@ final class Store {
         }
     }
 
+    /// Reads launchd's `parent bundle identifier` for each third-party job process not read yet. Apple's jobs
+    /// and LaunchServices app launches (`application.…`) are skipped: none has one.
+    private func fillJobParents() {
+        guard !readingJobParents else { return }
+        let todo = procs.values.compactMap { p -> (pid_t, String, String, String)? in
+            guard let l = p.launchdLabel, let d = p.launchdDomain, jobParentCache[p.key] == nil,
+                  !l.hasPrefix("com.apple."), !l.hasPrefix("application.") else { return nil }
+            return (p.pid, p.key, l, d)
+        }
+        let live = Set(procs.values.map(\.key))
+        jobParentCache = jobParentCache.filter { live.contains($0.key) }
+        guard !todo.isEmpty else { return }
+        readingJobParents = true
+        Task.detached(priority: .utility) {
+            var found: [String: String?] = [:]
+            for (_, key, label, domain) in todo {
+                found[key] = Launchd.parentBundle(label, domain: domain)
+            }
+            let result = found
+            await MainActor.run {
+                self.jobParentCache.merge(result) { _, b in b }
+                var procs = self.procs
+                var changed = false
+                for (pid, p) in procs {
+                    if let b = result[p.key], p.launchdParentBundle != b { procs[pid]!.launchdParentBundle = b; changed = true }
+                }
+                if changed { self.procs = procs }
+                self.readingJobParents = false
+            }
+        }
+    }
+
     /// Sets domainOwner on each process from child key → host key, when the host is still the same process.
     nonisolated static func applyDomainOwners(_ procs: inout [pid_t: ProcInfo], _ hostOf: [String: String]) {
         for (pid, p) in procs {
@@ -661,6 +705,7 @@ final class Store {
     /// `priv`: helper metrics, asked for only after the local pass so a slow helper delays just the merge.
     nonisolated static func snapshot(prev: [String: Sample], signCache: [String: SignInfo],
                                      argvCache: [String: String?] = [:],
+                                     jobParents: [String: String?] = [:],
                                      domainHosts: [String: String] = [:],
                                      extras: ExtraReads = [],
                                      priv privSource: () -> [Int32: PrivMetrics]? = { nil },
@@ -700,6 +745,7 @@ final class Store {
             if let c = Native.coalition(k.pid) { p.coalition = c.0; p.jetsamCoalition = c.1 }
             _ = p.fill(from: .read(k.pid))
             if let j = labelByPid[k.pid] { p.launchdLabel = j.label; p.launchdDomain = j.domain }
+            if let b = jobParents[p.key] { p.launchdParentBundle = b }
             if let a = lsByPid[k.pid] { p.lsAppName = a.name; p.lsTags = a.stateTags; p.lsType = a.type }
             if k.tty != -1 { p.tty = k.tty }   // NODEV: no controlling terminal
             if let path = p.path { p.extensionPoint = ExtensionInfo.point(forExecutable: path) }
@@ -827,26 +873,41 @@ final class Store {
         var roots: [ProcNode]
         switch grouping {
         case .smart:
-            roots = SmartTree.build(.init(procs: procs, lsApps: lsApps))
+            roots = SmartTree.build(.init(procs: procs, lsApps: lsApps, btmOwners: btmOwners))
         case .flat:
             roots = all.map { ProcNode(id: Int($0.pid), proc: $0, title: $0.name) }
-        case .parent:
-            // launchd (1) and kernel_task (0) parent nearly everything; their children are the useful top level.
-            roots = tree(all) { p in p.ppid > 1 && p.ppid != p.pid && self.procs[p.ppid] != nil ? Int(p.ppid) : nil }
         case .responsible:
             let lsByPid = Dictionary(lsApps.compactMap { a in a.pid.map { ($0, a) } }, uniquingKeysWith: { a, _ in a })
             var ghostIDs: [pid_t: Int] = [:]
             var leftGroups: [Int: String] = [:]   // Left Behind group id -> title
-            roots = tree(all) { p in
+            var up: [pid_t: Int] = [:]
+            for p in all {
                 if let g = p.leftBehindGroup, let t = p.leftBehindText {
                     leftGroups[g] = t
-                    return g
+                    up[p.pid] = g
+                } else if let r = p.responsible, r != p.pid {
+                    if self.procs[r] != nil { up[p.pid] = Int(r) } else {
+                        ghostIDs[r] = -Int(r) - 1
+                        up[p.pid] = -Int(r) - 1
+                    }
+                } else if p.ppid > 1, p.ppid != p.pid, self.procs[p.ppid] != nil {
+                    // No responsible process of its own (or it's its own): its parent, as the Parent tree had
+                    // it. launchd (1) and kernel_task (0) parent nearly everything, so their children stay roots.
+                    up[p.pid] = Int(p.ppid)
                 }
-                guard let r = p.responsible, r != p.pid else { return nil }
-                if self.procs[r] != nil { return Int(r) }
-                ghostIDs[r] = -Int(r) - 1
-                return -Int(r) - 1
             }
+            // Mixing the two links can close a loop (A responsible for B, B the parent of A), and a process
+            // on a loop would never be reached from a root. Cut each loop at the process where it's found.
+            for p in all {
+                var seen: Set<pid_t> = [p.pid]
+                var cur = p.pid
+                while let u = up[cur], u > 0 {
+                    let next = pid_t(u)
+                    if !seen.insert(next).inserted { up[cur] = nil; break }
+                    cur = next
+                }
+            }
+            roots = tree(all) { up[$0.pid] }
             // tree() put orphans-of-ghosts under synthetic ids; materialize those groups.
             var extra: [ProcNode] = []
             let byParent = Dictionary(grouping: roots.filter { $0.id < 0 }, by: \.id)
@@ -863,38 +924,6 @@ final class Store {
                                       subtitle: "app is gone; these outlived it", isGhost: true, children: kids))
             }
             roots += extra
-        case .coalition:
-            let groups = Dictionary(grouping: all) { $0.coalition ?? 0 }
-            let lsByCoal = Dictionary(lsApps.compactMap { a in a.coalition.map { ($0, a) } }, uniquingKeysWith: { a, _ in a })
-            roots = groups.map { coal, members in
-                let leader = members.first { $0.responsible == $0.pid } ?? members.min { $0.pid < $1.pid }!
-                let title = (lsByCoal[coal] ?? members.lazy.compactMap { $0.jetsamCoalition.flatMap { lsByCoal[$0] } }.first)?.name ?? leader.name
-                return ProcNode(id: Self.groupID(coal, sub: false), proc: nil,
-                                title: "\(title)  [coalition \(coal)]", subtitle: "\(members.count) processes",
-                                children: members.map { ProcNode(id: Int($0.pid), proc: $0, title: $0.name) })
-            }
-        case .jetsam:
-            // One jetsam coalition can hold several resource coalitions (a host plus each of its app
-            // extensions); the reverse doesn't occur. Nest resource coalitions when there's more than one.
-            let groups = Dictionary(grouping: all) { $0.jetsamCoalition ?? 0 }
-            let lsByCoal = Dictionary(lsApps.compactMap { a in a.coalition.map { ($0, a) } }, uniquingKeysWith: { a, _ in a })
-            func leader(_ ps: [ProcInfo]) -> ProcInfo { ps.first { $0.responsible == $0.pid } ?? ps.min { $0.pid < $1.pid }! }
-            func leaves(_ ps: [ProcInfo]) -> [ProcNode] { ps.map { ProcNode(id: Int($0.pid), proc: $0, title: $0.name) } }
-            roots = groups.map { jet, members in
-                let byRes = Dictionary(grouping: members) { $0.coalition ?? 0 }
-                // The host's resource coalition is created before its extensions', so the lowest id leads.
-                let host = byRes.keys.min()!
-                let title = lsByCoal[jet]?.name ?? leader(byRes[host]!).name
-                let children: [ProcNode] = byRes.count == 1 ? leaves(members) : byRes.map { res, ps in
-                    ProcNode(id: Self.groupID(res, sub: true), proc: nil,
-                             title: "\(leader(ps).name)  [resource \(res)]", subtitle: "\(ps.count) processes",
-                             children: leaves(ps))
-                }
-                let sub = byRes.count == 1 ? "\(members.count) processes"
-                                           : "\(members.count) processes in \(byRes.count) resource coalitions"
-                return ProcNode(id: Self.groupID(jet, sub: false), proc: nil,
-                                title: "\(title)  [jetsam \(jet)]", subtitle: sub, children: children)
-            }
         case .bySigner, .byUser, .byDomain, .bySandbox, .byArch:
             roots = TreeExtras.pivot(grouping, all)
         }
@@ -912,10 +941,6 @@ final class Store {
         m.totalCount = (n.proc == nil ? 0 : 1) + (m.children?.reduce(0) { $0 + $1.totalCount } ?? 0)
         return m
     }
-
-    /// Row id for a synthetic coalition group. Below every ghost id (-pid - 1); nested resource
-    /// subgroups get odd offsets so they can't collide with a top-level group of the same id.
-    private static func groupID(_ coal: UInt64, sub: Bool) -> Int { -10_000_000 - 2 * Int(coal) - (sub ? 1 : 0) }
 
     /// Build a forest using `parentOf`; unknown parents (negative ids) become temporary placeholder roots.
     private func tree(_ all: [ProcInfo], parentOf: (ProcInfo) -> Int?) -> [ProcNode] {

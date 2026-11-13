@@ -17,6 +17,7 @@ enum IconCache {
 struct ProcessesView: View {
     @Environment(Store.self) var store
     @Environment(\.openWindow) private var openWindow
+    /// A value saved by an older version (a grouping since removed) reads as Smart.
     @AppStorage("grouping") private var grouping: Grouping = .smart
     @AppStorage(InspectorPaneKey.name) private var showPane = false
     @AppStorage(ColumnPrefs.key) private var shownColumns = ColumnPrefs.defaultShown
@@ -24,13 +25,23 @@ struct ProcessesView: View {
     @AppStorage("processes.chips") private var savedChips = ""
     private var chips: Set<FilterChip> { FilterChip.parse(savedChips) }
     @State private var selection: ProcNode.ID?
-    @AppStorage("processes.sort") private var savedSort = "pid,asc"
-    private var sort: Binding<ColumnSort> {
+    /// The column sort, or "" for none. As in Process Hacker: with no column sort the list shows the chosen
+    /// grouping in its natural order; sorting by a column shows the flat list sorted by it. Clicking a header
+    /// cycles descending → ascending → none. (A new key: the old one defaulted to "pid,asc", which would now
+    /// mean a flat list.)
+    @AppStorage("processes.columnSort") private var savedSort = ""
+    private var sort: Binding<ColumnSort?> {
         Binding(get: {
             let parts = savedSort.split(separator: ",")
-            guard parts.count == 2, Column.all.contains(where: { $0.id == parts[0] }) else { return .pid }
+            guard parts.count == 2, Column.all.contains(where: { $0.id == parts[0] }) else { return nil }
             return ColumnSort(id: String(parts[0]), ascending: parts[1] == "asc")
-        }, set: { savedSort = "\($0.id),\($0.ascending ? "asc" : "desc")" })
+        }, set: { savedSort = $0.map { "\($0.id),\($0.ascending ? "asc" : "desc")" } ?? "" })
+    }
+    /// What the list shows: the chosen grouping, or the flat list while a column sort is on.
+    private var shownGrouping: Grouping { sort.wrappedValue == nil ? grouping : .flat }
+    /// Picking a grouping clears the column sort, so the grouping is what you see.
+    private var groupingChoice: Binding<Grouping> {
+        Binding(get: { shownGrouping }, set: { grouping = $0; savedSort = "" })
     }
     @State private var pendingSignal: (ProcInfo, Int32, String)?
     @State private var signalError: String?
@@ -54,19 +65,19 @@ struct ProcessesView: View {
           VStack(spacing: 0) {
             FilterChipBar(saved: $savedChips)
             Divider()
-            ProcessOutline(store: store, grouping: grouping, filter: search, chips: chips,
+            ProcessOutline(store: store, grouping: shownGrouping, filter: search, chips: chips,
                            selection: $selection, sort: sort, shownColumns: ColumnPrefs.parse(shownColumns),
                            onOpen: { p in inspect(p) },
                            onSignal: { p, sig, label in
                                // Resume is harmless: send it at once. The rest are confirmed first.
                                if sig == SIGCONT { send(sig, label, to: p) } else { pendingSignal = (p, sig, label) }
                            })
-                // A grouping switch re-parents nearly every row; start from a fresh outline (all expanded).
-                .id(grouping)
+                // Tree ↔ flat re-parents nearly every row; start from a fresh outline (all expanded).
+                .id(shownGrouping)
           }
         } bottom: {
-            SelectedProcessPane(selection: $selection, nav: paneNav, grouping: grouping, filter: search, chips: chips,
-                                sort: sort.wrappedValue,
+            SelectedProcessPane(selection: $selection, nav: paneNav, grouping: shownGrouping, filter: search, chips: chips,
+                                sort: sort.wrappedValue ?? .pid,
                                 columns: ColumnPrefs.parse(shownColumns))
         }
         .focusedSceneValue(\.inspectProcess, hasProcessSelected ? { inspectSelected() } : nil)
@@ -78,21 +89,25 @@ struct ProcessesView: View {
                     .disabled(!hasProcessSelected)
                 Toggle(isOn: $showPane) { Label("Inspector Pane", systemImage: "rectangle.bottomhalf.inset.filled") }
                     .help(showPane ? "Hide the inspector pane (⌥⌘I)" : "Show the selected process in a pane below the list (⌥⌘I)")
+                // A pull-down menu with an inline picker, not a pop-up picker: the pop-up wrote the value it
+                // was showing back through the binding when a column sort switched the list to flat,
+                // which saved Flat as the grouping.
                 Menu {
-                    Picker("Group", selection: $grouping) {
+                    Picker("Group", selection: groupingChoice) {
                         ForEach(Grouping.trees) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.inline)
                     Menu("Group Flat List By") {
-                        Picker("Group flat list by", selection: $grouping) {
+                        Picker("Group flat list by", selection: groupingChoice) {
                             ForEach(Grouping.pivots) { Text($0.pivotTitle).tag($0) }
                         }
                         .pickerStyle(.inline).labelsHidden()
                     }
                 } label: {
-                    Label(grouping.label, systemImage: "list.bullet.indent").labelStyle(.titleAndIcon)
+                    Label(shownGrouping.label, systemImage: "list.bullet.indent").labelStyle(.titleAndIcon)
                 }
                 .fixedSize()
+                .help("Smart tree, flat list, or the flat list grouped by one field. Clicking a column header shows the flat list sorted by it; a third click comes back here.")
                 Button { store.paused.toggle() } label: {
                     Label(store.paused ? "Resume" : "Pause", systemImage: store.paused ? "play.fill" : "pause.fill")
                 }

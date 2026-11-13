@@ -313,12 +313,6 @@ enum SelfTest {
                 let other = roots.first { $0.category == .other }?.children ?? []
                 if !other.isEmpty { print("  other: \(other.prefix(8).map { "\($0.title)(\($0.proc?.path ?? "-"))" })") }
             }
-            if g == .jetsam {
-                for r in roots.filter({ ($0.children ?? []).contains { $0.proc == nil } })
-                    .sorted(by: { ($0.children?.count ?? 0) > ($1.children?.count ?? 0) }).prefix(4) {
-                    print("  \(r.title): \(r.subtitle); first: \(r.children!.filter { $0.proc == nil }.map(\.title).sorted().prefix(2))")
-                }
-            }
         }
         // Group-row values with every column shown: one line per category, and the first app's row.
         let all = Set(Column.all.map(\.id))

@@ -53,6 +53,15 @@ struct ProcXRayApp: App {
             Bench.extras(root: CommandLine.arguments.contains("--root"))
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--btm-rule"), i + 1 < CommandLine.arguments.count {
+            Bench.btmRule(CommandLine.arguments[i + 1])
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--btm-dump") {
+            // Raw `sfltool dumpbtm` as root via the helper, for checking what the records hold.
+            print(HelperClient.shared.run(.btmDump) ?? "helper did not answer")
+            exit(0)
+        }
         if CommandLine.arguments.contains("--tree-stats") {
             Bench.treeStats()
             exit(0)

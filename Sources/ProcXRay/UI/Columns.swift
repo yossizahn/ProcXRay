@@ -494,7 +494,7 @@ extension Store {
     /// "App · XPC service", "Extension · Widgets": the Smart tree's category of the process's unit, then its role.
     func kind(of p: ProcInfo) -> String? {
         if kindCache?.gen != dataGen {
-            let k = SmartTree.kinds(.init(procs: procs, lsApps: lsApps))
+            let k = SmartTree.kinds(.init(procs: procs, lsApps: lsApps, btmOwners: btmOwners))
             kindCache = (dataGen, k.kinds, k.roots)
         }
         return kindCache?.map[p.pid]

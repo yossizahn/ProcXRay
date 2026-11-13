@@ -6,7 +6,7 @@ A Process Hacker–style process explorer for macOS. It shows the attribution da
 
 ## Highlights
 
-- **Smart process tree.** Every process is sorted into Apps, Background apps, Extensions, Third-party services, System interface and System services, with each app's helpers, XPC services and terminal sessions under it. You can switch to a parent, responsible or coalition tree, or to a flat list.
+- **Smart process tree.** Every process is sorted into Apps, Background apps, Extensions, Third-party services, System interface and System services, with each app's helpers, XPC services and terminal sessions under it. You can switch to a responsible/parent tree (each process under its responsible process, or under its parent when it has none), a flat list, or a flat list grouped by signer, user, launchd domain, sandbox or architecture, or click a column header to see every process in one flat list sorted by it (descending, then ascending, then back to the tree), as in Process Hacker.
 - **Rich columns.** About 50 columns cover CPU, memory, disk, energy, signing and launchd. Filter chips catch the usual suspects: unsigned, root, not sandboxed, Rosetta and recently started processes.
 - **Inspector.** Six tabs (Overview, Origin, Trust, Resources, Connections and Activity) answer what a process is, who launched it, who signed it, what it's using and what it's talking to. Every process it mentions is a clickable link.
 - **Left Behind.** Finds processes that keep an app "running in the background" after you quit it.

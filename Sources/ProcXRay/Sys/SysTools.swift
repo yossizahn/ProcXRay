@@ -131,6 +131,17 @@ struct BTMItem: Identifiable, Hashable, Sendable {
     var lastUse: String { fields["Last Use"] ?? "" }
     var enabled: Bool { disposition.contains("[enabled") }
     var allowed: Bool { disposition.contains(" allowed") || disposition.contains("[allowed") }
+    /// "AlDente" from "Parent Identifier: 2.com.foo.app" is not a bundle id; "2.com.foo.app" is the app record's
+    /// identifier (type number, then the bundle id).
+    var parentBundleID: String? {
+        guard let dot = parent.firstIndex(of: "."), parent[..<dot].allSatisfy(\.isNumber), !parent[..<dot].isEmpty
+        else { return nil }
+        return String(parent[parent.index(after: dot)...])
+    }
+    /// `AssociatedBundleIdentifiers` from the job's plist: "[ com.a com.b ]".
+    var assocBundleIDs: [String] {
+        (fields["Assoc. Bundle IDs"] ?? "").split(whereSeparator: { $0 == " " || $0 == "[" || $0 == "]" }).map(String.init)
+    }
 }
 
 enum BTM {
@@ -161,6 +172,27 @@ enum BTM {
             return ([], out.isEmpty ? "sfltool dumpbtm returned no output." : out)
         }
         return (items, nil)
+    }
+
+    /// The apps each launchd item belongs to, by "path:<executable>" and "label:<job label>": the item's parent
+    /// app record, then the bundle ids its plist associates. Only daemons, agents and login items with an
+    /// absolute executable path or a label (SMAppService items have relative paths; launchd records those).
+    static func ownerIndex(_ items: [BTMItem]) -> [String: [String]] {
+        var out: [String: [String]] = [:]
+        for i in items {
+            let t = i.type
+            guard t.hasPrefix("daemon") || t.hasPrefix("agent") || t.hasPrefix("legacy daemon")
+                    || t.hasPrefix("legacy agent") || t.hasPrefix("login item") else { continue }
+            var ids: [String] = []
+            for id in [i.parentBundleID].compactMap({ $0 }) + i.assocBundleIDs where !ids.contains(id) { ids.append(id) }
+            guard !ids.isEmpty else { continue }
+            if i.executable.hasPrefix("/") { out["path:" + i.executable, default: []] += ids }
+            // "16.com.foo.helper": type number, then the label.
+            if let dot = i.identifier.firstIndex(of: "."), i.identifier[..<dot].allSatisfy(\.isNumber) {
+                out["label:" + i.identifier[i.identifier.index(after: dot)...], default: []] += ids
+            }
+        }
+        return out
     }
 
     static func parse(_ text: String) -> [BTMItem] {
@@ -244,6 +276,18 @@ enum Launchd {
                 guard p.count == 3 else { return nil }
                 return LaunchdJob(label: p[2], pid: pid_t(p[0]), lastExit: p[1])
             }
+    }
+
+    /// launchd's `parent bundle identifier` for a job: set only for jobs an app registered through
+    /// SMAppService. `domain` is LaunchdJob.domain ("gui", "system" or "user").
+    static func parentBundle(_ label: String, domain: String) -> String? {
+        let target = domain == "system" ? "system/\(label)" : "\(domain)/\(getuid())/\(label)"
+        let out = Shell.run("/bin/launchctl", ["print", target], mergeStderr: false, timeout: 10)
+        for line in out.split(separator: "\n") where line.hasPrefix("\tparent bundle identifier = ") {
+            let v = line.dropFirst("\tparent bundle identifier = ".count).trimmingCharacters(in: .whitespaces)
+            return v.isEmpty ? nil : v
+        }
+        return nil
     }
 
     static func printJob(_ label: String) -> String {

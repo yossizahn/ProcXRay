@@ -15,7 +15,8 @@ struct ProcessOutline: NSViewRepresentable {
     /// The search text and chips together: what decides whether groups open to show matches.
     var filterKey: String { chips.isEmpty ? filter : filter + "\u{1}" + FilterChip.encode(chips) }
     @Binding var selection: ProcNode.ID?
-    @Binding var sort: ColumnSort
+    /// nil: no column sort, the chosen grouping in its natural order (by pid). See ProcessesView.savedSort.
+    @Binding var sort: ColumnSort?
     /// Column ids shown (ColumnPrefs); shared by every window and View ▸ Columns.
     var shownColumns: Set<String> = ColumnPrefs.parse(ColumnPrefs.defaultShown)
     let onOpen: (ProcInfo) -> Void
@@ -149,10 +150,10 @@ struct ProcessOutline: NSViewRepresentable {
                 if !hide, !first { place(col, in: outline) }
             }
             showNextTo = nil
-            // Sorting by a column nobody can see: back to the default (PID).
+            // Sorting by a column nobody can see: back to no sort (the chosen grouping).
             // Next turn: this runs inside a SwiftUI update, which mustn't change state.
-            if parent.sort.id != "name", !shown.contains(parent.sort.id) {
-                DispatchQueue.main.async { [weak self] in self?.parent.sort = .pid }
+            if let s = parent.sort, s.id != "name", !shown.contains(s.id) {
+                DispatchQueue.main.async { [weak self] in self?.parent.sort = nil }
             }
         }
 
@@ -282,7 +283,8 @@ struct ProcessOutline: NSViewRepresentable {
         private var seeded: Set<Int> = []
         private var appliedFilter = ""
         private var updating = false
-        private var pushedSort: ColumnSort?
+        /// The sort last shown in the header; .none until the first push.
+        private var pushedSort: ColumnSort?? = .none
 
         private var shownRoots: [Item] = []
         private var loaded = false
@@ -293,7 +295,7 @@ struct ProcessOutline: NSViewRepresentable {
             defer { updating = false }
             syncSortIndicators(outline)
             syncShown(outline)
-            let nodes = parent.store.nodes(grouping: parent.grouping, filter: parent.filter, chips: parent.chips, sort: parent.sort,
+            let nodes = parent.store.nodes(grouping: parent.grouping, filter: parent.filter, chips: parent.chips, sort: parent.sort ?? .pid,
                                            columns: parent.shownColumns)
             procs = parent.store.procs
             if parent.store.nodesVersion != appliedVersion {
@@ -470,9 +472,9 @@ struct ProcessOutline: NSViewRepresentable {
         }
 
         private func syncSortIndicators(_ outline: NSOutlineView) {
-            guard parent.sort != pushedSort else { return }
-            pushedSort = parent.sort
-            outline.sortDescriptors = [NSSortDescriptor(key: parent.sort.id, ascending: parent.sort.ascending)]
+            if let pushed = pushedSort, pushed == parent.sort { return }
+            pushedSort = .some(parent.sort)
+            outline.sortDescriptors = parent.sort.map { [NSSortDescriptor(key: $0.id, ascending: $0.ascending)] } ?? []
         }
 
         // MARK: Data source
@@ -490,8 +492,13 @@ struct ProcessOutline: NSViewRepresentable {
         func outlineView(_ o: NSOutlineView, sortDescriptorsDidChange old: [NSSortDescriptor]) {
             guard !updating else { return }
             guard let d = o.sortDescriptors.first, let key = d.key, Column.byID[key] != nil else { return }
-            let new = ColumnSort(id: key, ascending: d.ascending)
-            pushedSort = new
+            // Process Hacker's cycle, whatever direction NSTableView picked: a new column sorts descending,
+            // then ascending, then no sort (the chosen grouping again).
+            let cur = parent.sort
+            let new: ColumnSort? = cur?.id != key ? ColumnSort(id: key, ascending: false)
+                : cur!.ascending ? nil : ColumnSort(id: key, ascending: true)
+            // The header shows NSTableView's choice, not ours: push ours on the next apply.
+            pushedSort = .none
             parent.sort = new
         }
 

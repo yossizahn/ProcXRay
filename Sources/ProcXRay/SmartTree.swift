@@ -104,12 +104,28 @@ enum SmartTree {
 
     static func isExtension(_ p: ProcInfo) -> Bool { p.path?.contains(".appex/") == true }
 
+    /// The .app bundles a path lies inside, innermost first.
+    static func enclosingApps(_ path: String) -> [String] {
+        var out: [String] = []
+        var rest = path[...]
+        while let r = rest.range(of: ".app/", options: .backwards) {
+            out.append(String(path[..<r.lowerBound]) + ".app")
+            rest = path[..<r.lowerBound]
+        }
+        return out
+    }
+
     static func category(ofRoot p: ProcInfo) -> ProcCategory {
         if p.leftBehindGroup != nil { return .leftBehind }
         if p.lsType == "Foreground" { return .apps }
         // Before the LaunchServices background types: Finder Sync and Quick Look extensions register as
         // BackgroundOnly, and would otherwise fill "Background apps" with things that aren't apps.
         if isExtension(p) { return .extensions }
+        // A job in launchd's system domain runs outside every login session, so it can't show any UI,
+        // whatever LaunchServices type its bundle registered as (Foxit's update service registers as UIElement).
+        if p.launchdDomain == "system", let l = p.launchdLabel, !l.hasPrefix("application.") {
+            return isApple(p) ? .systemServices : .thirdPartyServices
+        }
         if p.lsType == "UIElement" || p.lsType == "BackgroundOnly" { return isApple(p) ? .systemInterface : .backgroundApps }
         let apple = isApple(p)
         if let l = p.launchdLabel, !apple, !l.hasPrefix("application.") { return .thirdPartyServices }
@@ -119,7 +135,7 @@ enum SmartTree {
     /// Sub-group of a unit inside its category, or nil for none.
     static func subgroup(ofRoot p: ProcInfo, in c: ProcCategory) -> String? {
         switch c {
-        case .backgroundApps: return p.lsType == "UIElement" ? "Menu bar" : "Background only"
+        case .backgroundApps: return p.lsType == "UIElement" ? "No Dock icon" : "Background only"
         case .extensions: return p.extensionPoint.map(ExtensionInfo.title) ?? "Unknown extension point"
         case .thirdPartyServices: return p.launchdDomain == "system" || p.uid == 0 ? "Daemons" : "Agents"
         default: return nil
@@ -225,21 +241,50 @@ enum SmartTree {
     struct Input {
         var procs: [pid_t: ProcInfo]
         var lsApps: [LSApp]
+        /// BTM.ownerIndex of the Background Items records; empty until they're loaded.
+        var btmOwners: [String: [String]] = [:]
     }
 
     /// Pass 1: the unit root of every process.
     static func unitRoots(_ input: Input) -> [pid_t: pid_t] {
         let procs = input.procs
         // Owners, by the proposal's rules in order.
-        var appByBundle: [String: pid_t] = [:]
+        var appByBundle: [String: pid_t] = [:], appByID: [String: pid_t] = [:]
         for a in input.lsApps where !a.exited {
-            if let pid = a.pid, let b = a.bundlePath, procs[pid] != nil { appByBundle[b] = pid }
+            guard let pid = a.pid, procs[pid] != nil else { continue }
+            if let b = a.bundlePath { appByBundle[b] = pid }
+            // The main app wins over a helper app sharing its bundle id (none should, but don't nest by chance).
+            if let id = a.bundleID, appByID[id] == nil || a.type == "Foreground" { appByID[id] = pid }
         }
         var owner: [pid_t: pid_t] = [:]
         for p in procs.values {
             if p.leftBehindGroup != nil { continue }                                  // 1: Left Behind group
             if let r = p.responsible, r != p.pid, procs[r] != nil { owner[p.pid] = r; continue }  // 2
             if isExtension(p), let b = p.bundlePath, let app = appByBundle[b], app != p.pid {     // 3
+                owner[p.pid] = app; continue
+            }
+            // 3b: the app that registered its launchd job through SMAppService, as launchd records it
+            // (`parent bundle identifier`). This says whose job it is, not who made launchd start it: an
+            // on-demand job starts on any client's message, and launchd doesn't record the sender.
+            if let id = p.launchdParentBundle, let app = appByID[id], app != p.pid {
+                owner[p.pid] = app; continue
+            }
+            // 3c: the app that installed it, as Background Items records it, for launchd items installed the old
+            // way (a plist in /Library/LaunchDaemons, a tool in /Library/PrivilegedHelperTools), which launchd
+            // links to no app: AlDente's helper. Matched on executable path, else job label. Children of
+            // launchd only, like 3d: the record says what launchd runs, not what other processes spawn.
+            if p.ppid == 1,
+               let ids = p.path.flatMap({ input.btmOwners["path:" + $0] }) ?? p.launchdLabel.flatMap({ input.btmOwners["label:" + $0] }),
+               let app = ids.lazy.compactMap({ appByID[$0] }).first, app != p.pid {
+                owner[p.pid] = app; continue
+            }
+            // 3d: failing that, a child of launchd that isn't a LaunchServices app of its own, run from inside
+            // a running app's bundle (helpers and updaters launchd starts for an app that registered no job
+            // with SMAppService). Only children of launchd: a process another one spawned directly follows its
+            // parent (rule 5), e.g. 1Password's native-messaging host under the browser that started it.
+            // Innermost bundle first, so a helper app's daemon goes to the helper app when that's running.
+            if p.ppid == 1, p.lsType == nil, !isExtension(p), let path = p.path,
+               let app = enclosingApps(path).lazy.compactMap({ appByBundle[$0] }).first, app != p.pid {
                 owner[p.pid] = app; continue
             }
             // 4: the host whose launchd pid domain it runs in, except for an extension: its host is a system

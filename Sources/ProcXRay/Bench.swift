@@ -242,6 +242,32 @@ enum Bench {
         }
     }
 
+    /// `ProcXRay --btm-rule <dumpbtm output file>`: what the Smart tree's rule 3c (Background Items owner)
+    /// changes, given a saved `sfltool dumpbtm` (see --btm-dump).
+    static func btmRule(_ file: String) {
+        guard let text = try? String(contentsOfFile: file, encoding: .utf8) else { print("can't read \(file)"); return }
+        let items = BTM.parse(text)
+        let index = BTM.ownerIndex(items)
+        let procs = Store.snapshot(prev: [:], signCache: [:]).procs
+        let ls = LSAppInfo.list()
+        let before = SmartTree.unitRoots(.init(procs: procs, lsApps: ls))
+        let after = SmartTree.unitRoots(.init(procs: procs, lsApps: ls, btmOwners: index))
+        let matched = procs.values.filter { p in
+            p.path.flatMap { index["path:" + $0] } != nil || p.launchdLabel.flatMap { index["label:" + $0] } != nil
+        }
+        print("\(items.count) records, \(index.count) owner keys; \(matched.count) running processes have one")
+        let moved = procs.keys.filter { before[$0] != after[$0] }
+        print("\(moved.count) processes moved by rule 3c")
+        for pid in moved {
+            let p = procs[pid]!
+            print("  \(p.name) (\(pid)): unit of \(before[pid].flatMap { procs[$0]?.name } ?? "?") → \(after[pid].flatMap { procs[$0]?.name } ?? "?")")
+        }
+        for p in matched where !moved.contains(p.pid) {
+            let ids = p.path.flatMap { index["path:" + $0] } ?? p.launchdLabel.flatMap { index["label:" + $0] } ?? []
+            print("  unchanged: \(p.name) (\(p.pid)) owners \(ids)")
+        }
+    }
+
     /// `ProcXRay --shell-test`: checks Shell.exec's guarantees (output, status, stderr, limits, cancel).
     static func shellTest() -> Bool {
         var ok = true
@@ -303,7 +329,7 @@ enum Bench {
                 (n.title.contains(" ×") && n.proc == nil ? [(n.title, n.children?.count ?? 0)] : []) + collapsed(n.children ?? [])
             }
         }
-        for g in Grouping.trees + Grouping.pivots {
+        for g in Grouping.allCases {
             let ns = store.nodes(grouping: g, filter: "", sort: .pid)
             let c = collapsed(ns)
             let hidden = c.reduce(0) { $0 + $1.1 }

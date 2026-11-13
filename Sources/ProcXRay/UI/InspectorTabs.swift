@@ -674,8 +674,20 @@ struct OriginTab: View {
     @ViewBuilder private func launchedBy(_ p: ProcInfo) -> some View {
         Card(title: "Launched by", systemImage: "bolt.horizontal") {
             VStack(alignment: .leading, spacing: 8) {
+                // Who actually spawned it. Registering with LaunchServices (below) says nothing about this:
+                // every app checks in on startup, however it was started.
+                if p.ppid > 1, let parent = store.procs[p.ppid] {
+                    HStack(spacing: 6) {
+                        Text("Started directly by")
+                        ProcessChip(proc: parent)
+                        Text("(its parent process)").foregroundStyle(.secondary)
+                    }
+                } else if p.ppid == 1 {
+                    Text("Parent is launchd: launchd started it (a launchd job or an app launch), or the process that started it has exited.")
+                        .foregroundStyle(.secondary)
+                }
                 if let ls = store.lsApps.first(where: { $0.pid == p.pid }) {
-                    Text("LaunchServices: registered as the app \u{201C}\(ls.name)\u{201D} (\(ls.type ?? "?")).")
+                    Text("Registered with LaunchServices as the app \u{201C}\(ls.name)\u{201D} (\(ls.type ?? "?")).")
                     Collapsible(title: "LaunchServices record", startsOpen: false) { LSRecordContent(raw: ls.raw, filter: "") }
                 }
                 if let e = p.extensionPoint {
@@ -698,7 +710,18 @@ struct OriginTab: View {
                         ("Type", .text(top["type"] ?? "—")),
                         ("Properties", .text(top["properties"] ?? "—")),
                         ("Runs / last exit", .text("\(top["runs"] ?? "—") / \(top["last exit code"] ?? "—")")),
+                        ("Started because", .text(top["immediate reason"].map(Self.reasonText) ?? "—")),
                     ])
+                    // Set by launchd only for jobs an app registered through SMAppService.
+                    if let bid = top["parent bundle identifier"], !bid.isEmpty {
+                        HStack(spacing: 6) {
+                            Text("Registered by the app")
+                            if let a = store.lsApps.first(where: { $0.bundleID == bid && $0.pid != nil }),
+                               let host = store.procs[a.pid!] { ProcessChip(proc: host) }
+                            Text(bid).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
+                        .help("launchctl print: parent bundle identifier (an SMAppService registration).")
+                    }
                     if let plist = top["path"], !plist.isEmpty {
                         HStack {
                             Text(plist).font(.system(.body, design: .monospaced)).textSelection(.enabled)
@@ -723,6 +746,21 @@ struct OriginTab: View {
                 }
             }
         }
+    }
+
+    /// launchd's `immediate reason`, with the common ones spelled out.
+    static func reasonText(_ r: String) -> String {
+        let known: [String: String] = [
+            "ipc (mach)": "a message to one of its Mach services",
+            "ipc (socket)": "a connection to one of its sockets",
+            "xpc event": "an XPC event it subscribes to",
+            "launch job demand": "another job asked for it",
+            "speculative": "its own RunAtLoad / KeepAlive setting",
+            "semaphore": "a KeepAlive condition",
+            "interval": "its start interval",
+            "non-ipc demand": "an explicit start (launchctl kickstart or similar)",
+        ]
+        return known[r].map { "\($0) (\(r))" } ?? r
     }
 
     private func ancestors(_ p: ProcInfo) -> [ProcInfo] {
