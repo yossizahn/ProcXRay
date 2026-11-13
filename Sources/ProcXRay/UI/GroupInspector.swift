@@ -94,6 +94,18 @@ struct GroupInspectorView: View {
         return any ? total : nil
     }
 
+    /// Mach-voucher (BANK) accounting summed across the group; nil when every member's totals are zero.
+    private func voucherRows(_ ms: [ProcInfo]) -> [(String, String, String)]? {
+        let secs: (UInt64?) -> Double? = { $0.map(Double.init) }
+        let sCpu = sum(ms) { secs($0.counters?.servicedCpuNanos) }, bCpu = sum(ms) { secs($0.counters?.billedCpuNanos) }
+        let sNrg = sum(ms) { secs($0.counters?.servicedEnergyNJ) }, bNrg = sum(ms) { secs($0.counters?.billedEnergyNJ) }
+        guard [sCpu, bCpu, sNrg, bNrg].contains(where: { ($0 ?? 0) > 0 }) else { return nil }
+        let joules: (Double?) -> String = { $0.map { String(format: "%.2f J", $0 / 1e9) } ?? "—" }
+        let secsStr: (Double?) -> String = { $0.map { Fmt.secs(UInt64($0)) } ?? "—" }
+        return [("CPU for others", "", secsStr(sCpu)), ("CPU by others", "", secsStr(bCpu)),
+                ("Energy for others", "", joules(sNrg)), ("Energy by others", "", joules(bNrg))]
+    }
+
     /// Per refresh, the sum over the processes that have a value then, newest at the end. Histories are
     /// aligned on the newest refresh; a process that started later simply has fewer entries.
     private func summedHistory(_ ms: [ProcInfo], _ pick: (History) -> [Double?]) -> [Double?] {
@@ -169,7 +181,6 @@ struct GroupInspectorView: View {
         UsageTab.section("Energy and wakeups", "bolt", summedHistory(ms, \.power), format: wattsFormat, rows: [
             ("CPU energy", sum(ms) { $0.rates?.watts }.map(wattsFormat) ?? "—",
              sum(ms) { $0.energyNJ.map { Double($0) } }.map { String(format: "%.2f J", $0 / 1e9) } ?? "—"),
-            ("Billed energy", "", sum(ms) { $0.counters?.billedEnergyNJ.map { Double($0) } }.map { String(format: "%.2f J", $0 / 1e9) } ?? "—"),
             ("Wakeups (idle + interrupt)", rate(\.wakeups),
              sum(ms) { $0.wakeups.map { Double($0) } }.map { Fmt.count(Int64($0)) } ?? "—"),
         ])
@@ -179,6 +190,10 @@ struct GroupInspectorView: View {
             ("Mach messages sent", rate(\.machMsgsSent), count(\.machMsgsSent)),
             ("Mach messages received", rate(\.machMsgsReceived), count(\.machMsgsReceived)),
         ])
+        if let vr = voucherRows(ms) {
+            UsageTab.section("On behalf of other processes", "arrow.left.arrow.right.square", nil, format: { _ in "" }, rows: vr)
+                .help("Work attributed through Mach vouchers (the BANK attribute), summed across the group. \"For others\" is CPU and energy these processes spent servicing other processes' requests; \"by others\" is what other processes spent servicing these. Most of it flows automatically over XPC.")
+        }
         Text("Resident and virtual size aren't summed: shared pages would be counted once per process.")
             .font(.caption).foregroundStyle(.secondary)
         }

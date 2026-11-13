@@ -498,7 +498,6 @@ struct UsageTab: View {
                 ])
                 Self.section("Energy and wakeups", "bolt", h?.power, format: wattsFormat, rows: [
                     ("CPU energy", r?.watts.map(wattsFormat) ?? "—", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
-                    ("Billed energy", "", c?.billedEnergyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
                     ("Wakeups (idle + interrupt)", rate(r?.wakeups), Fmt.count(p.wakeups)),
                 ])
                 Self.section("System calls and IPC", "arrow.left.arrow.right", nil, format: { _ in "" }, rows: [
@@ -507,6 +506,7 @@ struct UsageTab: View {
                     ("Mach messages sent", rate(r?.machMsgsSent), Fmt.count(c?.machMsgsSent)),
                     ("Mach messages received", rate(r?.machMsgsReceived), Fmt.count(c?.machMsgsReceived)),
                 ])
+                voucherSection(p)
                 other(p)
                 if p.viaHelper { Text("Task metrics read as root through the privileged helper.").font(.caption).foregroundStyle(.secondary) }
             }
@@ -523,6 +523,24 @@ struct UsageTab: View {
             }.value
             guard !Task.isCancelled, let got else { return }
             extra = (key, got.0, got.1, got.2)
+        }
+    }
+
+    /// Mach-voucher (BANK) accounting: CPU and energy this process ran on behalf of others, and that others
+    /// ran on its behalf (rusage ri_billed/serviced_system_time and _energy). Hidden when all four are zero,
+    /// which is the common case; it is mainly non-zero for service daemons and the processes they serve.
+    @ViewBuilder private func voucherSection(_ p: ProcInfo) -> some View {
+        let c = p.counters
+        let joules: (UInt64?) -> String = { $0.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—" }
+        let any = [c?.servicedCpuNanos, c?.billedCpuNanos, c?.servicedEnergyNJ, c?.billedEnergyNJ].contains { ($0 ?? 0) > 0 }
+        if any {
+            Self.section("On behalf of other processes", "arrow.left.arrow.right.square", nil, format: { _ in "" }, rows: [
+                ("CPU for others", "", Fmt.secs(c?.servicedCpuNanos)),
+                ("CPU by others", "", Fmt.secs(c?.billedCpuNanos)),
+                ("Energy for others", "", joules(c?.servicedEnergyNJ)),
+                ("Energy by others", "", joules(c?.billedEnergyNJ)),
+            ])
+            .help("Work attributed through Mach vouchers (the BANK attribute). \"For others\" is CPU and energy this process spent servicing other processes' requests; \"by others\" is what other processes spent servicing this one. Most of it flows automatically over XPC, where a service adopts its caller's voucher. Totals since the process started.")
         }
     }
 

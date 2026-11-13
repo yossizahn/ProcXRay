@@ -166,8 +166,14 @@ struct Counters: Codable, Hashable, Sendable {
     var logicalWrites: UInt64?
     var peakFootprint: UInt64?
     var neuralFootprint: UInt64?
-    /// rusage's billed energy, kept apart from the process's own energy (see `energyNJ`).
+    /// Mach-voucher (BANK) accounting: CPU time and energy this process spent servicing other processes'
+    /// requests (`serviced*`), and that other processes spent servicing this one (`billed*`). Most of it
+    /// flows automatically over XPC, where the handler adopts the caller's voucher. Times are nanoseconds.
+    /// `billedEnergyNJ` is kept apart from the process's own energy (see `energyNJ`).
     var billedEnergyNJ: UInt64?
+    var servicedEnergyNJ: UInt64?
+    var billedCpuNanos: UInt64?
+    var servicedCpuNanos: UInt64?
     /// CPU time per QoS class, nanoseconds, in `Counters.qosClasses` order.
     var qosNanos: [UInt64]?
 
@@ -206,6 +212,10 @@ extension PrivMetrics {
             // busy on a CPU at 4 W.)
             m.energyNJ = ru.ri_energy_nj
             c.billedEnergyNJ = ru.ri_billed_energy
+            c.servicedEnergyNJ = ru.ri_serviced_energy
+            // ri_billed/serviced_system_time are mach ticks, like ri_user_time (converted below).
+            c.billedCpuNanos = Native.machToNanos(ru.ri_billed_system_time)
+            c.servicedCpuNanos = Native.machToNanos(ru.ri_serviced_system_time)
             m.wakeups = ru.ri_pkg_idle_wkups &+ ru.ri_interrupt_wkups
             let cpu = ru.ri_user_time &+ ru.ri_system_time
             if m.cpuNanos == nil { m.cpuNanos = Native.machToNanos(cpu) }

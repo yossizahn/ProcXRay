@@ -111,8 +111,7 @@ Grouped by how hard it is to get. "Same user" means the call worked for another 
 
 - `ri_penergy_nj`: the part of `ri_energy_nj` spent on performance cores (measured: 4.107 of 4.109 W for `yes`)
 - `ri_cpu_time_qos_*`: CPU time per QoS class
-- `ri_billed_system_time`, `ri_serviced_system_time`: CPU billed to this process for work done by others, and the reverse; probably what top's `cpu_me` / `cpu_others` show. Not added because the units are unconfirmed.
-- `ri_serviced_energy`
+- `ri_billed_system_time`, `ri_serviced_system_time`, `ri_billed_energy`, `ri_serviced_energy`: Mach-voucher (BANK) accounting — CPU time and energy that other processes spent servicing this one (`billed`), and that this one spent servicing others (`serviced`). Added 2026-11-13, surfaced in the Usage tab's "On behalf of other processes" section (process and group inspectors). The times are mach ticks (converted with `machToNanos`); energy is nanojoules. Direction and units were confirmed against `taskinfo` for WindowServer: our `ri_billed_system_time` = 12833.721 s matched its "CPU time billed to me by others", and `ri_serviced_system_time` = 8635.022 s matched "CPU time I billed to others", to the millisecond. These are also what top's `cpu_me` / `cpu_others` show. Most of the accounting flows automatically over XPC, where a service adopts its caller's voucher.
 - `ri_interval_max_phys_footprint`, `ri_lifetime_max_neural_footprint`, `ri_interval_max_neural_footprint`
 - `ri_pinstructions`, `ri_pcycles`: the performance-core share of instructions and cycles
 - `ri_wired_size`, `ri_pageins`
@@ -218,7 +217,7 @@ What lsmp cannot give: names of anonymous ports (nothing in it asks the kernel f
 | state | partly: from `p_stat`; top's "running" / "stuck" come from thread states |
 | csw, faults, cow, pageins, msgsent, msgrecv, sysbsd, sysmach | yes |
 | instrs, cycles | yes (lifetime totals; `top -l` prints per-interval deltas) |
-| cpu_me, cpu_others | no — probably `ri_billed_system_time` / `ri_serviced_system_time`, units unconfirmed |
+| cpu_me, cpu_others | yes — `ri_billed_system_time` / `ri_serviced_system_time` (confirmed against `taskinfo`), in the Usage tab's "On behalf of other processes" section |
 | wq | no — `PROC_PIDWORKQUEUEINFO` |
 | ports, purg, boosts | no — task port (root) |
 | jetpri | no — `memorystatus_control` (root) |
