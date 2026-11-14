@@ -891,6 +891,15 @@ struct ProcessOutline: NSViewRepresentable {
                 right = 20
             }
             label.frame = NSRect(x: x, y: (h - lh) / 2, width: max(0, bounds.width - x - right), height: lh)
+            updateTip()
+        }
+
+        /// The full text as the label's tooltip, only while the label is too narrow to show all of it.
+        private func updateTip() {
+            let need = label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: .greatestFiniteMagnitude, height: label.frame.height)).width ?? 0
+            let whole = need <= label.frame.width + 0.5
+            let tip = whole ? nil : label.stringValue
+            if label.toolTip != tip { label.toolTip = tip }
         }
 
         /// Width this cell needs to show its content untruncated.
@@ -899,8 +908,8 @@ struct ProcessOutline: NSViewRepresentable {
         }
 
         // Assign only on change, so unchanged cells cause no redraw at all.
-        private func set(_ v: String) { if label.stringValue != v { label.stringValue = v } }
-        private func set(_ v: NSAttributedString) { if label.attributedStringValue != v { label.attributedStringValue = v } }
+        private func set(_ v: String) { if label.stringValue != v { label.stringValue = v; updateTip() } }
+        private func set(_ v: NSAttributedString) { if label.attributedStringValue != v { label.attributedStringValue = v; updateTip() } }
         private func set(color: NSColor) { if label.textColor != color { label.textColor = color } }
         private func set(image: NSImage?, tint: NSColor?) {
             if icon.image !== image { icon.image = image }

@@ -37,23 +37,31 @@ struct InspectorHeader: View {
                     if let img = IconCache.icon(for: p) { Image(nsImage: img) } else { Image(systemName: "terminal") }
                 }
                 .frame(width: 16, height: 16)
-                Text(p.name).font(.headline).lineLimit(1)
+                Text(p.name).font(.headline).lineLimit(1).truncationHelp(p.name)
                 Text(verbatim: "pid \(p.pid) · \(p.user) · \(Fmt.age(p.start))")
                     .foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+                    .truncationHelp("pid \(p.pid) · \(p.user) · \(Fmt.age(p.start))")
                 Spacer(minLength: 0)
             }
             .frame(height: 22)
             // What it is, whose it is, its sandbox and signer: each from a field, nothing inferred.
             HStack(spacing: 5) {
-                Text(store.kind(of: p) ?? "Process")
-                if let owner {
-                    Text("of").foregroundStyle(.secondary)
-                    ProcessChip(proc: owner)
+                HStack(spacing: 5) {
+                    Text(store.kind(of: p) ?? "Process")
+                    if let owner {
+                        Text("of").foregroundStyle(.secondary)
+                        ProcessChip(proc: owner)
+                    }
+                    Text("·").foregroundStyle(.tertiary)
+                    Text(p.sandboxed.map { $0 ? "sandboxed" : "not sandboxed" } ?? "sandbox unknown")
+                    Text("·").foregroundStyle(.tertiary)
+                    Text(TrustVerdict(sign).short)
                 }
-                Text("·").foregroundStyle(.tertiary)
-                Text(p.sandboxed.map { $0 ? "sandboxed" : "not sandboxed" } ?? "sandbox unknown")
-                Text("·").foregroundStyle(.tertiary)
-                Text(TrustVerdict(sign).short)
+                .truncationHelp([
+                    (store.kind(of: p) ?? "Process") + (owner.map { " of \($0.name) (\($0.pid))" } ?? ""),
+                    p.sandboxed.map { $0 ? "sandboxed" : "not sandboxed" } ?? "sandbox unknown",
+                    TrustVerdict(sign).short,
+                ].joined(separator: " · "))
                 Spacer(minLength: 0)
             }
             .font(.callout).foregroundStyle(.secondary).lineLimit(1)

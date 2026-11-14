@@ -180,7 +180,7 @@ struct SyscallTraceView: View {
                 .help(disabledReason ?? "Trace this process's BSD syscalls and Mach traps (ktrace, as root via the helper)")
             }
             if tracer.phase == .starting || tracer.phase == .stopping { ProgressView().controlSize(.small) }
-            Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationHelp(status)
             Spacer()
             Picker("", selection: $mode) {
                 Text("Calls").tag("Calls")
@@ -228,15 +228,15 @@ struct SyscallTraceView: View {
             TableColumn("Thread", value: \.thread) { r in Text(String(r.thread)).monospacedDigit().foregroundStyle(.secondary) }
                 .width(min: 50, ideal: 70, max: 100)
             TableColumn("Syscall", value: \.name) { r in
-                Text(r.name).foregroundStyle(r.mach ? Color.purple : Color.primary)
+                Text(r.name).foregroundStyle(r.mach ? Color.purple : Color.primary).truncationHelp(r.name)
             }
             .width(min: 90, ideal: 150)
-            TableColumn("Arguments") { r in Text(r.argsText).foregroundStyle(.secondary).help(r.argsText) }
+            TableColumn("Arguments") { r in Text(r.argsText).foregroundStyle(.secondary).truncationHelp(r.argsText) }
                 .width(min: 100, ideal: 240)
             TableColumn("Result") { r in
                 Text(r.resultText)
                     .foregroundStyle(r.failed ? Color.red : (r.state == .inProgress ? Color.orange : Color.primary))
-                    .help(r.resultText)
+                    .truncationHelp(r.resultText)
             }
             .width(min: 60, ideal: 140)
             TableColumn("Duration", value: \.durationKey) { r in
@@ -245,7 +245,7 @@ struct SyscallTraceView: View {
             .width(min: 60, ideal: 76, max: 110)
             TableColumn("Path") { r in
                 HStack(spacing: 4) {
-                    Text(r.pathText).help(r.pathText)
+                    Text(r.pathText).truncationHelp(r.pathText)
                     // The first existing one: a rename's source is usually gone, its destination isn't.
                     if let path = r.paths.lazy.compactMap(Reveal.path(in:)).first { Spacer(minLength: 0); RevealButton(path: path) }
                 }
@@ -263,7 +263,7 @@ struct SyscallTraceView: View {
 
     private var summaryTable: some View {
         Table(summary, sortOrder: $summarySort) {
-            TableColumn("Syscall", value: \.name) { s in Text(s.name) }.width(min: 120, ideal: 200)
+            TableColumn("Syscall", value: \.name) { s in Text(s.name).truncationHelp(s.name) }.width(min: 120, ideal: 200)
             TableColumn("Calls", value: \.calls) { s in Text(s.calls.formatted()).monospacedDigit() }.width(min: 50, ideal: 70)
             TableColumn("Errors", value: \.errors) { s in
                 Text(s.errors == 0 ? "" : s.errors.formatted()).monospacedDigit().foregroundStyle(.red)

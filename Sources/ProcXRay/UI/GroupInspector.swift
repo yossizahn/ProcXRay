@@ -56,7 +56,7 @@ struct GroupInspectorView: View {
                     else { Image(systemName: node.category?.symbol ?? "square.stack.3d.up").foregroundStyle(.secondary) }
                 }
                 .frame(width: 16, height: 16)
-                Text(node.title).font(.headline).lineLimit(1)
+                Text(node.title).font(.headline).lineLimit(1).truncationHelp(node.title)
                 Text(count).foregroundStyle(.secondary).monospacedDigit()
                 Spacer(minLength: 0)
             }
@@ -66,8 +66,9 @@ struct GroupInspectorView: View {
                     Text("Main process").foregroundStyle(.secondary)
                     ProcessChip(proc: root)
                     Text("· select it in the list to inspect it alone").foregroundStyle(.tertiary)
+                        .truncationHelp("· select it in the list to inspect it alone")
                 } else {
-                    Text(kindLine).foregroundStyle(.secondary)
+                    Text(kindLine).foregroundStyle(.secondary).truncationHelp(kindLine)
                 }
                 Spacer(minLength: 0)
             }

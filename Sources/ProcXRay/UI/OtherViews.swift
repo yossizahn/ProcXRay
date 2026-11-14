@@ -86,16 +86,17 @@ struct AppsView: View {
             Table(apps, selection: $selection, sortOrder: $sort) {
                 TableColumn("#", value: \.index) { Text(verbatim: "\($0.index)").monospacedDigit() }.width(30)
                 TableColumn("Name", value: \.name) { a in
-                    Text(a.name).foregroundStyle(a.exited ? .red : .primary)
+                    Text(a.name).foregroundStyle(a.exited ? .red : .primary).truncationHelp(a.name)
                 }.width(min: 120, ideal: 180)
                 TableColumn("PID") { a in Text(a.pid.map(String.init) ?? "").monospacedDigit() }.width(56)
-                TableColumn("Type") { a in Text(a.type ?? "") }.width(min: 70, ideal: 100)
+                TableColumn("Type") { a in Text(a.type ?? "").truncationHelp(a.type ?? "") }.width(min: 70, ideal: 100)
                 TableColumn("Coalition") { a in Text(a.coalition.map(String.init) ?? "").monospacedDigit() }.width(64)
                 TableColumn("Related PIDs") { a in
-                    Text(a.relatedCoalitionPIDs.map(String.init).joined(separator: " ")).foregroundStyle(.orange)
+                    let related = a.relatedCoalitionPIDs.map(String.init).joined(separator: " ")
+                    Text(related).foregroundStyle(.orange).truncationHelp(related)
                 }.width(min: 60, ideal: 90)
-                TableColumn("State") { a in Text(a.stateTags.joined(separator: " ")).foregroundStyle(.secondary) }.width(min: 80, ideal: 160)
-                TableColumn("Bundle ID") { a in Text(a.bundleID ?? "").foregroundStyle(.secondary) }.width(min: 120, ideal: 220)
+                TableColumn("State") { a in let s = a.stateTags.joined(separator: " "); Text(s).foregroundStyle(.secondary).truncationHelp(s) }.width(min: 80, ideal: 160)
+                TableColumn("Bundle ID") { a in Text(a.bundleID ?? "").foregroundStyle(.secondary).truncationHelp(a.bundleID ?? "") }.width(min: 120, ideal: 220)
                 TableColumn("Arch") { a in Text(a.arch ?? "") }.width(50)
             }
         } bottom: {
@@ -133,7 +134,7 @@ struct BackgroundItemsView: View {
                     Label("Couldn't load background items", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red).font(.headline)
                     Text(verbatim: e).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
-                        .textSelection(.enabled).lineLimit(12).frame(maxWidth: 560)
+                        .textSelection(.enabled).lineLimit(12).help(e).frame(maxWidth: 560)
                     Divider().frame(maxWidth: 560)
                 } else if store.btmLoaded {
                     Text("sfltool dumpbtm returned no background item records.").font(.headline)
@@ -164,21 +165,21 @@ struct BackgroundItemsView: View {
                 TableColumn("Name") { i in
                     HStack {
                         Circle().fill(i.enabled ? .green : .gray).frame(width: 7, height: 7)
-                        Text(i.name)
+                        Text(i.name).truncationHelp(i.name)
                     }
                 }.width(min: 140, ideal: 220)
-                TableColumn("Type") { i in Text(i.type) }.width(min: 90, ideal: 140)
-                TableColumn("Disposition") { i in Text(i.disposition).foregroundStyle(.secondary) }.width(min: 120, ideal: 220)
-                TableColumn("Developer") { i in Text(i.developer) }.width(min: 90, ideal: 150)
-                TableColumn("Team") { i in Text(i.teamID).monospaced() }.width(min: 70, ideal: 90)
+                TableColumn("Type") { i in Text(i.type).truncationHelp(i.type) }.width(min: 90, ideal: 140)
+                TableColumn("Disposition") { i in Text(i.disposition).foregroundStyle(.secondary).truncationHelp(i.disposition) }.width(min: 120, ideal: 220)
+                TableColumn("Developer") { i in Text(i.developer).truncationHelp(i.developer) }.width(min: 90, ideal: 150)
+                TableColumn("Team") { i in Text(i.teamID).monospaced().truncationHelp(i.teamID) }.width(min: 70, ideal: 90)
                 TableColumn("Target") { i in
                     let target = i.executable.ifEmpty(i.url)
                     HStack(spacing: 4) {
-                        Text(target).foregroundStyle(.secondary).truncationMode(.middle)
+                        Text(target).foregroundStyle(.secondary).truncationMode(.middle).truncationHelp(target)
                         if let path = Reveal.path(in: target) { Spacer(minLength: 0); RevealButton(path: path) }
                     }
                 }.width(min: 120, ideal: 260)
-                TableColumn("Last use") { i in Text(i.lastUse) }.width(min: 90, ideal: 150)
+                TableColumn("Last use") { i in Text(i.lastUse).truncationHelp(i.lastUse) }.width(min: 90, ideal: 150)
                 TableColumn("UID") { i in Text(i.uid) }.width(40)
             }
         } bottom: {
@@ -221,7 +222,7 @@ struct LaunchdView: View {
         let current = selection.flatMap { s in store.jobs.first { $0.id == s } }
         SplitPane(id: "launchd", defaultFraction: 0.6) {
             Table(jobs, selection: $selection, sortOrder: $sort) {
-                TableColumn("Label", value: \.label) { j in Text(j.label) }.width(min: 200, ideal: 360)
+                TableColumn("Label", value: \.label) { j in Text(j.label).truncationHelp(j.label) }.width(min: 200, ideal: 360)
                 TableColumn("PID") { j in Text(j.pid.map(String.init) ?? "—").monospacedDigit() }.width(60)
                 TableColumn("Last exit", value: \.lastExit) { j in
                     Text(j.lastExit).foregroundStyle(j.lastExit == "0" || j.lastExit == "-" ? Color.secondary : Color.red)
@@ -229,7 +230,7 @@ struct LaunchdView: View {
                 TableColumn("Process") { j in
                     let path = j.pid.flatMap { procs[$0]?.path }
                     HStack(spacing: 4) {
-                        Text(path ?? "").foregroundStyle(.secondary).truncationMode(.middle)
+                        Text(path ?? "").foregroundStyle(.secondary).truncationMode(.middle).truncationHelp(path ?? "")
                         if let path { Spacer(minLength: 0); RevealButton(path: path) }
                     }
                 }

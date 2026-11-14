@@ -279,7 +279,7 @@ struct CommandTab<Parsed, Visual: View>: View {
         VStack(spacing: 0) {
             HStack {
                 RawToggle(showRaw: $showRaw)
-                Text(title).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                Text(title).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).truncationHelp(title)
                 Spacer()
                 TextField(showRaw ? "filter lines" : "filter", text: $filter).textFieldStyle(.roundedBorder).frame(width: 180)
                 Button(output == nil ? "Run" : "Re-run") { run() }.disabled(running || disabledReason != nil)

@@ -14,6 +14,9 @@ enum Entry {
     static func main() {
         // Same binary serves as the root helper when launchd starts it with --helper.
         if CommandLine.arguments.contains("--helper") { HelperDaemon.run() }
+        // Tooltips (full text of truncated fields, mostly) appear at once instead of after AppKit's ~1 s.
+        // In milliseconds; 0 counts as unset, so 1. Registered, not set: a user default still wins.
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 1])
         ProcXRayApp.main()
     }
 }
@@ -215,7 +218,7 @@ struct RefreshStats: View {
         Text(verbatim: "\(store.procs.count) processes")
         Text(verbatim: "snapshot \(store.refreshMillis) ms")
         if let e = store.refreshError {
-            Text(verbatim: "\(e) — showing the last good list").foregroundStyle(.red).lineLimit(3)
+            Text(verbatim: "\(e) — showing the last good list").foregroundStyle(.red).lineLimit(3).help("\(e) — showing the last good list")
         }
     }
 }
@@ -227,7 +230,7 @@ struct HelperBadge: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4) {
                 Circle().fill(store.helperState.isRunning ? .green : .orange).frame(width: 7, height: 7)
-                Text(verbatim: store.helperState.label).lineLimit(2)
+                Text(verbatim: store.helperState.label).lineLimit(2).help(store.helperState.label)
             }
             switch store.helperState {
             case .notInstalled:
@@ -245,7 +248,7 @@ struct HelperBadge: View {
             case .notFound:
                 EmptyView()
             }
-            if let e = store.helperError { Text(verbatim: e).foregroundStyle(.red).lineLimit(3) }
+            if let e = store.helperError { Text(verbatim: e).foregroundStyle(.red).lineLimit(3).help(e) }
         }
         .padding(.bottom, 4)
     }

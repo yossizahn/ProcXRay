@@ -370,10 +370,11 @@ struct LsofView: View {
                 }.width(min: 66, ideal: 74, max: 100)
                 TableColumn("Kind", value: \.kindName) { e in
                     Label(e.kind == .image ? "mapped" : e.type, systemImage: e.kind.symbol).foregroundStyle(e.kind.color)
+                        .truncationHelp(e.kind == .image ? "mapped" : e.type)
                 }.width(min: 96, ideal: 104, max: 140)
                 TableColumn("Name", value: \.name) { e in NameCell(e: e) }
                 TableColumn("Location", value: \.location) { e in
-                    Text(e.location).foregroundStyle(.secondary).lineLimit(1)
+                    Text(e.location).foregroundStyle(.secondary).lineLimit(1).truncationHelp(e.location)
                 }.width(min: 70, ideal: 110, max: 180)
                 TableColumn("Other end") { e in
                     if let info = resolved[e.id] {
@@ -684,6 +685,7 @@ struct LsofView: View {
                         Pill(text: s, color: s == "ESTABLISHED" ? .green : s == "LISTEN" ? .blue : .orange)
                     }
                 }
+                .truncationHelp([p.local, p.remote.map { "→ \($0)" }, p.state].compactMap { $0 }.joined(separator: " "))
                 .textSelection(.enabled)
             case .file, .image, .dir:
                 let slash = e.name.lastIndex(of: "/")
@@ -695,7 +697,7 @@ struct LsofView: View {
                         Text(leaf)
                     }
                     .lineLimit(1).truncationMode(.head)
-                    .help(e.name)
+                    .truncationHelp(e.name)
                     RevealButton(path: e.name)
                 }
                 .contextMenu {
@@ -704,7 +706,7 @@ struct LsofView: View {
                 }
             default:
                 Text(e.name.isEmpty ? "—" : e.name).foregroundStyle(.secondary).lineLimit(1)
-                    .help(e.name)
+                    .truncationHelp(e.name)
             }
         }
     }
@@ -819,7 +821,7 @@ struct VmmapView: View {
         return Table(rows, sortOrder: $regionSort) {
             TableColumn("Region", value: \.name) { r in
                 HStack {
-                    Text(r.name)
+                    Text(r.name).truncationHelp(r.name)
                     if !r.note.isEmpty { Image(systemName: "info.circle").foregroundStyle(.secondary).help(r.note) }
                 }
             }.width(min: 140, ideal: 220)
@@ -843,7 +845,7 @@ struct VmmapView: View {
         let rows = s.zones.filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }.sorted(using: zoneSort)
         let maxAlloc = Double(rows.map(\.allocated).max() ?? 1)
         return Table(rows, sortOrder: $zoneSort) {
-            TableColumn("Zone", value: \.name) { z in Text(z.name) }.width(min: 160, ideal: 240)
+            TableColumn("Zone", value: \.name) { z in Text(z.name).truncationHelp(z.name) }.width(min: 160, ideal: 240)
             TableColumn("Allocated", value: \.allocated) { z in
                 HStack { MiniBar(fraction: Double(z.allocated) / max(maxAlloc, 1), color: .blue, width: 50)
                     Text(Fmt.bytes(z.allocated)).monospacedDigit() }
@@ -875,7 +877,7 @@ struct PortionBar: View {
         // Only the parts that partition the total (vmmap lists "written" as a superset of resident/swapped).
         let shown = parts.filter { $0.0 != "written" }
         HStack(spacing: 8) {
-            Text(title).font(.caption).foregroundStyle(.secondary).frame(width: 150, alignment: .leading).lineLimit(1)
+            Text(title).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationHelp(title).frame(width: 150, alignment: .leading)
             GeometryReader { g in
                 HStack(spacing: 1) {
                     ForEach(Array(shown.enumerated()), id: \.offset) { i, p in
@@ -898,6 +900,8 @@ struct PortionBar: View {
                 }
             }
             .lineLimit(1)
+            .truncationHelp(([Fmt.bytes(total)] + shown.map { "\($0.0.replacingOccurrences(of: "_", with: " ")) \(Fmt.bytes($0.1))" })
+                .joined(separator: "  "))
         }
     }
 }
@@ -1029,8 +1033,8 @@ struct SampleView: View {
                 HStack(spacing: 6) {
                     MiniBar(fraction: Double(f.count) / mx, color: idleLeaves.contains(f.symbol) ? .gray : .orange, width: 60)
                     Text(verbatim: "\(f.count)").font(.caption2).monospacedDigit().frame(width: 34, alignment: .trailing)
-                    Text(f.symbol).font(.system(size: 11, design: .monospaced)).lineLimit(1)
-                    if let l = f.library { Text(l).font(.caption2).foregroundStyle(libColor(l)) }
+                    Text(f.symbol).font(.system(size: 11, design: .monospaced)).lineLimit(1).truncationHelp(f.symbol)
+                    if let l = f.library { Text(l).font(.caption2).foregroundStyle(libColor(l)).truncationHelp(l) }
                 }
             }
         }
@@ -1056,17 +1060,17 @@ struct SampleView: View {
             MiniBar(fraction: frac, color: n.isThread ? .accentColor : (n.busySamples > 0 ? .orange : .gray), width: 44)
             if n.isThread {
                 Image(systemName: "line.3.horizontal").foregroundStyle(.secondary)
-                Text(n.symbol).bold().lineLimit(1)
+                Text(n.symbol).bold().lineLimit(1).truncationHelp(n.symbol)
                 let busy = n.busySamples
                 Pill(text: busy == 0 ? "idle" : String(format: "%.0f%% busy", 100 * Double(busy) / Double(max(n.count, 1))),
                      color: busy == 0 ? .secondary : .orange)
                 if busy == 0, let leaf = n.leaves().max(by: { $0.count < $1.count }) {
-                    Text("waiting in \(leaf.symbol)").font(.caption).foregroundStyle(.secondary)
+                    Text("waiting in \(leaf.symbol)").font(.caption).foregroundStyle(.secondary).truncationHelp("waiting in \(leaf.symbol)")
                 }
             } else {
-                Text(n.symbol).font(.system(size: 11, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                Text(n.symbol).font(.system(size: 11, design: .monospaced)).lineLimit(1).truncationMode(.middle).truncationHelp(n.symbol)
                     .foregroundStyle(n.isIdleLeaf ? .secondary : .primary)
-                if let l = n.library { Text(l).font(.system(size: 10)).foregroundStyle(libColor(l)) }
+                if let l = n.library { Text(l).font(.system(size: 10)).foregroundStyle(libColor(l)).truncationHelp(l) }
                 if !n.children.isEmpty, n.selfCount > 0 {
                     Pill(text: "self \(n.selfCount)", color: .orange)
                 }
@@ -1202,7 +1206,7 @@ struct LogView: View {
             Table(rows) {
                 TableColumn("Time") { e in Text(e.time).monospacedDigit().foregroundStyle(.secondary) }.width(min: 80, ideal: 90, max: 110)
                 TableColumn("Level") { e in Pill(text: e.level.rawValue, color: e.level.color) }.width(min: 54, ideal: 60, max: 70)
-                TableColumn("Thread") { e in Text(e.thread).monospaced().foregroundStyle(.secondary) }.width(min: 50, ideal: 60, max: 80)
+                TableColumn("Thread") { e in Text(e.thread).monospaced().foregroundStyle(.secondary).truncationHelp(e.thread) }.width(min: 50, ideal: 60, max: 80)
                 TableColumn("Subsystem") { e in
                     let parts = e.subsystem.split(separator: ":", maxSplits: 1).map(String.init)
                     HStack(spacing: 4) {
@@ -1210,6 +1214,7 @@ struct LogView: View {
                         if parts.count > 1 { Pill(text: parts[1]) }
                     }
                     .lineLimit(1)
+                    .truncationHelp(e.subsystem)
                 }.width(min: 110, ideal: 170, max: 260)
                 TableColumn("Message") { e in Text(e.message).lineLimit(2).help(e.message) }
             }
