@@ -231,7 +231,6 @@ Group-row rules:
 
 - **sum**: add the members. Used where the values really are additive.
 - **same**: show the value when every member has the same one, otherwise a count ("3 users").
-- **root**: on a unit row, the root process's value; blank on category and role rows.
 - **blank**: no value, because a total would mislead. Resident and virtual sizes count shared pages once per process, and peaks happened at different times.
 
 **Identity**
@@ -239,11 +238,11 @@ Group-row rules:
 | Column | Shows | Group row | Data |
 |---|---|---|---|
 | Name | icon, name, badges; always first, cannot be hidden | title | have |
-| PID | | root | have |
+| PID | | blank | have |
 | User | | same | have |
 | Kind | category, then role inside the app: "App · XPC service", "App · Terminal", "Extension · Widgets" | same | have |
-| Bundle ID | | root | have for LaunchServices apps; new otherwise (`Info.plist`, cached per bundle) |
-| Path | executable path, middle-truncated | root | have |
+| Bundle ID | | blank | have for LaunchServices apps; new otherwise (`Info.plist`, cached per bundle) |
+| Path | executable path, middle-truncated | blank | have |
 | Architecture | arm64, or x86_64 (Rosetta) | same | have |
 | State | stopped, zombie or starting, from `p_stat`; empty otherwise (no running/sleeping: see step 14 notes) | count of stopped or zombie | have |
 
@@ -251,9 +250,9 @@ Group-row rules:
 
 | Column | Shows | Group row | Data |
 |---|---|---|---|
-| Parent | name (pid) | root | have |
-| Responsible | as today | root | have |
-| launchd label | | root | have |
+| Parent | name (pid) | blank | have |
+| Responsible | as today | blank | have |
+| launchd label | | blank | have |
 | Domain | system, gui, user | same | have |
 | Extension point | readable name | same | have |
 | Contained in | app whose bundle holds this executable | same | have |
@@ -311,7 +310,7 @@ Group-row rules:
 |---|---|---|---|
 | Signer | as today | same | have |
 | Team ID | | same | have (signing cache) |
-| Signing ID | | root | have |
+| Signing ID | | blank | have |
 | Sandboxed | yes, no, unknown | "all", "none" or "n of m" | have |
 | Hardened runtime | yes, no | "all", "none" or "n of m" | have (signing cache) |
 

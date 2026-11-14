@@ -545,17 +545,17 @@ struct ProcessOutline: NSViewRepresentable {
 
         private func open(_ it: Item?) {
             guard let it, let o = outline else { return }
-            if let p = it.node.proc ?? it.node.rootPid.flatMap({ procs[$0] }) { parent.onOpen(p); return }
-            // Group rows toggle, like a disclosure triangle.
+            if let p = it.node.proc { parent.onOpen(p); return }
+            // Group rows (an app's unit row included) toggle, like a disclosure triangle.
             if o.isItemExpanded(it) { o.collapseItem(it) } else { o.expandItem(it) }
         }
 
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
             if menu === headerMenu { buildHeaderMenu(menu); return }
-            // A unit row (Smart tree) acts as the app or job it stands for.
+            // Process rows only: group rows, an app's unit row included, have no menu.
             guard let o = outline, o.clickedRow >= 0, let n = (o.item(atRow: o.clickedRow) as? Item)?.node,
-                  let p = n.proc ?? n.rootPid.flatMap({ procs[$0] }) else { return }
+                  let p = n.proc else { return }
             let parent = self.parent!
             func add(_ title: String, _ action: @escaping () -> Void) {
                 let mi = NSMenuItem(title: title, action: #selector(MenuAction.fire), keyEquivalent: "")
@@ -590,11 +590,10 @@ struct ProcessOutline: NSViewRepresentable {
             if p.ppid > 1 { jump("Select Parent (\(p.ppid))", to: p.ppid) }
         }
 
-        /// The info bubble for a row: the executable's full path and its command line. A unit row (Smart
-        /// tree) shows the app or job it stands for; other group rows have none.
+        /// The info bubble for a process row: the executable's full path and its command line. Group rows,
+        /// an app's unit row included, have none.
         func bubble(for item: Any) -> [InfoBubble.Section]? {
-            guard let n = (item as? Item)?.node,
-                  let p = n.proc ?? n.rootPid.flatMap({ procs[$0] }) else { return nil }
+            guard let p = (item as? Item)?.node.proc else { return nil }
             var s: [InfoBubble.Section] = []
             if let path = p.path { s.append(.init(title: "Executable", value: path, reveal: path)) }
             if let c = p.commandLine, !c.isEmpty, c != p.path { s.append(.init(title: "Command line", value: c, mono: true)) }

@@ -51,8 +51,8 @@ struct ProcessesView: View {
     // This body must not read per-refresh data (store.procs, nodes): then it would re-render every tick,
     // and each re-render pushes SwiftUI's environment through every cell view of the outline. The outline
     // observes the store itself. The selected process is looked up only when an action runs.
-    /// A process row, or a Smart-tree unit row, which stands for its app's own process.
-    private var selectedPid: pid_t? { selection.flatMap(SmartTree.pid(forRow:)) }
+    /// A process row's pid. Group rows (negative ids), an app's unit row included, have none.
+    private var selectedPid: pid_t? { selection.flatMap { $0 >= 0 ? pid_t(clamping: $0) : nil } }
     private var hasProcessSelected: Bool { selectedPid != nil }
     private func inspectSelected() {
         if let pid = selectedPid, let p = store.procs[pid] { inspect(p) }

@@ -80,8 +80,6 @@ struct Column: Identifiable {
         /// The value when every process has the same one, otherwise a count of the different values
         /// ("3 users"; `noun` is singular, the plural adds an s).
         case same(noun: String)
-        /// On an app's row, the app's own value; blank on other group rows.
-        case root
         /// Nothing: a total would mislead (shared pages, peaks at different times).
         case blank
         /// The earliest date.
@@ -137,9 +135,6 @@ struct Column: Identifiable {
     func groupValue(_ n: ProcNode, members: [ProcInfo], store: Store, value: (ProcInfo) -> CellValue) -> CellValue {
         switch rule {
         case .blank: return .empty
-        case .root:
-            guard n.kind == .unit, let r = n.rootPid, let p = store.procs[r] else { return .empty }
-            return value(p)
         case .sum:
             var total = 0.0, any = false
             for m in members {
@@ -247,7 +242,7 @@ private let catalogue: [Column] = [
            tooltip: "Process name, or the title of a group row. Badges: LEFT (outlived its app), ZOMBIE, ROSETTA, SBX (sandboxed), EXITED.",
            section: .identity, minWidth: 180, width: 280, rule: .blank) { p, _ in .text(p.name) },
     Column(id: "pid", title: "PID", tooltip: "Process ID. App rows: the app's own process.",
-           section: .identity, minWidth: 44, width: 56, numeric: true, rule: .root) { p, _ in .number(Double(p.pid), String(p.pid)) },
+           section: .identity, minWidth: 44, width: 56, numeric: true, rule: .blank) { p, _ in .number(Double(p.pid), String(p.pid)) },
     Column(id: "user", title: "User", tooltip: "User the process runs as.",
            section: .identity, width: 70, rule: .same(noun: "user")) { p, _ in .text(p.user) },
     Column(id: "kind", title: "Kind",
@@ -255,12 +250,12 @@ private let catalogue: [Column] = [
            section: .identity, width: 150, rule: .same(noun: "kind")) { p, s in text(s.kind(of: p)) },
     Column(id: "bundleID", title: "Bundle ID",
            tooltip: "Bundle identifier of the app or extension bundle that holds the executable. App rows: the app's.",
-           section: .identity, width: 180, rule: .root) { p, s in text(s.bundleID(of: p)) },
+           section: .identity, width: 180, rule: .blank) { p, s in text(s.bundleID(of: p)) },
     Column(id: "path", title: "Path", tooltip: "Executable path. App rows: the app's.",
-           section: .identity, width: 260, truncateMiddle: true, rule: .root) { p, _ in text(p.path) },
+           section: .identity, width: 260, truncateMiddle: true, rule: .blank) { p, _ in text(p.path) },
     Column(id: "commandLine", title: "Command line",
            tooltip: "The arguments the process was started with (argv), read once per process. Other users' processes need the helper; \"—\" means they couldn't be read. App rows: the app's.",
-           section: .identity, minWidth: 120, width: 360, rule: .root) { p, _ in
+           section: .identity, minWidth: 120, width: 360, rule: .blank) { p, _ in
         if let c = p.commandLine { return .text(c) }
         return p.commandLineRead ? .unknown : .empty
     },
@@ -282,7 +277,7 @@ private let catalogue: [Column] = [
 
     // Ownership
     Column(id: "parent", title: "Parent", tooltip: "Parent process (ppid). App rows: the app's parent.",
-           section: .ownership, width: 130, rule: .root) { p, s in
+           section: .ownership, width: 130, rule: .blank) { p, s in
         guard p.ppid != p.pid else { return .empty }
         // A "parent" started after its child is a later process that reused the pid.
         guard let par = s.procs[p.ppid], par.start <= p.start else { return .text("gone (\(p.ppid))", .secondary) }
@@ -290,7 +285,7 @@ private let catalogue: [Column] = [
     },
     Column(id: "responsible", title: "Responsible",
            tooltip: "The process macOS holds responsible for this one (for privacy prompts and energy). † marks one that has exited.",
-           section: .ownership, minWidth: 80, width: 130, rule: .root) { p, s in
+           section: .ownership, minWidth: 80, width: 130, rule: .blank) { p, s in
         if let t = p.leftBehindText { return .text("† \(t)", .warning) }
         guard let r = p.responsible else { return .empty }
         if r == p.pid { return .text("self", .secondary) }
@@ -298,7 +293,7 @@ private let catalogue: [Column] = [
         return .text("† gone (\(r))", .warning)
     },
     Column(id: "label", title: "launchd label", tooltip: "Label of the launchd job this process is the main process of.",
-           section: .ownership, width: 200, rule: .root) { p, _ in text(p.launchdLabel) },
+           section: .ownership, width: 200, rule: .blank) { p, _ in text(p.launchdLabel) },
     Column(id: "domain", title: "Domain", tooltip: "launchd domain of that job: system, gui or user.",
            section: .ownership, width: 64, rule: .same(noun: "domain")) { p, _ in text(p.launchdDomain) },
     Column(id: "extPoint", title: "Extension point", tooltip: "For an app extension: what it extends.",
@@ -486,7 +481,7 @@ private let catalogue: [Column] = [
     Column(id: "team", title: "Team ID", tooltip: "Developer team of the signature.",
            section: .security, width: 90, rule: .same(noun: "team")) { p, s in text(s.signInfo(for: p)?.teamID) },
     Column(id: "signingID", title: "Signing ID", tooltip: "Identifier in the code signature. App rows: the app's.",
-           section: .security, width: 180, rule: .root) { p, _ in text(p.signID) },
+           section: .security, width: 180, rule: .blank) { p, _ in text(p.signID) },
     Column(id: "sandboxed", title: "Sandboxed", tooltip: "Whether the App Sandbox confines it. Group rows: all, none, or how many.",
            section: .security, width: 76, rule: .custom { ms, _ in share(ms) { $0.sandboxed } }) { p, _ in yesNo(p.sandboxed) },
     Column(id: "hardened", title: "Hardened runtime",

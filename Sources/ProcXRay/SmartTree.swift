@@ -83,13 +83,6 @@ enum SmartTree {
         return h
     }
 
-    /// The process a row stands for: its own pid, or the root of a unit row. nil for other group rows.
-    static func pid(forRow id: Int) -> pid_t? {
-        if id >= 0 { return pid_t(clamping: id) }
-        let p = unitBase - id
-        return p >= 0 && p <= Int(Int32.max) ? pid_t(p) : nil
-    }
-
     // MARK: Classification
 
     /// Apple code: the signer once signing info has loaded, a path rule until then (so most rows don't

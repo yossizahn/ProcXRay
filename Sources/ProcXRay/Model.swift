@@ -181,7 +181,7 @@ struct ProcNode: Identifiable, Sendable {
         case group      // coalition, sub-group of a Smart category
         case ghost      // Left Behind group
         case category   // Smart tree top level
-        case unit       // Smart tree: an app or job with its helpers; stands for `rootPid`
+        case unit       // Smart tree: an app or job with its helpers; a group row like the others
     }
 
     var id: Int
@@ -192,7 +192,7 @@ struct ProcNode: Identifiable, Sendable {
     var children: [ProcNode]?
     var kind: Kind = .process
     var category: ProcCategory?
-    /// The process a unit row stands for (selecting the row selects it).
+    /// A unit row's main process (its icon, and the group inspector's link to it).
     var rootPid: pid_t?
     /// Rows with a fixed order sort before their siblings, in this order, whatever the sort column.
     var fixedOrder: Int?
