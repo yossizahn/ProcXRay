@@ -507,12 +507,17 @@ struct LsofView: View {
                 let common = peers.filter(\.common).count
                 let queued = peers.reduce(0) { $0 + $1.queuedHere }
                 let own = s.counts[pid].map { c in
-                    " · \(Fmt.count(c.total)) ports" + (c.fullQueues > 0 ? ", \(c.fullQueues) full queue\(c.fullQueues == 1 ? "" : "s")" : "")
+                    " · \(Fmt.count(c.total)) ports"
                         + (c.sendOnce > 0 ? ", \(Fmt.count(c.sendOnce)) repl\(c.sendOnce == 1 ? "y" : "ies") owed" : "")
                         + (c.deadNames > 0 ? ", \(Fmt.count(c.deadNames)) dead name\(c.deadNames == 1 ? "" : "s")" : "")
                 } ?? ""
-                Text("Mach ports: \(peers.count) processes\(common > 0 ? ", \(common) of them common services" : "")\(queued > 0 ? " · \(queued) message\(queued == 1 ? "" : "s") queued here" : "") \(own) · snapshot of \(s.processCount) processes at \(s.at.formatted(date: .omitted, time: .standard))")
+                Text("Mach ports: \(peers.count) processes\(common > 0 ? ", \(common) of them common services" : "")\(queued > 0 ? " · \(queued) message\(queued == 1 ? "" : "s") queued here" : "")\(own) · snapshot of \(s.processCount) processes at \(s.at.formatted(date: .omitted, time: .standard))")
                     .help("From lsmp, as root: which processes can send to which. A right to a port means \"can talk\", not traffic. Common services are peers at least \(Int(MachSnapshot.commonShare * 100)) % of processes can send to; the graph leaves them out.")
+                if let full = s.counts[pid]?.fullQueues, full > 0 {
+                    Label("\(full) full queue\(full == 1 ? "" : "s")", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .help("Ports this process receives on whose message queue is full: senders block or time out until it receives. The peers sending to them say \"our queue full\".")
+                }
             case .unavailable(let why)?:
                 Text(why)
             case nil:

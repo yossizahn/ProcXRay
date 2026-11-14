@@ -179,6 +179,7 @@ enum Bench {
               + byHandler.sorted { $0.value.count > $1.value.count }.prefix(6).map {
                   "\(Native.process($0.key)?.comm ?? "\($0.key)") \($0.value.count)\(s.isCommonExceptionHandler($0.key) ? " (common)" : "")"
               }.joined(separator: ", "))
+        print("links with replies owed \(s.links.filter { $0.repliesOwed > 0 }.count), full queues \(s.links.filter { $0.fullQueues > 0 }.count) (\(s.links.reduce(0) { $0 + $1.fullQueues }) ports), boosts \(s.links.filter { $0.boosts > 0 }.count), no-senders \(s.links.filter { $0.noSenders > 0 }.count)")
         top("ports", \.total)
         top("dead names", \.deadNames)
         top("replies owed", \.sendOnce)

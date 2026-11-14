@@ -47,6 +47,8 @@ The IPC map proposal says the rights can't tell client from server. Two fields h
 
 Proposal: per peer, a direction from these when they agree (replies owed one way, no-senders port on the other side), else stay "⇄". Not yet measured how many of the 10,917 pairs this settles; measure before showing it.
 
+**Measured and done** (`MachLink.noSenders`, `MachPeer.role`). On the dump, send-once rights are too rare to decide direction: 57 of 20,235 links carry any. No-senders requests point one way in 7,404 of 10,963 pairs, no way in 2,892, and both ways in the rest. Checked against services known to be servers, the side holding the no-senders request is the server for cfprefsd 1,006 of 1,015 peers, logd 744 of 747, opendirectoryd 670 of 673, coreservicesd 504 of 509 and runningboardd 362 of 368. It reads backwards for services that call back into their clients' ports: notifyd 0 of 46, tccd 0 of 20, lsd and distnoted in part. Both of those declare launchd `MachServices`, so the rule is: a peer offering a known service name we send to "serves us"; otherwise a one-way no-senders request gives "likely serves us" / "likely our client"; otherwise nothing. Where send-once rights exist they agreed with no-senders in 17 pairs and conflicted in 6.
+
 ### 5. Exception (crash) handlers: a new link kind
 
 523 task exception port entries. `receiver_object` never matches any port (0 of 523); `port_object` does, and the process holding its receive right is the handler:
@@ -67,6 +69,8 @@ Proposal: a "Crash handler" row in Connections ("crashes go to chrome_crashpad_h
 175 receive ports carry boosts (122 of them 1). Summed by holder: `AXVisualSupportAgent` 60, `AccessibilitySettingsSearchExte…` 56, `com.apple.WebKit.GPU` 40, `launchd` 34. A boost is a client's priority donated to the receiver while its message is pending, so the boosted process is working on someone's behalf right now.
 
 Proposal: a "boosted ×N" note on the peer row whose port carries it. Pair later with taskinfo's "boosted by", which names the donors.
+
+**Done** with step 4: per peer, "its queue full ×N" / "our queue full ×N", "we owe it N replies" / "it owes us N replies" and "it runs boosted ×N" / "we run boosted ×N", placed before the service names so the table doesn't cut them off, plus an orange "N full queues" badge on the Mach status line. Dump: 57 links with replies owed, 88 with full queues (177 ports), 69 with boosts, matching the raw count. Live, AXVisualSupportAgent showed 62 full queues, all on ports WindowServer sends to: its WindowServer row reads "serves us · our queue full ×62 · we run boosted ×62". 1Password's browser helper showed its partner owing it 10,644 replies, and the no-senders requests point the same way. Helper protocol 7.
 
 ### 7. Port flags
 

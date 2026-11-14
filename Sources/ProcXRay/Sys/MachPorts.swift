@@ -17,6 +17,16 @@ struct MachLink: Codable, Hashable, Sendable {
     var ports: Int
     /// Messages waiting on those ports, not yet received by `to`.
     var queued: Int
+    /// Send-once rights `from` holds to `to`'s ports: replies `from` owes `to` (rare: 57 of 20,235 links).
+    var repliesOwed = 0
+    /// Of those ports, ones whose queue is full: `from` blocks or times out sending to `to`.
+    var fullQueues = 0
+    /// Importance boosts on those ports: `to` is running boosted on a sender's behalf.
+    var boosts = 0
+    /// Of those ports, ones `to` asked to be told about when no senders are left: how a server notices its
+    /// clients going away, so mostly `to` is the server (cfprefsd 1,006 of 1,015 peers, logd 744 of 747).
+    /// Services that call back into their clients' ports read the other way (notifyd, tccd).
+    var noSenders = 0
 }
 
 /// A memory entry (VM object handed out as a port) that 2…`MachSnapshot.fewHolders` processes hold.
@@ -123,9 +133,17 @@ struct MachSnapshot: Codable, Sendable {
             if l.from == pid {
                 by[l.to, default: MachPeer(pid: l.to)].sendsTo += l.ports
                 by[l.to]!.queuedThere += l.queued
+                by[l.to]!.weOwe += l.repliesOwed
+                by[l.to]!.fullThere += l.fullQueues
+                by[l.to]!.boostsThere += l.boosts
+                by[l.to]!.noSendersThere += l.noSenders
             } else if l.to == pid {
                 by[l.from, default: MachPeer(pid: l.from)].receivesFrom += l.ports
                 by[l.from]!.queuedHere += l.queued
+                by[l.from]!.itOwes += l.repliesOwed
+                by[l.from]!.fullHere += l.fullQueues
+                by[l.from]!.boostsHere += l.boosts
+                by[l.from]!.noSendersHere += l.noSenders
             }
         }
         for k in by.keys { by[k]!.common = isCommon(k); by[k]!.share = share(k) }
@@ -136,8 +154,8 @@ struct MachSnapshot: Codable, Sendable {
     static func parse(_ data: Data) -> MachSnapshot? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let procs = root["processes"] as? [[String: Any]] else { return nil }
-        var recv: [String: (pid: Int32, queued: Int)] = [:]
-        var sends: [(pid: Int32, obj: String)] = []
+        var recv: [String: (pid: Int32, queued: Int, full: Bool, boosts: Int, noSenders: Bool)] = [:]
+        var sends: [(pid: Int32, obj: String, once: Bool)] = []
         var iokit: [Int32: [String: Int]] = [:]
         var kobjects: [Int32: [String: Int]] = [:]
         var memory: [String: (holders: Set<Int32>, bytes: UInt64?)] = [:]
@@ -149,11 +167,14 @@ struct MachSnapshot: Codable, Sendable {
             if let o = q["ipc-object"] as? String, let r = q["rights"] as? [String] {
                 if r.contains("recv") {
                     let queued = (q["msg_count"] as? NSNumber)?.intValue ?? 0
-                    recv[o] = (pid, queued)
-                    if let limit = (q["queue_limit"] as? NSNumber)?.intValue, limit > 0, queued >= limit { fullQueues[pid, default: 0] += 1 }
+                    let limit = (q["queue_limit"] as? NSNumber)?.intValue ?? 0
+                    let full = limit > 0 && queued >= limit
+                    recv[o] = (pid, queued, full, (q["boosts"] as? NSNumber)?.intValue ?? 0,
+                               (q["notifications"] as? [String])?.contains("no sender") == true)
+                    if full { fullQueues[pid, default: 0] += 1 }
                 }
                 if r.contains("send") || r.contains("send once") {
-                    sends.append((pid, o))
+                    sends.append((pid, o, r.contains("send once")))
                     // A typed right is a kernel object; "port" / "UNKNOWN" are ports a process receives on.
                     if let t = q["type"] as? String, !["port", "port set", "dead name", "UNKNOWN"].contains(t) {
                         let desc = q["description"] as? String
@@ -184,9 +205,11 @@ struct MachSnapshot: Codable, Sendable {
         }
         struct Pair: Hashable { let from, to: Int32 }
         var ports: [Pair: Set<String>] = [:]
+        var owed: [Pair: Int] = [:]
         for s in sends {
             guard let r = recv[s.obj], r.pid != s.pid else { continue }
             ports[Pair(from: s.pid, to: r.pid), default: []].insert(s.obj)
+            if s.once { owed[Pair(from: s.pid, to: r.pid), default: 0] += 1 }
         }
         var snap = MachSnapshot()
         snap.processCount = procs.count
@@ -213,7 +236,10 @@ struct MachSnapshot: Codable, Sendable {
                                               fullQueues: fullQueues[pid] ?? 0)
         }
         snap.links = ports.map { k, objs in
-            MachLink(from: k.from, to: k.to, ports: objs.count, queued: objs.reduce(0) { $0 + (recv[$1]?.queued ?? 0) })
+            let rs = objs.compactMap { recv[$0] }
+            return MachLink(from: k.from, to: k.to, ports: objs.count, queued: rs.reduce(0) { $0 + $1.queued },
+                            repliesOwed: owed[k] ?? 0, fullQueues: rs.filter(\.full).count,
+                            boosts: rs.reduce(0) { $0 + $1.boosts }, noSenders: rs.filter(\.noSenders).count)
         }
         for l in snap.links { snap.senders[l.to, default: 0] += 1 }
         snap.iokit = iokit
@@ -301,6 +327,18 @@ struct MachPeer: Hashable, Sendable {
     /// the peer can send to (this process not draining its queue).
     var queuedThere = 0
     var queuedHere = 0
+    /// Replies this process owes the peer, and the peer owes this process (send-once rights).
+    var weOwe = 0
+    var itOwes = 0
+    /// Full queues on the peer's ports this process sends to, and on this process's ports the peer sends to.
+    var fullThere = 0
+    var fullHere = 0
+    /// Boosts on those same ports, either side.
+    var boostsThere = 0
+    var boostsHere = 0
+    /// No-senders requests on those ports: the side that asked is most likely the server.
+    var noSendersThere = 0
+    var noSendersHere = 0
     var common = false
     var share = 0.0
 
@@ -310,8 +348,25 @@ struct MachPeer: Hashable, Sendable {
     var direction: String {
         sendsTo > 0 && receivesFrom > 0 ? "Mach ⇄" : sendsTo > 0 ? "Mach →" : "Mach ←"
     }
+    /// Which side serves the other: a peer offering a known Mach service we send to serves us; otherwise a
+    /// one-way no-senders request ("likely"). Nil when neither says.
+    var role: String? {
+        if sendsTo > 0, !services.isEmpty { return "serves us" }
+        if noSendersThere > 0, noSendersHere == 0 { return "likely serves us" }
+        if noSendersHere > 0, noSendersThere == 0 { return "likely our client" }
+        return nil
+    }
+
     var summary: String {
         var parts: [String] = []
+        if let role { parts.append(role) }
+        // Warnings before the service names, which can run long and get cut off in the table.
+        if fullThere > 0 { parts.append("its queue full" + (fullThere > 1 ? " ×\(fullThere)" : "")) }
+        if fullHere > 0 { parts.append("our queue full" + (fullHere > 1 ? " ×\(fullHere)" : "")) }
+        if weOwe > 0 { parts.append("we owe it \(weOwe.formatted()) repl\(weOwe == 1 ? "y" : "ies")") }
+        if itOwes > 0 { parts.append("it owes us \(itOwes.formatted()) repl\(itOwes == 1 ? "y" : "ies")") }
+        if boostsThere > 0 { parts.append("it runs boosted ×\(boostsThere)") }
+        if boostsHere > 0 { parts.append("we run boosted ×\(boostsHere)") }
         if let first = services.first {
             parts.append(services.count == 1 ? first
                          : "one of \(services.count): " + services.prefix(3).joined(separator: ", ") + (services.count > 3 ? "…" : ""))
