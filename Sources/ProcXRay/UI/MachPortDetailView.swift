@@ -61,13 +61,13 @@ struct MachPortDetailView: View {
                 Text("\(peerName) \(peer): \(out) rights of ours to its ports, \(rows.count - out) of its rights to ours\(full > 0 ? " · \(full) full queue\(full == 1 ? "" : "s")" : "") · lsmp run at \(r.at.formatted(date: .omitted, time: .standard))")
                     .font(.caption).foregroundStyle(.secondary)
                 Table(rows) {
-                    TableColumn("Direction") { r in Text(r.direction) }.width(min: 52, ideal: 56)
-                    TableColumn("Our name") { r in Text(r.ourName).monospaced().lineLimit(1) }.width(min: 80, ideal: 88)
-                    TableColumn("Its name") { r in Text(r.theirName).monospaced().lineLimit(1) }.width(min: 80, ideal: 88)
-                    TableColumn("Right") { r in Text(r.right) }.width(min: 60, ideal: 66)
+                    TableColumn("Direction") { r in Text(r.direction).truncationHelp(r.direction) }.width(min: 52, ideal: 56)
+                    TableColumn("Our name") { r in Text(r.ourName).monospaced().lineLimit(1).truncationHelp(r.ourName) }.width(min: 80, ideal: 88)
+                    TableColumn("Its name") { r in Text(r.theirName).monospaced().lineLimit(1).truncationHelp(r.theirName) }.width(min: 80, ideal: 88)
+                    TableColumn("Right") { r in Text(r.right).truncationHelp(r.right) }.width(min: 60, ideal: 66)
                     TableColumn("Queue") { r in
                         Text(r.queue).monospacedDigit().foregroundStyle(r.full ? AnyShapeStyle(.orange) : AnyShapeStyle(.primary))
-                            .help(r.full ? "Full: senders block or time out until the receiver takes a message" : "Messages waiting, of the queue's limit")
+                            .help("\(r.queue). " + (r.full ? "Full: senders block or time out until the receiver takes a message" : "Messages waiting, of the queue's limit"))
                     }.width(min: 60, ideal: 66)
                     TableColumn("Boosts") { r in Text(r.d.boosts > 0 ? "\(r.d.boosts)" : "").monospacedDigit() }.width(min: 44, ideal: 48)
                     TableColumn("Flags · receiver asked for") { r in
