@@ -174,6 +174,11 @@ enum Bench {
         var without = s; without.counts = [:]
         let size = (try? JSONEncoder().encode(s).count) ?? 0, sizeWithout = (try? JSONEncoder().encode(without).count) ?? 0
         print("reply: \(size) bytes, \(size - sizeWithout) of them port counts")
+        let byHandler = Dictionary(grouping: s.exceptionRoutes.filter { $0.handler != $0.process }, by: \.handler)
+        print("exception routes: \(s.exceptionRoutes.count), \(s.exceptionRoutes.filter { $0.handler == $0.process }.count) in-process; handlers: "
+              + byHandler.sorted { $0.value.count > $1.value.count }.prefix(6).map {
+                  "\(Native.process($0.key)?.comm ?? "\($0.key)") \($0.value.count)\(s.isCommonExceptionHandler($0.key) ? " (common)" : "")"
+              }.joined(separator: ", "))
         top("ports", \.total)
         top("dead names", \.deadNames)
         top("replies owed", \.sendOnce)

@@ -40,7 +40,9 @@ struct LsofEntry: Identifiable, Hashable, Sendable {
              xpc = "XPC", mach = "Mach ports",
              /// Kernel objects from the same lsmp snapshot (MachSnapshot): driver connections, memory entries
              /// shared with few processes, other processes' task ports, and everything else by type.
-             iokit = "IOKit", sharedMemory = "Shared memory", taskPort = "Task ports", kobject = "Kernel objects"
+             iokit = "IOKit", sharedMemory = "Shared memory", taskPort = "Task ports", kobject = "Kernel objects",
+             /// Who handles this process's exceptions, and whose this one handles (MachSnapshot.exceptionRoutes).
+             exception = "Exception handlers"
         var symbol: String {
             switch self {
             case .image: "memorychip"
@@ -58,6 +60,7 @@ struct LsofEntry: Identifiable, Hashable, Sendable {
             case .sharedMemory: "square.on.square"
             case .taskPort: "key"
             case .kobject: "shippingbox"
+            case .exception: "exclamationmark.triangle"
             }
         }
     }

@@ -51,6 +51,17 @@ struct MachPortCounts: Codable, Hashable, Sendable {
     var fullQueues = 0
 }
 
+/// Where a process's task exception port sends exceptions of the kinds in `mask`: to `handler`, the process
+/// holding the receive right of that port (lsmp's `port_object`; its `receiver_object` matched no port on the
+/// machine measured). The handler is the process itself for an in-process crash reporter, a helper such as
+/// chrome_crashpad_handler, or ReportCrash, which launchd sets for most processes' resource exceptions.
+struct ExceptionRoute: Codable, Hashable, Sendable {
+    let process: Int32
+    let handler: Int32
+    /// Exception kinds as lsmp names them, lowercased: "bad access", "resource", "guard"…
+    var mask: [String]
+}
+
 struct MachSnapshot: Codable, Sendable {
     var links: [MachLink] = []
     /// Per receiver, how many other processes can send to it.
@@ -59,6 +70,15 @@ struct MachSnapshot: Codable, Sendable {
     var at = Date()
     /// Per process, its port space totals.
     var counts: [Int32: MachPortCounts] = [:]
+    /// Task exception ports, by handling process.
+    var exceptionRoutes: [ExceptionRoute] = []
+
+    /// A handler most processes' exceptions go to (ReportCrash: 58 %): the system default, which says
+    /// nothing about one process. Same share as `commonShare`.
+    func isCommonExceptionHandler(_ pid: Int32) -> Bool {
+        processCount > 0 && Double(exceptionsHandled(by: pid)) >= Self.commonShare * Double(processCount)
+    }
+    func exceptionsHandled(by pid: Int32) -> Int { Set(exceptionRoutes.lazy.filter { $0.handler == pid }.map(\.process)).count }
 
     // Kernel objects: rights to ports the kernel receives on, which pair with no process.
 
@@ -170,6 +190,20 @@ struct MachSnapshot: Codable, Sendable {
         }
         var snap = MachSnapshot()
         snap.processCount = procs.count
+        var routes: [ExceptionRoute] = []
+        for p in procs {
+            guard let pid = (p["pid"] as? NSNumber)?.int32Value else { continue }
+            for e in p["exception_ports"] as? [[String: Any]] ?? [] {
+                guard let o = e["port_object"] as? String, let h = recv[o]?.pid else { continue }
+                let mask = Self.exceptionMask(e["mask"] as? String)
+                if let i = routes.firstIndex(where: { $0.process == pid && $0.handler == h }) {
+                    routes[i].mask += mask.filter { !routes[i].mask.contains($0) }
+                } else {
+                    routes.append(ExceptionRoute(process: pid, handler: h, mask: mask))
+                }
+            }
+        }
+        snap.exceptionRoutes = routes
         for p in procs {
             guard let pid = (p["pid"] as? NSNumber)?.int32Value else { continue }
             func n(_ k: String) -> Int { (p[k] as? NSNumber)?.intValue ?? 0 }
@@ -193,6 +227,11 @@ struct MachSnapshot: Codable, Sendable {
             }
         }
         return snap
+    }
+
+    /// " BAD_ACCESS BAD_INSTRUCTION RESOURCE" → ["bad access", "bad instruction", "resource"].
+    static func exceptionMask(_ s: String?) -> [String] {
+        (s ?? "").split(separator: " ").map { $0.lowercased().replacingOccurrences(of: "_", with: " ") }
     }
 
     /// Task port types paired across processes.

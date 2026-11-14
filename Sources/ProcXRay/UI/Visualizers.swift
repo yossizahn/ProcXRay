@@ -212,6 +212,7 @@ extension LsofEntry.Kind: Identifiable {
         case .sharedMemory: Color(hue: 0.8, saturation: 0.45, brightness: 0.8)
         case .taskPort: .red
         case .kobject: Color(white: 0.55)
+        case .exception: Color(hue: 0.95, saturation: 0.55, brightness: 0.85)
         }
     }
 }
@@ -261,7 +262,7 @@ struct PeerInfo {
     }
 
     /// Rows LsofView adds that aren't descriptors: their other end is a pid kept in `node`, if any.
-    static let linkedKinds: Set<LsofEntry.Kind> = [.xpc, .mach, .iokit, .sharedMemory, .taskPort, .kobject]
+    static let linkedKinds: Set<LsofEntry.Kind> = [.xpc, .mach, .iokit, .sharedMemory, .taskPort, .kobject, .exception]
 
     /// An XPC, Mach or kernel object row's other end; needs no lsof run.
     static func linked(_ e: LsofEntry) -> PeerInfo? {
@@ -453,6 +454,25 @@ struct LsofView: View {
         }
         for (type, n) in (s.kernelObjects[pid] ?? [:]).sorted(by: { ($0.value, $1.key) > ($1.value, $0.key) }) {
             add("Object", type + times(n), .kobject)
+        }
+        // Exception handlers: ours (possibly this process itself), and the processes whose exceptions we handle.
+        func pct(_ h: Int32) -> Int { Int((Double(s.exceptionsHandled(by: h)) / Double(max(s.processCount, 1)) * 100).rounded()) }
+        for r in s.exceptionRoutes where r.process == pid {
+            let kinds = r.mask.joined(separator: ", ")
+            if r.handler == pid {
+                add("In-process", kinds + " exceptions, handled by this process itself", .exception)
+            } else {
+                add("Handler", kinds + " exceptions go here"
+                    + (s.isCommonExceptionHandler(r.handler) ? " · system default, handles \(pct(r.handler)) % of processes'" : ""),
+                    peer: r.handler, .exception)
+            }
+        }
+        let handled = s.exceptionRoutes.filter { $0.handler == pid && $0.process != pid }
+        if s.isCommonExceptionHandler(pid) {
+            let kinds = Set(handled.flatMap(\.mask)).sorted().joined(separator: ", ")
+            add("Handles", "system default: \(kinds) exceptions of \(Fmt.count(handled.count)) processes (\(pct(pid)) %)", .exception)
+        } else {
+            for r in handled { add("Handles", "its " + r.mask.joined(separator: ", ") + " exceptions", peer: r.process, .exception) }
         }
         return out
     }
@@ -1422,21 +1442,24 @@ struct PeerGraph: View {
         var machPorts = 0
         /// Task port flavors held, either way ("control", "read"…), and memory entries shared with few others.
         var taskPorts: [String] = []
+        /// "→" when the peer handles the center's exceptions, "←" when the center handles the peer's.
+        var exceptions: [String] = []
         var sharedMemory = 0
         /// Counts each Mach or XPC link once, so a peer with 40 ports doesn't outweigh real connections.
         var total: Int { kinds.values.reduce(0, +) + (xpc == nil ? 0 : 1) + (machPorts > 0 ? 1 : 0) }
         var label: String {
             ([xpc].compactMap { $0 } + LsofEntry.Kind.allCases.compactMap { k in kinds[k].map { "\(Self.short(k)) \($0)" } }
-             + taskPorts.map { "task \($0)" } + (sharedMemory > 0 ? ["shm \(sharedMemory)"] : [])
+             + taskPorts.map { "task \($0)" } + exceptions.map { "exc \($0)" } + (sharedMemory > 0 ? ["shm \(sharedMemory)"] : [])
              + (machPorts > 0 ? ["mach \(machPorts)"] : []))
                 .joined(separator: " · ")
         }
         /// No descriptor, only rights (XPC, Mach): "can talk", so the edge is dashed.
         var canTalkOnly: Bool { kinds.isEmpty }
         /// Which peers make the cut: open descriptors first, then XPC, then Mach ports by count.
-        var rank: (Int, Int, Int, Int, Int) { (kinds.values.reduce(0, +), xpc == nil ? 0 : 1, taskPorts.count, sharedMemory, machPorts) }
+        var rank: (Int, Int, Int, Int, Int) { (kinds.values.reduce(0, +), xpc == nil ? 0 : 1, taskPorts.count + exceptions.count, sharedMemory, machPorts) }
         var edgeColor: Color {
             !kinds.isEmpty ? main.color : xpc != nil ? LsofEntry.Kind.xpc.color : !taskPorts.isEmpty ? LsofEntry.Kind.taskPort.color
+                : !exceptions.isEmpty ? LsofEntry.Kind.exception.color
                 : sharedMemory > 0 ? LsofEntry.Kind.sharedMemory.color : LsofEntry.Kind.mach.color
         }
         var main: LsofEntry.Kind { kinds.max { $0.value < $1.value }?.key ?? .unix }
@@ -1475,8 +1498,15 @@ struct PeerGraph: View {
             by[other, default: Peer(id: other)].taskPorts.append(t.holder == center ? t.flavor : "← \(t.flavor)")
         }
         for m in mach?.sharedMemory(of: center) ?? [] { by[m.pid, default: Peer(id: m.pid)].sharedMemory += m.entries }
+        // The system default handler (ReportCrash) would be on most maps, like a common service.
+        for r in mach?.exceptionRoutes ?? [] where r.process != r.handler && (r.process == center || r.handler == center) {
+            if r.process == center, mach?.isCommonExceptionHandler(r.handler) == true { continue }
+            if r.handler == center, mach?.isCommonExceptionHandler(center) == true { continue }
+            let other = r.process == center ? r.handler : r.process
+            by[other, default: Peer(id: other)].exceptions.append(r.process == center ? "→" : "←")
+        }
         let common = by.values.filter {
-            $0.kinds.isEmpty && $0.xpc == nil && $0.taskPorts.isEmpty && $0.sharedMemory == 0 && machPeers[$0.id]?.common == true
+            $0.kinds.isEmpty && $0.xpc == nil && $0.taskPorts.isEmpty && $0.exceptions.isEmpty && $0.sharedMemory == 0 && machPeers[$0.id]?.common == true
         }.map(\.id)
         for c in common { by[c] = nil }
         return (by.values.sorted { $0.rank != $1.rank ? $0.rank > $1.rank : $0.id < $1.id }, common.count)
