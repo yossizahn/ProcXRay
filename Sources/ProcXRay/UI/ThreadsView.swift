@@ -3,16 +3,20 @@ import SwiftUI
 
 /// Every thread of one process, read again each refresh interval: CPU over the last interval, CPU time,
 /// state and scheduling. Read directly for the user's own processes and through the helper for the rest.
+/// Stacks (one `sample`), dispatch queues and QoS (`taskinfo`) are a snapshot, captured when the pane opens
+/// and again on request.
 struct ThreadsView: View {
     @Environment(Store.self) var store
     let proc: ProcInfo
     var exited = false
 
-    struct Row: Identifiable, Hashable {
+    struct Row: Identifiable {
         let t: ThreadSample
         /// Share of one core over the last interval; nil for a thread first seen this read.
         let cpu: Double?
         let isMain: Bool
+        /// From the last stack / QoS capture; nil for a thread that didn't exist then.
+        var detail: ThreadDetail? = nil
         var id: UInt64 { t.id }
         var shownName: String { t.name.isEmpty ? (isMain ? "main thread" : "") : t.name }
         // Sort keys.
@@ -23,7 +27,11 @@ struct ThreadsView: View {
         var priorityKey: Int32 { t.curPriority }
         var stateKey: String { t.stateText }
         var policyKey: String { t.policyText }
+        var queueKey: String { detail?.queue ?? "" }
+        var qosKey: Int { ThreadsView.qosRank[detail?.effectiveQoS ?? ""] ?? -1 }
+        var waitKey: String { detail?.leaf?.symbol ?? "" }
     }
+    static let qosRank = ["Maintenance": 0, "Background": 1, "Utility": 2, "Default": 3, "User initiated": 4, "User interactive": 5]
 
     @State private var rows: [Row] = []
     @State private var last: ThreadSnapshot?
@@ -33,12 +41,18 @@ struct ThreadsView: View {
     @State private var selection = Set<UInt64>()
     @State private var filter = ""
     @AppStorage("threads.busyOnly") private var busyOnly = false
+    @State private var details: ThreadDetails?
+    @State private var capturing = false
+    @State private var captureTask: Task<Void, Never>?
 
     private var shown: [Row] {
         let f = filter.trimmingCharacters(in: .whitespaces)
-        return rows.filter { r in
+        let byID = details?.byID ?? [:]
+        return rows.map { r in var r = r; r.detail = byID[r.id]; return r }.filter { r in
             (!busyOnly || (r.cpu ?? 0) > 0)
-                && (f.isEmpty || r.shownName.localizedCaseInsensitiveContains(f) || String(r.id).contains(f))
+                && (f.isEmpty || r.shownName.localizedCaseInsensitiveContains(f) || String(r.id).contains(f)
+                    || (r.detail?.queue?.localizedCaseInsensitiveContains(f) ?? false)
+                    || (r.detail?.stack.contains { $0.symbol.localizedCaseInsensitiveContains(f) } ?? false))
         }
         .sorted(using: sort)
     }
@@ -50,10 +64,65 @@ struct ThreadsView: View {
             if rows.isEmpty {
                 placeholder
             } else {
-                table
+                // A stored fraction, so the divider stays put as the selection comes and goes.
+                SplitPane(id: "threads", defaultFraction: 0.55, showsBottom: selection.count == 1) {
+                    table
+                } bottom: {
+                    if let id = selection.first { stackPane(id) }
+                }
             }
         }
         .task(id: "\(proc.key)|\(exited)|\(store.helperState.isRunning)") { await poll() }
+        .task(id: "\(proc.key)|\(store.helperState.isRunning)") {
+            // Once per process when the pane opens; later captures are on request.
+            details = nil
+            if !exited { capture() }
+        }
+        .onDisappear { captureTask?.cancel() }
+    }
+
+    /// One `sample` (stacks and queue names; root via the helper, or as the user) and, with the helper,
+    /// `taskinfo` (QoS, sched mode, I/O tier). Both checked against the pid's start time afterwards.
+    private func capture() {
+        captureTask?.cancel()
+        capturing = true
+        let pid = proc.pid, start = proc.start, helper = store.helperState.isRunning
+        let cancel = Shell.Cancel()
+        captureTask = Task {
+            let got = await withTaskCancellationHandler {
+                await Task.detached { () -> ThreadDetails? in
+                    Shell.Cancel.$current.withValue(cancel) {
+                        guard Native.isSame(pid, start: start) else { return nil }
+                        var d = ThreadDetails()
+                        // Both at once: taskinfo doesn't suspend the target, and the two take ~0.3 s and ~0.15 s.
+                        var ti: String?
+                        let group = DispatchGroup()
+                        if helper {
+                            DispatchQueue.global(qos: .userInitiated).async(group: group) {
+                                ti = HelperClient.shared.run(.taskinfo, pid: pid, timeout: 15)
+                            }
+                        }
+                        let stacks: String
+                        if helper { stacks = HelperClient.shared.run(.stacks, pid: pid, timeout: 20) ?? "" }
+                        else if let (path, args) = HelperTool.stacks.argv(pid: pid) { stacks = Shell.run(path, args, timeout: HelperTool.stacks.timeout) }
+                        else { stacks = "" }
+                        group.wait()
+                        guard Native.isSame(pid, start: start) else { return nil }
+                        if stacks.contains("Call graph:") { d.mergeSample(stacks) }
+                        else {
+                            let why = stacks.split(separator: "\n").first.map(String.init) ?? "no output"
+                            d.notes.append("No stacks: \(why)" + (helper ? "" : " Install the privileged helper to sample other processes."))
+                        }
+                        if let ti, ti.contains("threads:") { d.mergeTaskinfo(ti) }
+                        else if !helper { d.notes.append("QoS needs the privileged helper (taskinfo runs as root only).") }
+                        return d
+                    }
+                }.value
+            } onCancel: { cancel.cancel() }
+            guard !Task.isCancelled else { return }
+            if let got { details = got }
+            capturing = false
+        }
     }
 
     // MARK: reading
@@ -111,10 +180,17 @@ struct ThreadsView: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 4) {
                 HStack(spacing: 8) {
+                    if capturing { ProgressView().controlSize(.small) }
+                    Button(details == nil ? "Capture stacks" : "Recapture stacks") { capture() }
+                        .disabled(capturing || exited)
+                        .help("Take one sample of every thread's stack (sample <pid> 0 1, which suspends the process for an instant) and read dispatch queues and QoS (taskinfo, as root).")
                     Toggle("Only threads using CPU", isOn: $busyOnly).toggleStyle(.checkbox).font(.caption)
                     TextField("filter name or ID", text: $filter).textFieldStyle(.roundedBorder).frame(width: 160)
                 }
                 Text(sourceNote).font(.caption).foregroundStyle(.secondary)
+                if let notes = details?.notes, !notes.isEmpty {
+                    Text(notes.joined(separator: " ")).font(.caption).foregroundStyle(.orange).lineLimit(1).truncationHelp(notes.joined(separator: "\n"))
+                }
             }
         }
         .padding(8)
@@ -123,7 +199,9 @@ struct ThreadsView: View {
     private var sourceNote: String {
         if exited { return "Exited: the last read is shown." }
         if rows.isEmpty { return "" }
-        return "Every \(store.interval.formatted()) s · " + (viaHelper ? "as root via helper" : "as \(NSUserName())")
+        let live = "Every \(store.interval.formatted()) s · " + (viaHelper ? "as root via helper" : "as \(NSUserName())")
+        guard let d = details, d.hasStacks || d.hasQoS else { return live }
+        return live + " · stacks at " + d.at.formatted(date: .omitted, time: .standard)
     }
 
     private var placeholder: some View {
@@ -153,7 +231,7 @@ struct ThreadsView: View {
                     .italic(r.t.name.isEmpty && r.isMain)
                     .truncationHelp(r.shownName)
             }
-            .width(min: 100, ideal: 220)
+            .width(min: 90, ideal: 180)
             TableColumn("CPU %", value: \.cpuKey) { r in
                 Text(r.cpu.map(Fmt.pct) ?? "—").monospacedDigit()
                     .foregroundStyle((r.cpu ?? 0) > 0 ? .primary : .secondary)
@@ -162,16 +240,24 @@ struct ThreadsView: View {
             .width(min: 60, ideal: 64, max: 90)
             TableColumn("CPU time", value: \.timeKey) { r in
                 Text(Fmt.secs(r.t.cpuNanos)).monospacedDigit().frame(maxWidth: .infinity, alignment: .trailing)
+                    .help("User \(Fmt.secs(r.t.userNanos)), system \(Fmt.secs(r.t.systemNanos))")
             }
             .width(min: 60, ideal: 80, max: 110)
-            TableColumn("User", value: \.userKey) { r in
-                Text(Fmt.secs(r.t.userNanos)).monospacedDigit().foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
+            TableColumn("Waiting in", value: \.waitKey) { r in
+                let w = Self.waitText(r.detail)
+                Text(w.isEmpty ? "—" : w).foregroundStyle(w.isEmpty ? .secondary : .primary).truncationHelp(w)
             }
-            .width(min: 56, ideal: 72, max: 100)
-            TableColumn("System", value: \.systemKey) { r in
-                Text(Fmt.secs(r.t.systemNanos)).monospacedDigit().foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
+            .width(min: 100, ideal: 260)
+            TableColumn("Queue", value: \.queueKey) { r in
+                Text(r.detail?.queue ?? "").foregroundStyle(.secondary).truncationHelp(r.detail?.queue ?? "")
             }
-            .width(min: 56, ideal: 72, max: 100)
+            .width(min: 50, ideal: 140)
+            TableColumn("QoS", value: \.qosKey) { r in
+                Text(r.detail?.effectiveQoS ?? (r.detail?.requestedQoS == nil && r.detail?.schedMode != nil ? "unspecified" : ""))
+                    .foregroundStyle(r.detail?.darwinBG == true ? .orange : .primary)
+                    .help(Self.qosHelp(r.detail))
+            }
+            .width(min: 60, ideal: 96, max: 130)
             TableColumn("State", value: \.stateKey) { r in
                 Text(r.t.stateText).foregroundStyle(Self.stateColor(r.t.runState))
             }
@@ -195,6 +281,63 @@ struct ThreadsView: View {
         .onCopyCommand { [ids = selection] in [NSItemProvider(object: text(for: ids) as NSString)] }
     }
 
+    /// "mach_msg2_trap ← __CFRunLoopServiceMachPort": the innermost frame, and the innermost one outside the
+    /// syscall and pthread wrappers when that is a different frame.
+    static func waitText(_ d: ThreadDetail?) -> String {
+        guard let leaf = d?.leaf else { return "" }
+        guard let c = d?.caller, c != leaf else { return leaf.symbol }
+        return "\(leaf.symbol) ← \(c.symbol)"
+    }
+
+    static func qosHelp(_ d: ThreadDetail?) -> String {
+        guard let d, d.schedMode != nil else { return "QoS comes from taskinfo, which needs the privileged helper." }
+        var lines = ["Effective: \(d.effectiveQoS ?? "unspecified")", "Requested: \(d.requestedQoS ?? "unspecified")"]
+        if let p = d.promotionQoS, p != d.effectiveQoS { lines.append("Promoted to: \(p)") }
+        if let m = d.schedMode { lines.append("Scheduling: \(m)") }
+        if let io = d.ioTier { lines.append("I/O tier: \(io)") }
+        if d.darwinBG == true { lines.append("Darwin background: throttled CPU and I/O") }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The selected thread's stack from the last capture, innermost frame first (as a debugger shows it).
+    @ViewBuilder private func stackPane(_ id: UInt64) -> some View {
+        let d = details?.byID[id]
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Text("Stack of thread \(String(id))").font(.caption.weight(.semibold))
+                if let q = d?.queue { Text("· queue \(q)").font(.caption).foregroundStyle(.secondary) }
+                if let at = details?.at, d?.stack.isEmpty == false {
+                    Text("· sampled \(at.formatted(date: .omitted, time: .standard))").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            Divider()
+            if let frames = d?.stack, !frames.isEmpty {
+                ScrollView {
+                    Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 2) {
+                        ForEach(Array(frames.reversed().enumerated()), id: \.offset) { i, f in
+                            GridRow {
+                                Text("\(i)").foregroundStyle(.tertiary).monospacedDigit().gridColumnAlignment(.trailing)
+                                Text(f.library ?? "").foregroundStyle(.secondary).lineLimit(1)
+                                Text(f.symbol).lineLimit(1).truncationHelp(f.symbol)
+                                    .foregroundStyle(f.library.map(ThreadDetail.plumbing.contains) == true ? .secondary : .primary)
+                            }
+                        }
+                    }
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                Text(details == nil ? "Capturing…" : "No stack for this thread: it started after the last capture, or sampling failed. Recapture to get it.")
+                    .font(.caption).foregroundStyle(.secondary).padding(8)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
     private static func stateColor(_ s: Int32) -> Color {
         switch s {
         case 1: .green
@@ -205,8 +348,8 @@ struct ThreadsView: View {
 
     private func text(for ids: Set<UInt64>) -> String {
         shown.filter { ids.contains($0.id) }.map { r in
-            [String(r.id), r.shownName, r.cpu.map(Fmt.pct) ?? "—", Fmt.secs(r.t.cpuNanos), r.t.stateText,
-             "\(r.t.curPriority)", r.t.policyText].joined(separator: "\t")
+            [String(r.id), r.shownName, r.cpu.map(Fmt.pct) ?? "—", Fmt.secs(r.t.cpuNanos), Self.waitText(r.detail),
+             r.detail?.queue ?? "", r.detail?.effectiveQoS ?? "", r.t.stateText, "\(r.t.curPriority)", r.t.policyText].joined(separator: "\t")
         }.joined(separator: "\n")
     }
 

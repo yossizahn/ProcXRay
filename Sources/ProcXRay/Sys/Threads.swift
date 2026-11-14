@@ -103,3 +103,133 @@ enum ThreadReader {
         return ThreadSnapshot(threads: out, workqueue: workqueue)
     }
 }
+
+// MARK: - Stacks and QoS (snapshots, not live)
+
+/// One frame of a sampled stack, outermost first.
+struct StackFrame: Hashable, Sendable {
+    var symbol: String
+    var library: String?
+}
+
+/// What a one-sample `sample` run and `taskinfo --threads --dq` say about one thread.
+struct ThreadDetail: Sendable {
+    /// Outermost frame first; the last one is where the thread was when sampled.
+    var stack: [StackFrame] = []
+    /// The dispatch queue the thread was running a block for, if any (sample, else taskinfo).
+    var queue: String?
+    // taskinfo, root only.
+    var requestedQoS: String?
+    var effectiveQoS: String?
+    var promotionQoS: String?
+    var schedMode: String?
+    var darwinBG: Bool?
+    var ioTier: String?
+
+    /// The innermost frame: for a waiting thread, the trap it is blocked in (mach_msg2_trap, __psynch_cvwait…).
+    var leaf: StackFrame? { stack.last }
+
+    /// The innermost frame outside the syscall and pthread wrappers: what the wait is for
+    /// (__CFRunLoopServiceMachPort, _dispatch_workloop_worker_thread, a condition variable's owner…).
+    var caller: StackFrame? {
+        stack.dropLast().last { f in !(f.library.map(ThreadDetail.plumbing.contains) ?? false) }
+    }
+    static let plumbing: Set<String> = ["libsystem_kernel.dylib", "libsystem_pthread.dylib", "libsystem_platform.dylib",
+                                        "libsystem_c.dylib", "libsystem_malloc.dylib"]
+}
+
+/// Thread details from one capture, by thread ID.
+struct ThreadDetails: Sendable {
+    var byID: [UInt64: ThreadDetail] = [:]
+    var at = Date()
+    /// Why stacks or QoS are missing (no helper, sample failed…), for the view to say.
+    var notes: [String] = []
+    var hasStacks: Bool { byID.values.contains { !$0.stack.isEmpty } }
+    var hasQoS: Bool { byID.values.contains { $0.effectiveQoS != nil } }
+
+    /// `sample <pid> 0 1`: each thread is one chain. With more samples the heaviest path is taken.
+    mutating func mergeSample(_ text: String) {
+        for t in SampleParser.parse(text).threads {
+            // "Thread_11742   DispatchQueue_1: com.apple.main-thread  (serial)" or "Thread_11849: com.apple.NSEventThread"
+            guard let id = Self.threadID(t.symbol) else { continue }
+            var d = byID[id] ?? ThreadDetail()
+            if let r = t.symbol.range(of: #"DispatchQueue_\d+: "#, options: .regularExpression) {
+                var q = String(t.symbol[r.upperBound...])
+                if let paren = q.range(of: "  (", options: .backwards) { q = String(q[..<paren.lowerBound]) }
+                d.queue = q.trimmingCharacters(in: .whitespaces)
+            }
+            var frames: [StackFrame] = []
+            var n = t.children.max { $0.count < $1.count }
+            while let node = n {
+                frames.append(StackFrame(symbol: node.symbol, library: node.library))
+                n = node.children.max { $0.count < $1.count }
+            }
+            d.stack = frames
+            byID[id] = d
+        }
+    }
+
+    private static func threadID(_ header: String) -> UInt64? {
+        guard let r = header.range(of: #"Thread_\d+"#, options: .regularExpression) else { return nil }
+        return UInt64(header[r].dropFirst("Thread_".count))
+    }
+
+    /// `taskinfo <pid> --threads --dq`: per-thread blocks after the "threads:" line, each starting
+    /// "thread ID: 0x2dde / 11742".
+    mutating func mergeTaskinfo(_ text: String) {
+        var inThreads = false
+        var id: UInt64?
+        var d = ThreadDetail()
+        func flush() { if let id { var m = byID[id] ?? ThreadDetail(); m.absorbPolicy(d); byID[id] = m } }
+        for raw in text.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if !inThreads { inThreads = line == "threads:"; continue }
+            func value(_ key: String) -> String? {
+                line.hasPrefix(key) ? line.dropFirst(key.count).trimmingCharacters(in: .whitespaces) : nil
+            }
+            if let v = value("thread ID:") {
+                flush()
+                id = v.split(separator: "/").last.flatMap { UInt64($0.trimmingCharacters(in: .whitespaces)) }
+                d = ThreadDetail()
+            } else if let v = value("dispatch queue name:") {
+                d.queue = v.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            } else if let v = value("req thread qos:") {
+                d.requestedQoS = Self.qos(v)
+            } else if let v = value("eff thread qos:") {
+                d.effectiveQoS = Self.qos(v)
+            } else if let v = value("eff promotion qos:") {
+                d.promotionQoS = Self.qos(v)
+            } else if let v = value("sched mode:") {
+                d.schedMode = v
+            } else if let v = value("eff darwin BG:") {
+                d.darwinBG = v.hasPrefix("YES")
+            } else if let v = value("eff iotier:") {
+                // "THROTTLE_LEVEL_TIER0 (IMPORTANT)" → "IMPORTANT"
+                d.ioTier = v.split(separator: "(").last.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ") ")).capitalized }
+            }
+        }
+        flush()
+    }
+
+    /// "THREAD_QOS_USER_INITIATED, relprio: 0" → "User initiated"; nil for UNSPECIFIED.
+    static func qos(_ v: String) -> String? {
+        let name = v.split(separator: ",").first.map(String.init) ?? v
+        switch name {
+        case "THREAD_QOS_USER_INTERACTIVE": return "User interactive"
+        case "THREAD_QOS_USER_INITIATED": return "User initiated"
+        case "THREAD_QOS_LEGACY", "THREAD_QOS_DEFAULT": return "Default"   // xnu: LEGACY is the Default class
+        case "THREAD_QOS_UTILITY": return "Utility"
+        case "THREAD_QOS_BACKGROUND": return "Background"
+        case "THREAD_QOS_MAINTENANCE": return "Maintenance"
+        default: return nil
+        }
+    }
+}
+
+private extension ThreadDetail {
+    mutating func absorbPolicy(_ d: ThreadDetail) {
+        if queue == nil { queue = d.queue }
+        requestedQoS = d.requestedQoS; effectiveQoS = d.effectiveQoS; promotionQoS = d.promotionQoS
+        schedMode = d.schedMode; darwinBG = d.darwinBG; ioTier = d.ioTier
+    }
+}

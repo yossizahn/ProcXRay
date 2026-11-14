@@ -107,7 +107,9 @@ Filled in the background and cached by `codeKey`. `SecCodeCopyGuestWithAttribute
 - `PROC_PIDTHREADID64INFO` per ID → `proc_threadinfo`: **name**, **user / system time** (ns; matched taskinfo to the µs), **run state**, **policy**, **current / base / max priority**. CPU % is the `user + system` delta over the interval. ~0.13 ms for a 70-thread process; ~0.5 ms through the helper.
 - `PROC_PIDWORKQUEUEINFO`: GCD pool **total / running / blocked**.
 - Not shown, measured over 479 processes and 3,036 threads (2026-11-14): `pth_sleep_time` was 0 for all of them, and `pth_flags` had TH_FLAGS_SWAPPED on 98 %. `pth_cpu_usage` is the scheduler's decayed estimate, not used. Run state is one instant (3,035 of 3,036 were waiting).
-- Not available from these calls: dispatch queue names and thread QoS (`taskinfo --threads --dq` has them, ~120 ms as root).
+- Stacks, dispatch queues and QoS are a snapshot, taken when the pane opens and on "Recapture stacks":
+  - `sample <pid> 0 1` (`HelperTool.stacks`, as root through the helper, else as the user): one sample of every thread, symbolicated, with `Thread_<id>` headers that match the IDs above, and `DispatchQueue_N: <label>` for a thread running a queue's block. 0.2–0.4 s for Finder, Slack, WindowServer and launchd (1.8 s on a first run while symbols load), against ~20 s for the Sample pane's 1 s run of Slack. It suspends the target for that one sample. "Waiting in" is the innermost frame plus the innermost one outside libsystem_kernel / pthread / platform / c / malloc.
+  - `taskinfo <pid> --threads --dq` (root only, 18–121 ms): requested, effective and promotion **QoS**, **sched mode** (timeshare / fixed-priority / real-time), effective I/O tier and darwin BG. Over the 40 busiest processes (651 threads), only 25 had a dispatch queue name at that instant, so queue names are mostly the main thread's; every override field (kevent, workloop, legacy, workqueue, turnstile) was unspecified except on 2 threads, so they are not shown.
 
 ## What else is available
 

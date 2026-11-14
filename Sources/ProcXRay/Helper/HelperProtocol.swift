@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 9   // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads
+    static let protocolVersion = 10  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -89,7 +89,7 @@ enum SyscallTraceConfig {
 
 /// Allowlisted tools; the helper builds the argv itself.
 enum HelperTool: Int, CaseIterable {
-    case lsof = 1, vmmap, sample, launchctlProcinfo, btmDump, lsofAll, pidDomain, taskinfo, powermetrics
+    case lsof = 1, vmmap, sample, launchctlProcinfo, btmDump, lsofAll, pidDomain, taskinfo, powermetrics, stacks
 
     func argv(pid: Int32) -> (String, [String])? {
         switch self {
@@ -97,6 +97,9 @@ enum HelperTool: Int, CaseIterable {
         case .vmmap: return pid > 0 ? ("/usr/bin/vmmap", ["--summary", "\(pid)"]) : nil
         // Without -file, sample also writes its report to /tmp (as root, world-readable when run by the helper).
         case .sample: return pid > 0 ? ("/usr/bin/sample", ["\(pid)", "1", "-mayDie", "-file", "/dev/stdout"]) : nil
+        // One sample of every thread's stack (duration 0): ~0.3 s with symbols, against ~20 s for a 1 s run of
+        // an Electron app. The target is suspended only for that one sample.
+        case .stacks: return pid > 0 ? ("/usr/bin/sample", ["\(pid)", "0", "1", "-mayDie", "-file", "/dev/stdout"]) : nil
         case .launchctlProcinfo: return pid > 0 ? ("/bin/launchctl", ["procinfo", "\(pid)"]) : nil
         case .btmDump: return ("/usr/bin/sfltool", ["dumpbtm"])
         // Every process's descriptors in field form (pid, fd, type, address, name, protocol, TCP state), for
@@ -120,6 +123,7 @@ enum HelperTool: Int, CaseIterable {
         case .lsof, .lsofAll: 20
         case .powermetrics: 15
         case .launchctlProcinfo, .pidDomain, .taskinfo: 10
+        case .stacks: 15
         }
     }
     /// Output beyond this is dropped: it goes back as one XPC reply and the app parses all of it.

@@ -101,7 +101,7 @@ enum Bench {
         }
     }
 
-    /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|powermetrics> [pid] [--full]`:
+    /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|stacks|powermetrics> [pid] [--full]`:
     /// one helper call from the shell, for testing the helper without the UI. Only this exact binary is accepted by the helper.
     static func helperCall(_ args: [String]) {
         let c = HelperClient.shared
@@ -110,7 +110,7 @@ enum Bench {
         let pid = args.dropFirst().first.flatMap { Int32($0) } ?? 0
         let tools: [String: HelperTool] = ["lsof": .lsof, "vmmap": .vmmap, "sample": .sample,
                                            "procinfo": .launchctlProcinfo, "btm": .btmDump, "lsofall": .lsofAll,
-                                           "taskinfo": .taskinfo, "powermetrics": .powermetrics]
+                                           "taskinfo": .taskinfo, "powermetrics": .powermetrics, "stacks": .stacks]
         if what == "mach" {
             let t0 = Date()
             switch c.machPorts() {
@@ -142,6 +142,23 @@ enum Bench {
                 if let w = s.workqueue { print("  workqueue \(w.total) running \(w.running) blocked \(w.blocked)") }
                 for t in s.threads.prefix(8) {
                     print("  \(t.id) '\(t.name)' cpu \(Fmt.secs(t.cpuNanos)) \(t.stateText) pri \(t.curPriority)/\(t.basePriority)/\(t.maxPriority) \(t.policyText)")
+                }
+                // Stacks and QoS, as the Threads pane captures them.
+                let t2 = Date()
+                let stacks = c.run(.stacks, pid: pid) ?? ""
+                let st = -t2.timeIntervalSinceNow * 1000
+                let t3 = Date()
+                let ti = c.run(.taskinfo, pid: pid) ?? ""
+                let tt = -t3.timeIntervalSinceNow * 1000
+                var d = ThreadDetails()
+                d.mergeSample(stacks); d.mergeTaskinfo(ti)
+                let ids = Set(s.threads.map(\.id))
+                print(String(format: "  stacks %.0f ms (%d threads), taskinfo %.0f ms (%d with QoS); matched %d of %d", st,
+                             d.byID.values.filter { !$0.stack.isEmpty }.count, tt, d.byID.values.filter { $0.schedMode != nil }.count,
+                             ids.filter { d.byID[$0] != nil }.count, ids.count))
+                for t in s.threads.prefix(8) {
+                    let x = d.byID[t.id]
+                    print("  \(t.id) wait: \(ThreadsView.waitText(x)) | queue: \(x?.queue ?? "-") | qos: \(x?.effectiveQoS ?? "-") \(x?.schedMode ?? "")")
                 }
             }
             return
