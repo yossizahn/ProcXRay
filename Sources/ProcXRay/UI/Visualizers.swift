@@ -372,7 +372,14 @@ struct LsofView: View {
                     Label(e.kind == .image ? "mapped" : e.type, systemImage: e.kind.symbol).foregroundStyle(e.kind.color)
                         .truncationHelp(e.kind == .image ? "mapped" : e.type)
                 }.width(min: 96, ideal: 104, max: 140)
-                TableColumn("Name", value: \.name) { e in NameCell(e: e) }
+                TableColumn("Name", value: \.name) { e in
+                    HStack(spacing: 4) {
+                        if e.kind == .mach, let peer = Int32(e.node) {
+                            MachPortsButton(pid: pid, peer: peer, peerName: store.procs[peer]?.name ?? "pid")
+                        }
+                        NameCell(e: e)
+                    }
+                }
                 TableColumn("Location", value: \.location) { e in
                     Text(e.location).foregroundStyle(.secondary).lineLimit(1).truncationHelp(e.location)
                 }.width(min: 70, ideal: 110, max: 180)

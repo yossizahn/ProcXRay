@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 7   // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes
+    static let protocolVersion = 8   // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -57,6 +57,9 @@ enum HelperConfig {
     /// Every process's Mach port links: `lsmp -a` paired in the helper, so the reply is the links (~1 MB of
     /// JSON MachSnapshot), not lsmp's ~40 MB. Admin callers only. (snapshot, nil) or (nil, why not).
     func machPorts(reply: @escaping (Data?, String?) -> Void)
+    /// The ports behind the Mach link between two processes, both directions, from the helper's last lsmp
+    /// run (or a new one if it has none). Admin callers only. (JSON MachPortDetailReply, nil) or (nil, why not).
+    func machPortDetail(pid: Int32, peer: Int32, reply: @escaping (Data?, String?) -> Void)
 
     /// Syscall trace of one process (kdebug through `ktrace trace`), at most one per connection. The trace
     /// stops when the connection ends, so the app gives each trace a connection of its own.

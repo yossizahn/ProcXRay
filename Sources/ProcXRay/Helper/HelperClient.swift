@@ -111,6 +111,23 @@ final class HelperClient: @unchecked Sendable {
         return .failure(.init(message: out.1 ?? "unreadable reply from the helper"))
     }
 
+    /// The ports between two processes (HelperProtocol.machPortDetail), on a connection of its own.
+    func machPortDetail(pid: Int32, peer: Int32, timeout: Double = 60) -> Swift.Result<MachPortDetailReply, MachLoader.Failure> {
+        let c = makeConnection()
+        defer { c.invalidate() }
+        let lock = NSLock()
+        var out: (Data?, String?) = (nil, "the helper did not answer")
+        let sem = DispatchSemaphore(value: 0)
+        guard let p = c.remoteObjectProxyWithErrorHandler({ e in
+            lock.lock(); out = (nil, "helper: \(e.localizedDescription)"); lock.unlock(); sem.signal()
+        }) as? HelperProtocol else { return .failure(.init(message: "no helper connection")) }
+        p.machPortDetail(pid: pid, peer: peer) { d, e in lock.lock(); out = (d, e); lock.unlock(); sem.signal() }
+        _ = sem.wait(timeout: .now() + timeout)
+        lock.lock(); defer { lock.unlock() }
+        if let d = out.0, let r = try? JSONDecoder().decode(MachPortDetailReply.self, from: d) { return .success(r) }
+        return .failure(.init(message: out.1 ?? "unreadable reply from the helper"))
+    }
+
     // MARK: plumbing
 
     private func call<T>(_ body: (HelperProtocol, @escaping (T) -> Void) -> Void, timeout: Double = 15) -> T? {

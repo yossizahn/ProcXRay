@@ -92,23 +92,23 @@ enum HelperDaemon {
             guard callerIsAdmin else { reply(nil, "Mach ports of every process can only be read for an admin user."); return }
             let cancel = self.cancel
             DispatchQueue.global(qos: .userInitiated).async {
-                // lsmp writes its JSON to a path. A directory of root's own (umask 077), so no other user can
-                // read the port map or plant a file there.
-                var template = Array((NSTemporaryDirectory() + "procxray-lsmp.XXXXXX").utf8CString)
-                guard let dir = template.withUnsafeMutableBufferPointer({ mkdtemp($0.baseAddress) }).map({ String(cString: $0) }) else {
-                    reply(nil, "helper: no temporary directory"); return
+                switch MachPortCache.run(cancel: cancel) {
+                case .success(let snap): reply(try? JSONEncoder().encode(snap), nil)
+                case .failure(let e): reply(nil, e.message)
                 }
-                let file = dir + "/ports.json"
-                defer { unlink(file); rmdir(dir) }
-                let r = Shell.Cancel.$current.withValue(cancel) {
-                    // Its text listing (as long as the JSON) goes nowhere; stderr comes back for errors.
-                    Shell.exec("/usr/bin/lsmp", ["-a", "-j", file], timeout: 40, discardStdout: true)
-                }
-                guard let data = FileManager.default.contents(atPath: file), let snap = MachSnapshot.parse(data) else {
-                    let why = r.timedOut ? "lsmp ran past its time limit" : r.output.trimmingCharacters(in: .whitespacesAndNewlines)
-                    reply(nil, "lsmp failed: \(why.isEmpty ? "exit \(r.status)" : why)"); return
-                }
-                reply(try? JSONEncoder().encode(snap), nil)
+            }
+        }
+
+        func machPortDetail(pid: Int32, peer: Int32, reply: @escaping (Data?, String?) -> Void) {
+            guard callerIsAdmin else { reply(nil, "Mach ports of every process can only be read for an admin user."); return }
+            let cancel = self.cancel
+            DispatchQueue.global(qos: .userInitiated).async {
+                // From the last run (the one the app's snapshot came from), unless the helper has restarted
+                // since (it exits when idle): then a run of its own.
+                if MachPortCache.last() == nil, case .failure(let e) = MachPortCache.run(cancel: cancel) { reply(nil, e.message); return }
+                guard let c = MachPortCache.last() else { reply(nil, "no Mach snapshot"); return }
+                let r = MachPortDetailReply(at: c.at, ports: c.ports[PortPair(pid, peer)] ?? [])
+                reply(try? JSONEncoder().encode(r), nil)
             }
         }
 
@@ -165,5 +165,35 @@ enum HelperDaemon {
             traceLock.lock(); let t = trace; traceLock.unlock()
             t?.stop()
         }
+    }
+}
+
+/// The helper's lsmp runs: each one's snapshot goes to the app, and its per-pair ports stay here for
+/// `machPortDetail` (~60 k entries for 800 processes).
+enum MachPortCache {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var cached: (at: Date, ports: [PortPair: [MachPortDetail]])?
+
+    static func last() -> (at: Date, ports: [PortPair: [MachPortDetail]])? { lock.lock(); defer { lock.unlock() }; return cached }
+
+    static func run(cancel: Shell.Cancel?) -> Swift.Result<MachSnapshot, MachLoader.Failure> {
+        // lsmp writes its JSON to a path. A directory of root's own (umask 077), so no other user can
+        // read the port map or plant a file there.
+        var template = Array((NSTemporaryDirectory() + "procxray-lsmp.XXXXXX").utf8CString)
+        guard let dir = template.withUnsafeMutableBufferPointer({ mkdtemp($0.baseAddress) }).map({ String(cString: $0) }) else {
+            return .failure(.init(message: "helper: no temporary directory"))
+        }
+        let file = dir + "/ports.json"
+        defer { unlink(file); rmdir(dir) }
+        let r = Shell.Cancel.$current.withValue(cancel) {
+            // Its text listing (as long as the JSON) goes nowhere; stderr comes back for errors.
+            Shell.exec("/usr/bin/lsmp", ["-a", "-j", file], timeout: 40, discardStdout: true)
+        }
+        guard let data = FileManager.default.contents(atPath: file), let parsed = MachSnapshot.parseWithPorts(data) else {
+            let why = r.timedOut ? "lsmp ran past its time limit" : r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .failure(.init(message: "lsmp failed: \(why.isEmpty ? "exit \(r.status)" : why)"))
+        }
+        lock.lock(); cached = (parsed.snapshot.at, parsed.ports); lock.unlock()
+        return .success(parsed.snapshot)
     }
 }

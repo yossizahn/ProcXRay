@@ -72,6 +72,36 @@ struct ExceptionRoute: Codable, Hashable, Sendable {
     var mask: [String]
 }
 
+/// One port behind a Mach link: `sender` holds a send or send-once right to a port `receiver` receives on.
+/// Kept by the helper from its last lsmp run and handed out per pair (HelperProtocol.machPortDetail), so
+/// the snapshot sent for every refresh stays the links only.
+struct MachPortDetail: Codable, Hashable, Sendable {
+    let sender: Int32
+    let receiver: Int32
+    /// The port's name in each process's own port space ("0x00001a03").
+    let senderName: String
+    let receiverName: String
+    /// User references on the sender's send right; 1 for a send-once right.
+    var sendRefs: Int
+    /// A send-once right: a reply the sender owes the receiver.
+    var sendOnce: Bool
+    var queued: Int
+    var queueLimit: Int
+    var boosts: Int
+    /// lsmp's port_status_flags ("guarded", "strict guard", "imp donation"…), without its "(null)".
+    var flags: [String]
+    /// What the receiver asked to be told about ("no sender", "port destroy request", "dead name").
+    var notifications: [String]
+    /// Send rights to this port across all holders.
+    var totalSendRights: Int
+}
+
+struct MachPortDetailReply: Codable, Sendable {
+    /// When the lsmp run these come from was taken.
+    let at: Date
+    let ports: [MachPortDetail]
+}
+
 struct MachSnapshot: Codable, Sendable {
     var links: [MachLink] = []
     /// Per receiver, how many other processes can send to it.
@@ -151,11 +181,17 @@ struct MachSnapshot: Codable, Sendable {
     }
 
     /// Pairs the rights in `lsmp -j` output. Nil when it isn't lsmp's JSON.
-    static func parse(_ data: Data) -> MachSnapshot? {
+    static func parse(_ data: Data) -> MachSnapshot? { parseWithPorts(data)?.snapshot }
+
+    /// The snapshot, and every linked pair's ports (both directions under the pair's own key).
+    static func parseWithPorts(_ data: Data) -> (snapshot: MachSnapshot, ports: [PortPair: [MachPortDetail]])? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let procs = root["processes"] as? [[String: Any]] else { return nil }
         var recv: [String: (pid: Int32, queued: Int, full: Bool, boosts: Int, noSenders: Bool)] = [:]
         var sends: [(pid: Int32, obj: String, once: Bool)] = []
+        // For MachPortDetail: the receive entry, and each send entry's name and references.
+        var recvEntry: [String: [String: Any]] = [:]
+        var sendEntries: [(pid: Int32, obj: String, name: String, refs: Int, once: Bool)] = []
         var iokit: [Int32: [String: Int]] = [:]
         var kobjects: [Int32: [String: Int]] = [:]
         var memory: [String: (holders: Set<Int32>, bytes: UInt64?)] = [:]
@@ -172,9 +208,12 @@ struct MachSnapshot: Codable, Sendable {
                     recv[o] = (pid, queued, full, (q["boosts"] as? NSNumber)?.intValue ?? 0,
                                (q["notifications"] as? [String])?.contains("no sender") == true)
                     if full { fullQueues[pid, default: 0] += 1 }
+                    recvEntry[o] = q
                 }
                 if r.contains("send") || r.contains("send once") {
                     sends.append((pid, o, r.contains("send once")))
+                    sendEntries.append((pid, o, q["name"] as? String ?? "", (q["send_rights"] as? NSNumber)?.intValue ?? 0,
+                                        r.contains("send once") && !r.contains("send")))
                     // A typed right is a kernel object; "port" / "UNKNOWN" are ports a process receives on.
                     if let t = q["type"] as? String, !["port", "port set", "dead name", "UNKNOWN"].contains(t) {
                         let desc = q["description"] as? String
@@ -252,7 +291,17 @@ struct MachSnapshot: Codable, Sendable {
                 for h in m.holders { snap.widelyShared[h, default: 0] += 1 }
             }
         }
-        return snap
+        var details: [PortPair: [MachPortDetail]] = [:]
+        for s in sendEntries {
+            guard let r = recv[s.obj], r.pid != s.pid, let q = recvEntry[s.obj] else { continue }
+            func n(_ k: String) -> Int { (q[k] as? NSNumber)?.intValue ?? 0 }
+            let d = MachPortDetail(sender: s.pid, receiver: r.pid, senderName: s.name, receiverName: q["name"] as? String ?? "",
+                                   sendRefs: s.once ? 1 : s.refs, sendOnce: s.once, queued: r.queued, queueLimit: n("queue_limit"),
+                                   boosts: r.boosts, flags: (q["port_status_flags"] as? [String] ?? []).filter { $0 != "(null)" },
+                                   notifications: q["notifications"] as? [String] ?? [], totalSendRights: n("send_rights"))
+            details[PortPair(s.pid, r.pid), default: []].append(d)
+        }
+        return (snap, details)
     }
 
     /// " BAD_ACCESS BAD_INSTRUCTION RESOURCE" → ["bad access", "bad instruction", "resource"].
@@ -315,6 +364,12 @@ struct MachSnapshot: Codable, Sendable {
         }
         return by.map { ($0.key, $0.value.entries, $0.value.bytes, $0.value.holders) }.sorted { ($0.entries, $1.pid) > ($1.entries, $0.pid) }
     }
+}
+
+/// An unordered pair of processes.
+struct PortPair: Hashable, Sendable {
+    let a, b: Int32
+    init(_ x: Int32, _ y: Int32) { a = min(x, y); b = max(x, y) }
 }
 
 /// One peer of a process, as the Connections tab shows it.

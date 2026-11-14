@@ -119,6 +119,16 @@ enum Bench {
             }
             return
         }
+        if what == "machports", let peer = args.dropFirst(2).first.flatMap({ Int32($0) }) {
+            let t0 = Date()
+            switch c.machPortDetail(pid: pid, peer: peer) {
+            case .success(let r):
+                print(String(format: "machports %d ↔ %d: %d ports in %.2f s, run at %@", pid, peer, r.ports.count, -t0.timeIntervalSinceNow, "\(r.at)"))
+                for d in r.ports.prefix(12) { print("  \(d)") }
+            case .failure(let e): print("machports: \(e.message)")
+            }
+            return
+        }
         if what == "argsenv" {
             guard let r = c.argsEnv(pid) else { print("argsEnv: nil"); return }
             print("argsEnv: exec=\(r.execPath) args=\(r.args.count) env=\(r.env.count) cwd=\(r.cwd ?? "nil")")
@@ -136,8 +146,15 @@ enum Bench {
     static func machFile(_ args: [String]) {
         guard let path = args.first, let data = FileManager.default.contents(atPath: path) else { print("no file"); return }
         let t0 = Date()
-        guard let s = MachSnapshot.parse(data) else { print("not lsmp JSON"); return }
-        machSummary(s, seconds: -t0.timeIntervalSinceNow, pids: args.dropFirst().compactMap { Int32($0) })
+        guard let (s, ports) = MachSnapshot.parseWithPorts(data) else { print("not lsmp JSON"); return }
+        let pids = args.dropFirst().compactMap { Int32($0) }
+        machSummary(s, seconds: -t0.timeIntervalSinceNow, pids: pids)
+        print("port details: \(ports.values.reduce(0) { $0 + $1.count }) for \(ports.count) pairs")
+        if pids.count == 2 {
+            let d = ports[PortPair(pids[0], pids[1])] ?? []
+            print("ports \(pids[0]) ↔ \(pids[1]): \(d.count)")
+            for x in d.prefix(12) { print("  \(x)") }
+        }
     }
 
     static func machSummary(_ s: MachSnapshot, seconds: Double, pids: [Int32]) {
