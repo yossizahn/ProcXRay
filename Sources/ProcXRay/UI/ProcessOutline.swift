@@ -65,6 +65,8 @@ struct ProcessOutline: NSViewRepresentable {
         outline.target = co
         outline.doubleAction = #selector(Coordinator.openClicked)
         outline.onReturn = { [weak co] in co?.openSelected() }
+        outline.bubbleContent = { [weak co] item in co?.bubble(for: item) }
+        outline.pathFor = { [weak co] item in co?.path(for: item) }
         let menu = NSMenu()
         menu.delegate = co
         outline.menu = menu
@@ -521,6 +523,11 @@ struct ProcessOutline: NSViewRepresentable {
             guard let col, let c = Column.byID[col.identifier.rawValue], let it = item as? Item else { return nil }
             let cell = (o.makeView(withIdentifier: col.identifier, owner: nil) as? Cell) ?? Cell(column: c)
             cell.show(it.node, column: c, store: parent.store)
+            if let k = o as? KeyOutlineView, let b = cell.hoverButton {
+                b.target = k
+                b.action = c.id == "name" ? #selector(KeyOutlineView.infoClicked(_:)) : #selector(KeyOutlineView.revealClicked(_:))
+                cell.showsHoverButton = k.showsHoverButton(for: it, column: c.id)
+            }
             return cell
         }
 
@@ -583,6 +590,20 @@ struct ProcessOutline: NSViewRepresentable {
             if p.ppid > 1 { jump("Select Parent (\(p.ppid))", to: p.ppid) }
         }
 
+        /// The info bubble for a row: the executable's full path and its command line. A unit row (Smart
+        /// tree) shows the app or job it stands for; other group rows have none.
+        func bubble(for item: Any) -> [InfoBubble.Section]? {
+            guard let n = (item as? Item)?.node,
+                  let p = n.proc ?? n.rootPid.flatMap({ procs[$0] }) else { return nil }
+            var s: [InfoBubble.Section] = []
+            if let path = p.path { s.append(.init(title: "Executable", value: path, reveal: path)) }
+            if let c = p.commandLine, !c.isEmpty, c != p.path { s.append(.init(title: "Command line", value: c, mono: true)) }
+            return s
+        }
+
+        /// The executable a row's Path column shows (a process row's own; group rows show none).
+        func path(for item: Any) -> String? { (item as? Item)?.node.proc?.path }
+
         static func copy(_ s: String) {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(s, forType: .string)
@@ -595,11 +616,202 @@ struct ProcessOutline: NSViewRepresentable {
         @objc func fire() { action() }
     }
 
-    /// Return opens the selected process, like a double-click.
+    /// Return opens the selected process, like a double-click. The row under the pointer shows an ⓘ button
+    /// in its Name cell, which opens an info bubble about the row (see InfoBubble), and a reveal-in-Finder
+    /// button in its Path cell.
     final class KeyOutlineView: NSOutlineView {
         var onReturn: (() -> Void)?
+        /// The bubble's sections for a row; nil or empty: no ⓘ button and no bubble.
+        var bubbleContent: ((Any) -> [InfoBubble.Section]?)?
+        /// The path a row's Path cell shows; nil: no reveal button.
+        var pathFor: ((Any) -> String?)?
+        /// The row under the pointer; its Name and Path cells show their buttons.
+        private(set) weak var hoverItem: AnyObject?
+        private let bubble = InfoBubble()
+        private var hoverArea: NSTrackingArea?
+
         override func keyDown(with e: NSEvent) {
             if e.keyCode == 36 || e.keyCode == 76 { onReturn?() } else { super.keyDown(with: e) }
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let hoverArea { removeTrackingArea(hoverArea) }
+            let a = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                   owner: self, userInfo: nil)
+            addTrackingArea(a)
+            hoverArea = a
+        }
+
+        override func mouseMoved(with e: NSEvent) {
+            super.mouseMoved(with: e)
+            hover(at: convert(e.locationInWindow, from: nil))
+        }
+        override func mouseEntered(with e: NSEvent) {
+            super.mouseEntered(with: e)
+            hover(at: convert(e.locationInWindow, from: nil))
+        }
+        override func mouseExited(with e: NSEvent) { super.mouseExited(with: e); setHover(nil) }
+        override func scrollWheel(with e: NSEvent) {
+            super.scrollWheel(with: e)
+            // Rows slide under a still pointer.
+            if let w = window { hover(at: convert(w.mouseLocationOutsideOfEventStream, from: nil)) }
+        }
+        override func viewWillMove(toWindow w: NSWindow?) { if w == nil { bubble.close() }; super.viewWillMove(toWindow: w) }
+
+        private func hover(at p: NSPoint) {
+            let row = visibleRect.contains(p) ? row(at: p) : -1
+            setHover(row >= 0 ? item(atRow: row) as AnyObject? : nil)
+        }
+
+        private func setHover(_ item: AnyObject?) {
+            guard item !== hoverItem else { return }
+            let old = hoverItem
+            hoverItem = item
+            for it in [old, item].compactMap({ $0 }) {
+                for col in Self.hoverColumns { cell(for: it, column: col)?.showsHoverButton = showsHoverButton(for: it, column: col) }
+            }
+        }
+
+        static let hoverColumns = ["name", "path"]
+
+        /// Whether `item`'s cell in `column` shows its button (ⓘ in Name, reveal in Path) now.
+        func showsHoverButton(for item: Any, column: String) -> Bool {
+            guard item as AnyObject === hoverItem else { return false }
+            switch column {
+            case "name": return !(bubbleContent?(item) ?? []).isEmpty
+            case "path": return pathFor?(item).map(Reveal.exists) ?? false
+            default: return false
+            }
+        }
+
+        private func cell(for item: AnyObject, column id: String) -> Cell? {
+            let r = row(forItem: item), c = column(withIdentifier: NSUserInterfaceItemIdentifier(id))
+            guard r >= 0, c >= 0 else { return nil }
+            return view(atColumn: c, row: r, makeIfNecessary: false) as? Cell
+        }
+
+        @objc func revealClicked(_ sender: NSButton) {
+            let r = row(for: sender)
+            guard r >= 0, let item = item(atRow: r), let path = pathFor?(item) else { return }
+            Reveal.reveal([path])
+        }
+
+        @objc func infoClicked(_ sender: NSButton) {
+            let r = row(for: sender)
+            guard r >= 0, let item = item(atRow: r), let s = bubbleContent?(item), !s.isEmpty else { return }
+            bubble.toggle(item as AnyObject, sections: s, from: sender)
+        }
+    }
+
+    /// A popover with labelled, wrapped values, opened from a row's ⓘ button. It closes on a click anywhere
+    /// else, and a second click on the same button closes it.
+    @MainActor
+    final class InfoBubble: NSObject, NSPopoverDelegate {
+        struct Section {
+            let title: String; let value: String; var mono = false
+            /// A path to offer reveal-in-Finder for, next to the title.
+            var reveal: String? = nil
+        }
+
+        private lazy var popover: NSPopover = {
+            let p = NSPopover()
+            p.behavior = .transient
+            p.delegate = self
+            return p
+        }()
+        private weak var item: AnyObject?
+        /// The transient popover closes on the button's mouse-down, before the button's action runs: that
+        /// action must not reopen it.
+        private weak var justClosed: AnyObject?
+        private var closedAt = Date.distantPast
+
+        func toggle(_ item: AnyObject, sections: [Section], from button: NSView) {
+            if popover.isShown, self.item === item { close(); return }
+            if justClosed === item, Date().timeIntervalSince(closedAt) < 0.5 { justClosed = nil; return }
+            self.item = item
+            popover.contentViewController = Self.controller(sections)
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+        }
+
+        func close() { if popover.isShown { popover.close() } }
+
+        func popoverDidClose(_ n: Notification) {
+            justClosed = item; closedAt = Date()
+            item = nil
+        }
+
+        nonisolated(unsafe) private static var actionKey = 0
+
+        /// Every bubble is the same width: values wrap at `valueWidth` (inside 12pt insets, 480pt in all), and
+        /// scroll past `maxValueHeight` (a renderer's argv runs to 10 KB).
+        private static let inset: CGFloat = 12, valueWidth: CGFloat = 456, maxValueHeight: CGFloat = 320
+
+        private static func controller(_ sections: [Section]) -> NSViewController {
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 8
+            stack.edgeInsets = NSEdgeInsets(top: 10, left: inset, bottom: 10, right: inset)
+            for s in sections {
+                let title = NSTextField(labelWithString: s.title.uppercased())
+                title.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1, weight: .semibold)
+                title.textColor = .secondaryLabelColor
+                var heading: NSView = title
+                if let path = s.reveal, Reveal.exists(path) {
+                    let b = Reveal.button(target: nil, action: nil)
+                    let action = MenuAction { Reveal.reveal([path]) }
+                    b.target = action
+                    b.action = #selector(MenuAction.fire)
+                    objc_setAssociatedObject(b, &Self.actionKey, action, .OBJC_ASSOCIATION_RETAIN)   // keeps the target alive
+                    b.widthAnchor.constraint(equalToConstant: 14).isActive = true
+                    b.heightAnchor.constraint(equalToConstant: 14).isActive = true
+                    let row = NSStackView(views: [title, b])
+                    row.orientation = .horizontal
+                    row.spacing = 4
+                    row.alignment = .centerY
+                    heading = row
+                }
+                let group = NSStackView(views: [heading, value(s)])
+                group.orientation = .vertical
+                group.alignment = .leading
+                group.spacing = 2
+                stack.addArrangedSubview(group)
+            }
+            let vc = NSViewController()
+            vc.view = stack
+            vc.preferredContentSize = NSSize(width: valueWidth + 2 * inset, height: stack.fittingSize.height)
+            return vc
+        }
+
+        /// The value as selectable text wrapped at valueWidth, in a scroll view when it's taller than maxValueHeight.
+        private static func value(_ s: Section) -> NSView {
+            let field = NSTextField(wrappingLabelWithString: s.value)
+            field.font = s.mono ? .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+                : .systemFont(ofSize: NSFont.smallSystemFontSize)
+            field.isSelectable = true
+            // Pinned to valueWidth: a wrapping field has no intrinsic width of its own, and the scroll view needs
+            // the text's real height.
+            let height = ceil(field.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: valueWidth, height: .greatestFiniteMagnitude)).height)
+            guard height > maxValueHeight else {
+                field.preferredMaxLayoutWidth = valueWidth
+                field.widthAnchor.constraint(equalToConstant: valueWidth).isActive = true
+                return field
+            }
+            // Overlay scrollers draw over the text's last few points rather than taking a column of their own.
+            field.frame = NSRect(x: 0, y: 0, width: valueWidth, height: height)
+            let scroll = NSScrollView()
+            scroll.drawsBackground = false
+            scroll.hasVerticalScroller = true
+            scroll.autohidesScrollers = true
+            scroll.scrollerStyle = .overlay
+            scroll.documentView = field
+            scroll.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                scroll.widthAnchor.constraint(equalToConstant: valueWidth),
+                scroll.heightAnchor.constraint(equalToConstant: maxValueHeight),
+            ])
+            return scroll
         }
     }
 
@@ -636,6 +848,29 @@ struct ProcessOutline: NSViewRepresentable {
                 icon.imageScaling = .scaleProportionallyDown
                 addSubview(icon)
                 imageView = icon
+                let b = NSButton(image: Self.infoIcon ?? NSImage(), target: nil, action: nil)
+                b.isBordered = false
+                b.imageScaling = .scaleProportionallyDown
+                b.contentTintColor = .secondaryLabelColor
+                b.setAccessibilityLabel("Info")
+                b.toolTip = "Path and command line"
+                hoverButton = b
+            } else if c.id == "path" {
+                hoverButton = Reveal.button(target: nil, action: nil)
+            }
+            if let b = hoverButton { b.isHidden = true; addSubview(b) }
+        }
+
+        private static let infoIcon = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Info")
+        /// Shown on the row under the pointer (KeyOutlineView.hoverItem): the Name cell's ⓘ button, the Path
+        /// cell's reveal-in-Finder button.
+        private(set) var hoverButton: NSButton?
+        var showsHoverButton: Bool {
+            get { hoverButton.map { !$0.isHidden } ?? false }
+            set {
+                guard let b = hoverButton, b.isHidden == newValue else { return }
+                b.isHidden = !newValue
+                needsLayout = true
             }
         }
         required init?(coder: NSCoder) { fatalError() }
@@ -650,7 +885,12 @@ struct ProcessOutline: NSViewRepresentable {
                 icon.frame = NSRect(x: 2, y: (h - 16) / 2, width: 16, height: 16)
                 x = 22
             }
-            label.frame = NSRect(x: x, y: (h - lh) / 2, width: max(0, bounds.width - x - 2), height: lh)
+            var right: CGFloat = 2
+            if let b = hoverButton, !b.isHidden {
+                b.frame = NSRect(x: bounds.width - 18, y: (h - 16) / 2, width: 16, height: 16)
+                right = 20
+            }
+            label.frame = NSRect(x: x, y: (h - lh) / 2, width: max(0, bounds.width - x - right), height: lh)
         }
 
         /// Width this cell needs to show its content untruncated.

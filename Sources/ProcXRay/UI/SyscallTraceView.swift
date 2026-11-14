@@ -243,7 +243,13 @@ struct SyscallTraceView: View {
                 Text(r.duration.map(Self.duration) ?? "—").monospacedDigit()
             }
             .width(min: 60, ideal: 76, max: 110)
-            TableColumn("Path") { r in Text(r.pathText).help(r.pathText) }
+            TableColumn("Path") { r in
+                HStack(spacing: 4) {
+                    Text(r.pathText).help(r.pathText)
+                    // The first existing one: a rename's source is usually gone, its destination isn't.
+                    if let path = r.paths.lazy.compactMap(Reveal.path(in:)).first { Spacer(minLength: 0); RevealButton(path: path) }
+                }
+            }
                 .width(min: 80, ideal: 260)
         }
         .font(.system(size: 11, design: .monospaced))

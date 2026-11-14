@@ -132,6 +132,11 @@ struct ValueView: View {
             FlowPills(items: value.components(separatedBy: " | "))
         } else if k.contains("exit"), value != "0", value != "(never exited)", value != "-" {
             Text(verbatim: value).foregroundStyle(.red).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+        } else if let path = Reveal.path(in: value) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(verbatim: value).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                RevealButton(path: path)
+            }
         } else {
             Text(verbatim: value).font(.system(.body, design: .monospaced)).textSelection(.enabled)
         }
@@ -679,12 +684,15 @@ struct LsofView: View {
                 let slash = e.name.lastIndex(of: "/")
                 let dir = slash.map { String(e.name[...$0]) } ?? ""
                 let leaf = slash.map { String(e.name[e.name.index(after: $0)...]) } ?? e.name
-                HStack(spacing: 0) {
-                    Text(dir).foregroundStyle(.secondary)
-                    Text(leaf)
+                HStack(spacing: 4) {
+                    HStack(spacing: 0) {
+                        Text(dir).foregroundStyle(.secondary)
+                        Text(leaf)
+                    }
+                    .lineLimit(1).truncationMode(.head)
+                    .help(e.name)
+                    RevealButton(path: e.name)
                 }
-                .lineLimit(1).truncationMode(.head)
-                .help(e.name)
                 .contextMenu {
                     Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: e.name)]) }
                     Button("Copy Path") { ProcessOutline.Coordinator.copy(e.name) }
@@ -1360,7 +1368,10 @@ struct PlistValue: View {
         if let b = value as? Bool, CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() {
             Image(systemName: b ? "checkmark.circle.fill" : "xmark.circle.fill").foregroundStyle(b ? .green : .red)
         } else if let s = value as? String {
-            Text(s).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(s).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                if let path = Reveal.path(in: s) { RevealButton(path: path) }
+            }
         } else if let n = value as? NSNumber {
             Text(n.stringValue).monospacedDigit()
         } else if let a = value as? [Any] {

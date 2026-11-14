@@ -159,7 +159,35 @@ struct InspectorTabStrip: View {
 /// A value in the key/value grid: text, or a link to a process followed by optional text.
 enum KVValue {
     case text(String)
+    /// A file path: shown with a reveal-in-Finder button.
+    case path(String)
     case process(ProcInfo, note: String = "")
+}
+
+/// A KVValue's view, shared by KV and FactGrid. Plain text that turns out to name an existing file (the
+/// Background Items record's executable, say) gets the reveal button too.
+struct KVValueView: View {
+    let value: KVValue
+    var body: some View {
+        switch value {
+        case .text(let t):
+            if let p = Reveal.path(in: t) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(t).textSelection(.enabled).font(.system(.body, design: .monospaced))
+                    RevealButton(path: p)
+                }
+            } else {
+                Text(t).textSelection(.enabled).font(.system(.body, design: .monospaced))
+            }
+        case .path(let p):
+            PathText(path: p)
+        case .process(let p, let note):
+            HStack(spacing: 6) {
+                ProcessChip(proc: p)
+                if !note.isEmpty { Text(note).foregroundStyle(.secondary).textSelection(.enabled) }
+            }
+        }
+    }
 }
 
 struct KV: View {
@@ -173,15 +201,7 @@ struct KV: View {
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
                     GridRow {
                         Text(r.0).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                        switch r.1 {
-                        case .text(let t):
-                            Text(t).textSelection(.enabled).font(.system(.body, design: .monospaced))
-                        case .process(let p, let note):
-                            HStack(spacing: 6) {
-                                ProcessChip(proc: p)
-                                if !note.isEmpty { Text(note).foregroundStyle(.secondary).textSelection(.enabled) }
-                            }
-                        }
+                        KVValueView(value: r.1)
                     }
                 }
             }

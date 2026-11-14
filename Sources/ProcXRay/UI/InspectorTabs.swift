@@ -168,15 +168,7 @@ struct FactGrid: View {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
                 GridRow {
                     Text(r.0).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                    switch r.1 {
-                    case .text(let t):
-                        Text(t).textSelection(.enabled).font(.system(.body, design: .monospaced))
-                    case .process(let p, let note):
-                        HStack(spacing: 6) {
-                            ProcessChip(proc: p)
-                            if !note.isEmpty { Text(note).foregroundStyle(.secondary).textSelection(.enabled) }
-                        }
-                    }
+                    KVValueView(value: r.1)
                 }
             }
         }
@@ -333,6 +325,7 @@ struct OverviewTab: View {
                                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                                     Text("[\(i)]").foregroundStyle(.secondary).monospacedDigit()
                                     Text(s).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                                    if let path = Reveal.path(in: s) { RevealButton(path: path) }
                                 }
                             }
                         }
@@ -358,7 +351,7 @@ struct OverviewTab: View {
     }
 
     private func facts(_ p: ProcInfo) -> [(String, KVValue)] {
-        var rows: [(String, KVValue)] = [("Path", .text(p.path ?? "— (\(p.comm))"))]
+        var rows: [(String, KVValue)] = [("Path", p.path.map { .path($0) } ?? .text("— (\(p.comm))"))]
         if let b = store.bundleID(of: p) {
             let version = p.bundlePath.flatMap(BundleInfo.version)
             rows.append(("Bundle", .text(b + (version.map { "  \($0)" } ?? ""))))
@@ -372,7 +365,7 @@ struct OverviewTab: View {
             ("Architecture", .text(Column.byID["arch"]!.value(p, store).display)),
             ("Sandbox", .text(p.sandboxed.map { $0 ? "sandboxed" : "not sandboxed" } ?? "unknown")),
             ("Signed", .text(TrustVerdict(sign).long)),
-            ("Working dir", .text(cwd?.key == p.key ? cwd?.path ?? "—" : "—")),
+            ("Working dir", (cwd?.key == p.key ? cwd?.path : nil).map { .path($0) } ?? .text("—")),
             ("Kind", .text(store.kind(of: p) ?? "—")),
         ]
         if let l = p.launchdLabel { rows.append(("launchd label", .text(l))) }
@@ -755,11 +748,7 @@ struct OriginTab: View {
                         .help("launchctl print: parent bundle identifier (an SMAppService registration).")
                     }
                     if let plist = top["path"], !plist.isEmpty {
-                        HStack {
-                            Text(plist).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                            Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: plist)]) }
-                                .controlSize(.small)
-                        }
+                        PathText(path: plist)
                     }
                     if let job {
                         Collapsible(title: job.title, startsOpen: false) {

@@ -171,7 +171,13 @@ struct BackgroundItemsView: View {
                 TableColumn("Disposition") { i in Text(i.disposition).foregroundStyle(.secondary) }.width(min: 120, ideal: 220)
                 TableColumn("Developer") { i in Text(i.developer) }.width(min: 90, ideal: 150)
                 TableColumn("Team") { i in Text(i.teamID).monospaced() }.width(min: 70, ideal: 90)
-                TableColumn("Target") { i in Text(i.executable.ifEmpty(i.url)).foregroundStyle(.secondary).truncationMode(.middle) }.width(min: 120, ideal: 260)
+                TableColumn("Target") { i in
+                    let target = i.executable.ifEmpty(i.url)
+                    HStack(spacing: 4) {
+                        Text(target).foregroundStyle(.secondary).truncationMode(.middle)
+                        if let path = Reveal.path(in: target) { Spacer(minLength: 0); RevealButton(path: path) }
+                    }
+                }.width(min: 120, ideal: 260)
                 TableColumn("Last use") { i in Text(i.lastUse) }.width(min: 90, ideal: 150)
                 TableColumn("UID") { i in Text(i.uid) }.width(40)
             }
@@ -220,7 +226,13 @@ struct LaunchdView: View {
                 TableColumn("Last exit", value: \.lastExit) { j in
                     Text(j.lastExit).foregroundStyle(j.lastExit == "0" || j.lastExit == "-" ? Color.secondary : Color.red)
                 }.width(70)
-                TableColumn("Process") { j in Text(j.pid.flatMap { procs[$0]?.path } ?? "").foregroundStyle(.secondary) }
+                TableColumn("Process") { j in
+                    let path = j.pid.flatMap { procs[$0]?.path }
+                    HStack(spacing: 4) {
+                        Text(path ?? "").foregroundStyle(.secondary).truncationMode(.middle)
+                        if let path { Spacer(minLength: 0); RevealButton(path: path) }
+                    }
+                }
             }
         } bottom: {
             if let label = selection, current == nil {
