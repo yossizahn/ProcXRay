@@ -88,6 +88,11 @@ enum HelperDaemon {
             reply(try? JSONEncoder().encode(v))
         }
 
+        func threads(pid: Int32, reply: @escaping (Data?) -> Void) {
+            guard pid > 0, mayInspect(pid), let t = ThreadReader.read(pid) else { reply(nil); return }
+            reply(try? JSONEncoder().encode(t))
+        }
+
         func machPorts(reply: @escaping (Data?, String?) -> Void) {
             guard callerIsAdmin else { reply(nil, "Mach ports of every process can only be read for an admin user."); return }
             let cancel = self.cancel

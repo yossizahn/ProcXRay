@@ -17,7 +17,7 @@ struct InspectorView: View {
         Binding(get: { windowTab.flatMap(InspectorTab.init(rawValue:)) ?? lastTab },
                 set: { windowTab = $0.rawValue; lastTab = $0 })
     }
-    /// Which pane Resources and Activity show (Resources: usage or the memory map; Activity: logs or a sample).
+    /// Which pane Resources and Activity show (Resources: usage, threads or the memory map; Activity: logs or a sample).
     @AppStorage("inspector.resourcesView") private var resourcesPane = "Usage"
     @AppStorage("inspector.activityPane") private var activityPane = "Logs"
 
@@ -35,8 +35,10 @@ struct InspectorView: View {
                 case .origin: OriginTab(proc: proc, exited: exited)
                 case .trust: TrustTab(proc: proc, sign: sign, exited: exited)
                 case .resources:
-                    SubPanes(selection: $resourcesPane, names: ["Usage", "Memory map"]) {
-                        if resourcesPane == "Memory map" {
+                    SubPanes(selection: $resourcesPane, names: ["Usage", "Threads", "Memory map"]) {
+                        if resourcesPane == "Threads" {
+                            ThreadsView(proc: proc, exited: exited)
+                        } else if resourcesPane == "Memory map" {
                             toolTab(.vmmap, auto: false, title: "vmmap --summary \(proc.pid)",
                                     parse: { VmmapParser.parse($0) }, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
                         } else {

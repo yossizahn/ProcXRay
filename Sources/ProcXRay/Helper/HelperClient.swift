@@ -69,6 +69,11 @@ final class HelperClient: @unchecked Sendable {
         return try? JSONDecoder().decode(PrivArgsEnv.self, from: data)
     }
 
+    func threads(_ pid: Int32) -> ThreadSnapshot? {
+        guard let data = call({ p, done in p.threads(pid: pid) { done($0) } }, timeout: 3) ?? nil else { return nil }
+        return try? JSONDecoder().decode(ThreadSnapshot.self, from: data)
+    }
+
     /// Runs on a connection of its own: when the caller's `Shell.Cancel` fires (the window closed, the
     /// selection moved on), the connection is invalidated and the helper stops the tool, as the local path
     /// does. On the shared connection the helper would run it to completion as root for nobody.

@@ -101,7 +101,7 @@ enum Bench {
         }
     }
 
-    /// `ProcXRay --helper-call <status|argsenv|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|powermetrics> [pid] [--full]`:
+    /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|powermetrics> [pid] [--full]`:
     /// one helper call from the shell, for testing the helper without the UI. Only this exact binary is accepted by the helper.
     static func helperCall(_ args: [String]) {
         let c = HelperClient.shared
@@ -126,6 +126,23 @@ enum Bench {
                 print(String(format: "machports %d ↔ %d: %d ports in %.2f s, run at %@", pid, peer, r.ports.count, -t0.timeIntervalSinceNow, "\(r.at)"))
                 for d in r.ports.prefix(12) { print("  \(d)") }
             case .failure(let e): print("machports: \(e.message)")
+            }
+            return
+        }
+        if what == "threads" {
+            let t0 = Date()
+            let local = ThreadReader.read(pid)
+            let localMs = -t0.timeIntervalSinceNow * 1000
+            let t1 = Date()
+            let viaHelper = c.threads(pid)
+            let helperMs = -t1.timeIntervalSinceNow * 1000
+            print(String(format: "threads %d: local %@ in %.2f ms, helper %@ in %.1f ms", pid,
+                         local.map { "\($0.threads.count)" } ?? "nil", localMs, viaHelper.map { "\($0.threads.count)" } ?? "nil", helperMs))
+            if let s = viaHelper ?? local {
+                if let w = s.workqueue { print("  workqueue \(w.total) running \(w.running) blocked \(w.blocked)") }
+                for t in s.threads.prefix(8) {
+                    print("  \(t.id) '\(t.name)' cpu \(Fmt.secs(t.cpuNanos)) \(t.stateText) pri \(t.curPriority)/\(t.basePriority)/\(t.maxPriority) \(t.policyText)")
+                }
             }
             return
         }

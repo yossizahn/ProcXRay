@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 8   // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail
+    static let protocolVersion = 9   // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -53,6 +53,8 @@ enum HelperConfig {
     /// `extras`: ExtraReads raw value; only the per-process ones the helper can do (ExtraReads.viaHelper).
     func allMetrics(extras: Int, reply: @escaping (Data) -> Void)       // JSON [PrivMetrics]
     func argsEnv(pid: Int32, reply: @escaping (Data?) -> Void)          // JSON PrivArgsEnv
+    /// Every thread of one process (ThreadReader), for processes the app can't read itself. JSON ThreadSnapshot.
+    func threads(pid: Int32, reply: @escaping (Data?) -> Void)
     func runTool(_ tool: Int, pid: Int32, reply: @escaping (String) -> Void)
     /// Every process's Mach port links: `lsmp -a` paired in the helper, so the reply is the links (~1 MB of
     /// JSON MachSnapshot), not lsmp's ~40 MB. Admin callers only. (snapshot, nil) or (nil, why not).

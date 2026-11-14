@@ -99,6 +99,16 @@ Filled in the background and cached by `codeKey`. `SecCodeCopyGuestWithAttribute
 
   On macOS 27 signal 1 rarely fires, so signals 2 and 3 do most of the work.
 
+## Threads (Resources → Threads)
+
+`Sys/Threads.swift`, read every refresh interval while the pane is open; same user directly, everyone else through the helper (`HelperProtocol.threads`).
+
+- `proc_pidinfo(28 = PROC_PIDLISTTHREADIDS)`: not in the SDK header, but it returns unique thread IDs, which match `sample`, `taskinfo` and the syscall trace (Finder's main thread was 11742 in all of them). `PROC_PIDLISTTHREADS` returns pthread_self addresses instead.
+- `PROC_PIDTHREADID64INFO` per ID → `proc_threadinfo`: **name**, **user / system time** (ns; matched taskinfo to the µs), **run state**, **policy**, **current / base / max priority**. CPU % is the `user + system` delta over the interval. ~0.13 ms for a 70-thread process; ~0.5 ms through the helper.
+- `PROC_PIDWORKQUEUEINFO`: GCD pool **total / running / blocked**.
+- Not shown, measured over 479 processes and 3,036 threads (2026-11-14): `pth_sleep_time` was 0 for all of them, and `pth_flags` had TH_FLAGS_SWAPPED on 98 %. `pth_cpu_usage` is the scheduler's decayed estimate, not used. Run state is one instant (3,035 of 3,036 were waiting).
+- Not available from these calls: dispatch queue names and thread QoS (`taskinfo --threads --dq` has them, ~120 ms as root).
+
 ## What else is available
 
 Grouped by how hard it is to get. "Same user" means the call worked for another process of this user (Finder) but failed for a root process (launchd); the helper would cover the rest.
@@ -122,9 +132,7 @@ Grouped by how hard it is to get. "Same user" means the call worked for another 
 ### Other unprivileged calls
 
 - `proc_pidinfo(PROC_PIDTBSDINFO)` → `proc_bsdinfo`: **nice**, gids (real, effective, saved), saved uid, controlling-tty process group, a registered process name (`pbi_name`, longer than `comm`). Same user.
-- `proc_pidinfo(PROC_PIDWORKQUEUEINFO)`: workqueue threads total / running / blocked (top's `wq`). Same user.
 - `proc_pidinfo(PROC_PIDLISTFDS)`: open file descriptor count without running `lsof`.
-- `proc_pidinfo(PROC_PIDLISTTHREADS)` + `PROC_PIDTHREADINFO`: per-thread state, priority, CPU time and name, which would give top's "stuck" (uninterruptible) state.
 - `proc_pidinfo(PROC_PIDARCHINFO)`: CPU type of the running image.
 - `IOPMCopyAssertionsByProcess`: power assertions per pid — Activity Monitor's "Preventing Sleep" and the inspector's "Assertions". Measured: works.
 - IORegistry `IOAccelerator` children: each user client has `IOUserClientCreator` ("pid N, name") and `AppUsage` with `accumulatedGPUTime`. Activity Monitor's "% GPU" and "GPU Time" come from this kind of data. Measured: readable without privileges.
