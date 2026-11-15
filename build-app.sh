@@ -55,6 +55,26 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <!-- The binary inspector: offered in Open With and for Dock drops, never the default app (Alternate). -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Mach-O Binary</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.unix-executable</string>
+        <string>com.apple.mach-o-binary</string>
+        <string>com.apple.mach-o-dylib</string>
+        <string>public.object-code</string>
+        <string>public.ar-archive</string>
+        <string>com.apple.application-bundle</string>
+        <string>com.apple.framework</string>
+        <string>com.apple.bundle</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

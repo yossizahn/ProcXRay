@@ -50,7 +50,7 @@ enum Reveal {
     }
 }
 
-/// The button on its own: go to a folder, reveal anything else. A path that doesn't exist (a deleted
+/// The button on its own (with Inspect beside it for a binary): go to a folder, reveal anything else. A path that doesn't exist (a deleted
 /// executable, a moved plist) keeps the button, disabled, so the row doesn't change shape.
 struct RevealButton: View {
     let path: String
@@ -58,14 +58,18 @@ struct RevealButton: View {
         let exists = Reveal.exists(path)
         let folder = exists && Reveal.isFolder(path)
         let help = folder ? Reveal.folderHelp : Reveal.help
-        Button { Reveal.go(path) } label: {
-            Image(systemName: folder ? Reveal.folderSymbol : Reveal.symbol)
+        HStack(spacing: 4) {
+            Button { Reveal.go(path) } label: {
+                Image(systemName: folder ? Reveal.folderSymbol : Reveal.symbol)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .disabled(!exists)
+            .help(exists ? help : "Doesn't exist any more: \(path)")
+            .accessibilityLabel(help)
+            // A binary (or a bundle with one) also gets its inspector.
+            if exists { InspectBinaryButton(path: path) }
         }
-        .buttonStyle(.borderless)
-        .foregroundStyle(.secondary)
-        .disabled(!exists)
-        .help(exists ? help : "Doesn't exist any more: \(path)")
-        .accessibilityLabel(help)
     }
 }
 

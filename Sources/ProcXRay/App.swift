@@ -14,6 +14,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppRouter.openMain(open)
         return false
     }
+    /// Files opened with the app (Open With, a Dock drop, `open -a`). SwiftUI takes the first itself (the
+    /// Binary scene handles file: URLs) and passes only the others here (measured: 4 files opened, 3 arrive).
+    func application(_ application: NSApplication, open urls: [URL]) {
+        // After SwiftUI's own window for the first file, which doesn't go through MachOOpen's spacing.
+        MachOOpen.holdOpens(0.3)
+        for u in urls where u.isFileURL { MachOOpen.openAny(u.path) }
+    }
     /// With the menu bar item, closing the last window leaves the app running there.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !AmbientPrefs.menuBarShown }
 }
@@ -29,7 +36,8 @@ enum Entry {
         AmbientPrefs.register()
         // Inspector windows keep no state: restorationBehavior(.disabled) neither reopens them nor applies a saved
         // frame (each opens at the default size), but AppKit still writes one; cleared here.
-        for k in UserDefaults.standard.dictionaryRepresentation().keys where k.hasPrefix("NSWindow Frame \(ProcessWindow.id)-AppWindow-") {
+        for k in UserDefaults.standard.dictionaryRepresentation().keys
+            where k.hasPrefix("NSWindow Frame \(ProcessWindow.id)-AppWindow-") || k.hasPrefix("NSWindow Frame \(MachOWindow.id)-AppWindow-") {
             UserDefaults.standard.removeObject(forKey: k)
         }
         ProcXRayApp.main()
@@ -207,6 +215,19 @@ struct ProcXRayApp: App {
             }
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--macho") {
+            MachODump.run(Array(CommandLine.arguments.dropFirst(i + 1)))
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--macho-fuzz"), i + 2 < CommandLine.arguments.count {
+            MachODump.fuzz(CommandLine.arguments[i + 1], Int(CommandLine.arguments[i + 2]) ?? 1000)
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--macho-corpus"), i + 1 < CommandLine.arguments.count {
+            let a = CommandLine.arguments
+            MachODump.corpus(a[i + 1], out: i + 2 < a.count ? a[i + 2] : nil)
+            exit(0)
+        }
         if CommandLine.arguments.contains("--dump") {
             SelfTest.run()
             exit(0)
@@ -224,11 +245,14 @@ struct ProcXRayApp: App {
                 .background(RestoreWindowScreen(sceneID: "main"))
         }
         .defaultSize(width: 1500, height: 900)
+        // Files opened with the app (Open With, a Dock drop, `open -a`) go to the binary inspector's scene.
+        .handlesExternalEvents(matching: [])
         // "Start in the menu bar": no window at launch.
         .defaultLaunchBehavior(launchHidden ? .suppressed : .automatic)
         .commands {
             InspectCommand()
             ColumnsCommands()
+            OpenBinaryCommand()
             CommandGroup(after: .toolbar) {
                 Button("Refresh Now") { store.refresh() }.keyboardShortcut("r")
                 Button(store.paused ? "Resume Updates" : "Pause Updates") { store.paused.toggle() }
@@ -253,8 +277,17 @@ struct ProcXRayApp: App {
             if $ref.wrappedValue != nil { ProcessWindow(ref: $ref).environment(store) }
         }
         .defaultSize(width: 900, height: 640)
+        .handlesExternalEvents(matching: [])
         .restorationBehavior(.disabled)   // not reopened at launch, no saved frame
         .commandsRemoved()   // no "New Process Window": these only open from a process row
+
+        WindowGroup("Binary", id: MachOWindow.id, for: MachORef.self) { $ref in
+            MachOWindow(ref: $ref)   // with no value yet when SwiftUI opens it for a file: onOpenURL fills it in
+        }
+        .defaultSize(width: 980, height: 720)
+        .handlesExternalEvents(matching: ["file:"])
+        .restorationBehavior(.disabled)
+        .commandsRemoved()   // opened from a path's Inspect button, File ▸ Open Binary…, or a drop
     }
 }
 
@@ -352,6 +385,7 @@ struct ContentView: View {
             }
         }
         .modifier(InspectAtLaunch())
+        .modifier(KeepOpenWindow())
     }
 }
 

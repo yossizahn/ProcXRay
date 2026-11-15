@@ -528,6 +528,11 @@ struct ProcessOutline: NSViewRepresentable {
                 b.action = c.id == "name" ? #selector(KeyOutlineView.infoClicked(_:)) : #selector(KeyOutlineView.revealClicked(_:))
                 cell.showsHoverButton = k.showsHoverButton(for: it, column: c.id)
             }
+            if let k = o as? KeyOutlineView, let b = cell.inspectButton {
+                b.target = k
+                b.action = #selector(KeyOutlineView.inspectClicked(_:))
+                cell.showsInspectButton = k.showsInspectButton(for: it)
+            }
             return cell
         }
 
@@ -576,6 +581,7 @@ struct ProcessOutline: NSViewRepresentable {
             }
             if let path = p.path {
                 add("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+                if let t = MachOProbe.target(path) { add("Inspect Binary") { MachOOpen.open(t) } }
                 add("Copy Path") { Self.copy(path) }
             }
             add("Copy PID") { Self.copy("\(p.pid)") }
@@ -669,6 +675,7 @@ struct ProcessOutline: NSViewRepresentable {
             hoverItem = item
             for it in [old, item].compactMap({ $0 }) {
                 for col in Self.hoverColumns { cell(for: it, column: col)?.showsHoverButton = showsHoverButton(for: it, column: col) }
+                cell(for: it, column: "path")?.showsInspectButton = showsInspectButton(for: it)
             }
         }
 
@@ -688,6 +695,17 @@ struct ProcessOutline: NSViewRepresentable {
             let r = row(forItem: item), c = column(withIdentifier: NSUserInterfaceItemIdentifier(id))
             guard r >= 0, c >= 0 else { return nil }
             return view(atColumn: c, row: r, makeIfNecessary: false) as? Cell
+        }
+
+        /// The Path cell's Inspect button: on the hovered row, when its executable is a Mach-O on disk.
+        func showsInspectButton(for item: Any) -> Bool {
+            item as AnyObject === hoverItem && pathFor?(item).flatMap(MachOProbe.target) != nil
+        }
+
+        @objc func inspectClicked(_ sender: NSButton) {
+            let r = row(for: sender)
+            guard r >= 0, let item = item(atRow: r), let t = pathFor?(item).flatMap(MachOProbe.target) else { return }
+            MachOOpen.open(t)
         }
 
         @objc func revealClicked(_ sender: NSButton) {
@@ -765,7 +783,18 @@ struct ProcessOutline: NSViewRepresentable {
                     objc_setAssociatedObject(b, &Self.actionKey, action, .OBJC_ASSOCIATION_RETAIN)   // keeps the target alive
                     b.widthAnchor.constraint(equalToConstant: 14).isActive = true
                     b.heightAnchor.constraint(equalToConstant: 14).isActive = true
-                    let row = NSStackView(views: [title, b])
+                    var views: [NSView] = [title, b]
+                    if let t = MachOProbe.target(path) {
+                        let ib = MachOOpen.button(target: nil, action: nil)
+                        let ia = MenuAction { MachOOpen.open(t) }
+                        ib.target = ia
+                        ib.action = #selector(MenuAction.fire)
+                        objc_setAssociatedObject(ib, &Self.actionKey, ia, .OBJC_ASSOCIATION_RETAIN)
+                        ib.widthAnchor.constraint(equalToConstant: 14).isActive = true
+                        ib.heightAnchor.constraint(equalToConstant: 14).isActive = true
+                        views.append(ib)
+                    }
+                    let row = NSStackView(views: views)
                     row.orientation = .horizontal
                     row.spacing = 4
                     row.alignment = .centerY
@@ -856,14 +885,26 @@ struct ProcessOutline: NSViewRepresentable {
                 hoverButton = b
             } else if c.id == "path" {
                 hoverButton = Reveal.button(target: nil, action: nil)
+                inspectButton = MachOOpen.button(target: nil, action: nil)
             }
             if let b = hoverButton { b.isHidden = true; addSubview(b) }
+            if let b = inspectButton { b.isHidden = true; addSubview(b) }
         }
 
         private static let infoIcon = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Info")
         /// Shown on the row under the pointer (KeyOutlineView.hoverItem): the Name cell's ⓘ button, the Path
         /// cell's reveal-in-Finder button.
         private(set) var hoverButton: NSButton?
+        /// The Path cell's second button, Inspect, left of reveal.
+        private(set) var inspectButton: NSButton?
+        var showsInspectButton: Bool {
+            get { inspectButton.map { !$0.isHidden } ?? false }
+            set {
+                guard let b = inspectButton, b.isHidden == newValue else { return }
+                b.isHidden = !newValue
+                needsLayout = true
+            }
+        }
         var showsHoverButton: Bool {
             get { hoverButton.map { !$0.isHidden } ?? false }
             set {
@@ -888,6 +929,10 @@ struct ProcessOutline: NSViewRepresentable {
             if let b = hoverButton, !b.isHidden {
                 b.frame = NSRect(x: bounds.width - 18, y: (h - 16) / 2, width: 16, height: 16)
                 right = 20
+            }
+            if let b = inspectButton, !b.isHidden {
+                b.frame = NSRect(x: bounds.width - right - 18, y: (h - 16) / 2, width: 16, height: 16)
+                right += 20
             }
             label.frame = NSRect(x: x, y: (h - lh) / 2, width: max(0, bounds.width - x - right), height: lh)
             updateTip()
