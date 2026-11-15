@@ -36,7 +36,11 @@ struct SyscallRecord: Identifiable, Sendable, Hashable {
     var args: [UInt64]?
     /// BSD: errno (0 = success). Mach: the kern_return.
     var error: Int64 = 0
+    /// BSD: the kernel's two 32-bit return words. A 64-bit result (a pointer, an offset, an ssize_t) is split
+    /// across them, low word first (checked: mmap's 0x1_0024_c000 came back as 0x24c000 and 1); pipe returns
+    /// two descriptors in them.
     var ret: UInt64 = 0
+    var ret1: UInt64 = 0
     var paths: [String] = []
     var state: State = .done
     /// The user stack at the call (traces with stacks): innermost first, the syscall stub's pc, then its caller.
@@ -45,7 +49,15 @@ struct SyscallRecord: Identifiable, Sendable, Hashable {
     // Display text, built once (off the main thread) so the table only reads strings.
     /// The first frame outside libsystem_kernel (the syscall stubs), symbolicated; empty without a stack.
     var caller = ""
-    var argsText = ""
+    /// One display text per argument shown ("…" alone when the entry, and so the arguments, wasn't seen).
+    var argValues: [String] = []
+    var argsText: String { argValues.joined(separator: ", ") }
+    /// "fd: 3, cbuf: 0x…, nbyte: 21": names as xnu declares them, or as the decoded command defines them.
+    var namedArgsText: String {
+        let names = SyscallFormat.argNames(self)
+        return argValues.enumerated().map { i, v in i < names.count && !names[i].isEmpty && args != nil ? names[i] + ": " + v : v }
+            .joined(separator: ", ")
+    }
     var resultText = ""
     var failed = false
 
@@ -304,6 +316,7 @@ struct SyscallDecoder: Sendable {
                 } else {
                     r.error = Int64(bitPattern: a.first ?? 0)
                     r.ret = a.count > 1 ? a[1] : 0
+                    r.ret1 = a.count > 2 ? a[2] : 0
                 }
                 SyscallFormat.fill(&r)
                 if stacks {
@@ -371,61 +384,234 @@ struct SyscallDecoder: Sendable {
         open[e.thread] = stack
     }
 
+    /// trace.codes names a few calls with a sys_ prefix (sys_close, sys_fcntl, sys_fstat64...): dropped, as
+    /// strace and the man pages name them.
     static func name(_ eventName: String?, mach: Bool, code: Int) -> String {
-        if let n = eventName, n.count > 4, n.hasPrefix("BSC_") || n.hasPrefix("MSC_") { return String(n.dropFirst(4)) }
-        if let n = eventName, !n.isEmpty, !n.hasPrefix("0x") { return n }
-        return mach ? "mach_trap_\(code)" : "syscall_\(code)"
+        var n = eventName ?? ""
+        if n.count > 4, n.hasPrefix("BSC_") || n.hasPrefix("MSC_") { n = String(n.dropFirst(4)) }
+        if n.hasPrefix("sys_"), n.count > 4 { n = String(n.dropFirst(4)) }
+        // trace.codes lags the kernel: a call it doesn't know is "kern_invalid_63" or has no name at all.
+        if n.isEmpty || n.hasPrefix("0x") || n.hasPrefix("kern_invalid") {
+            if let known = (mach ? SyscallArgNames.machNumbers : SyscallArgNames.bsdNumbers)[code] {
+                return known.hasPrefix("sys_") ? String(known.dropFirst(4)) : known
+            }
+            return mach ? "mach_trap_\(code)" : "syscall_\(code)"
+        }
+        return n
+    }
+}
+
+/// Adds what each fd argument is: "read(3 (/etc/hosts), …)", "sendto(7 (UDP 10.0.0.2:5353->224.0.0.251:5353), …)".
+///
+/// fds can be closed and their numbers reused between a call and any lookup, so the trace itself comes first:
+/// an fd returned by open/openat carries that call's path until it's closed, dup copies a label, close ends it.
+/// Only fds the trace can't explain (open before the trace started, received over a socket, made from a fileport)
+/// and sockets (whose endpoints change on connect) are asked of the helper, once per batch of records, and a
+/// helper answer is applied only after the fd's last open/close/dup in the batch. An fd closed and reopened by
+/// something the trace doesn't show, between the call and the lookup, can still get a stale label.
+struct FdLabeler {
+    /// Labels the trace itself established.
+    private var known: [Int32: String] = [:]
+    /// fds whose trace label is only a kind ("UDP socket"): a valid helper answer (with endpoints) wins.
+    private var refreshable: Set<Int32> = []
+
+    /// (argument index, fd) for each fd argument of a record.
+    static func fdArgs(_ r: SyscallRecord) -> [(Int, Int32)] {
+        guard let a = r.args else { return [] }
+        let base = r.name.hasSuffix("_nocancel") ? String(r.name.dropLast(9)) : r.name
+        var idx: [Int] = []
+        if ["fcntl", "setsockopt", "getsockopt", "openat"].contains(base) { idx = [0] }
+        else if let sig = SyscallFormat.signature(base) { idx = sig.indices.filter { sig[$0] == .fd || sig[$0] == .dirfd } }
+        return idx.compactMap { i in
+            guard i < a.count, i < r.argValues.count else { return nil }
+            let fd = Int32(truncatingIfNeeded: a[i])
+            return fd >= 0 ? (i, fd) : nil   // AT_FDCWD is -2
+        }
+    }
+
+    private enum Effect { case open(Int32, String), socket(Int32, String), unknown(Int32), copy(from: Int32, to: Int32), close(Int32) }
+
+    /// "UDP socket" from socket()'s own arguments, for when the socket is gone before anyone can ask about it.
+    private static func socketKind(_ a: [UInt64]) -> String {
+        guard a.count >= 2 else { return "socket" }
+        let domain = Int32(truncatingIfNeeded: a[0]), type = Int32(truncatingIfNeeded: a[1])
+        switch domain {
+        case AF_INET, AF_INET6:
+            let v = domain == AF_INET6 ? "6" : ""
+            return type == SOCK_STREAM ? "TCP\(v) socket" : type == SOCK_DGRAM ? "UDP\(v) socket" : "IPv\(domain == AF_INET6 ? 6 : 4) raw socket"
+        case AF_UNIX: return "unix socket"
+        default: return SyscallFlags.one(UInt64(UInt32(bitPattern: domain)), SyscallFlags.domains) + " socket"
+        }
+    }
+
+    /// What a successful call did to the descriptor table, as far as the trace shows.
+    private static func effects(_ r: SyscallRecord) -> [Effect] {
+        guard r.state == .done, r.error == 0, !r.mach, let a = r.args else { return [] }
+        let base = r.name.hasSuffix("_nocancel") ? String(r.name.dropLast(9)) : r.name
+        let ret = Int32(truncatingIfNeeded: r.ret)
+        let arg0 = a.isEmpty ? -1 : Int32(truncatingIfNeeded: a[0])
+        switch base {
+        case "close", "guarded_close_np": return [.close(arg0)]
+        case "dup": return [.copy(from: arg0, to: ret)]
+        case "dup2": return a.count > 1 ? [.copy(from: arg0, to: Int32(truncatingIfNeeded: a[1]))] : []
+        case "fcntl":
+            let cmd = a.count > 1 ? Int32(truncatingIfNeeded: a[1]) : -1
+            return cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC ? [.copy(from: arg0, to: ret)] : []
+        case "pipe": return [.unknown(ret), .unknown(Int32(truncatingIfNeeded: r.ret1))]
+        default:
+            guard case .fd = SyscallFormat.returns[base] else { return [] }
+            if let p = r.paths.first, base.contains("open") { return [.open(ret, p)] }
+            if base == "socket" { return [.socket(ret, socketKind(a))] }
+            return [.unknown(ret)]   // accept, kqueue, fileport_makefd...
+        }
+    }
+
+    /// Labels the fd arguments of `recs` (in the order they returned), asking `lookup` about the rest.
+    mutating func label(_ recs: inout [SyscallRecord], lookup: (Set<Int32>) -> [Int32: String]) {
+        // Pass 1: which fds the trace can't name, and where each fd last changed in this batch.
+        var state = known
+        var need = Set<Int32>()
+        var lastChange: [Int32: Int] = [:]
+        var soft = refreshable
+        for (n, r) in recs.enumerated() {
+            for (_, fd) in Self.fdArgs(r) where state[fd] == nil || soft.contains(fd) { need.insert(fd) }
+            for e in Self.effects(r) { apply(e, to: &state, soft: &soft, at: n, lastChange: &lastChange) }
+        }
+        let answers = need.isEmpty ? [:] : lookup(need)
+        // Pass 2: label, replaying the same changes.
+        var scratch: [Int32: Int] = [:]
+        for n in recs.indices {
+            for (i, fd) in Self.fdArgs(recs[n]) {
+                let answer = (lastChange[fd] ?? -1) <= n ? answers[fd] : nil
+                let label = refreshable.contains(fd) ? (answer ?? known[fd]) : (known[fd] ?? answer)
+                if let label, !label.isEmpty { recs[n].argValues[i] += " (" + label + ")" }
+            }
+            for e in Self.effects(recs[n]) { apply(e, to: &known, soft: &refreshable, at: n, lastChange: &scratch) }
+        }
+    }
+
+    private func apply(_ e: Effect, to t: inout [Int32: String], soft: inout Set<Int32>, at n: Int, lastChange: inout [Int32: Int]) {
+        switch e {
+        case .open(let fd, let p): t[fd] = p; soft.remove(fd); lastChange[fd] = n
+        case .socket(let fd, let kind): t[fd] = kind; soft.insert(fd); lastChange[fd] = n
+        case .unknown(let fd): t[fd] = nil; soft.remove(fd); lastChange[fd] = n
+        case .copy(let from, let to):
+            t[to] = t[from]
+            if soft.contains(from) { soft.insert(to) } else { soft.remove(to) }
+            lastChange[to] = n
+        case .close(let fd): t[fd] = nil; soft.remove(fd); lastChange[fd] = n
+        }
     }
 }
 
 /// strace-style text for arguments and results.
 enum SyscallFormat {
-    enum Arg { case fd, dirfd, int, uint, hex, ptr, size, oflags, mode, signal }
+    enum Arg {
+        case fd, dirfd, int, int32, uint, hex, ptr, size, oflags, mode, signal
+        /// A path argument: the path the kernel looked up for it (VFS_LOOKUP), else the pointer.
+        case path
+        case prot, mapFlags, madvise, msync, vmFlags, vmProt
+        case access, atFlags, whence, flock, ioctl
+        case domain, sockType, proto, msgFlags, shutdownHow
+        case sigHow, ulock, workqOp, csops, procInfoCall
+        case portRight, machNotify
+        case chflags, prioWhich, rusageWho, rlimit, waitOptions, snapshotOp, purgable, personaOp, iopolCmd
+        case workloopCmd, coalitionOp, coalitionInfo, memorystatusCmd
+        case machOptions
+    }
 
-    /// Arity and argument kinds for common calls. Others show all four raw words.
+    /// Arity and argument kinds (kdebug logs the first four arguments). Others show all four raw words.
+    /// fcntl, setsockopt/getsockopt, proc_info, open's mode and mach_msg2_trap are formatted in `special`.
     static let signatures: [String: [Arg]] = {
         var s: [String: [Arg]] = [:]
         func set(_ names: [String], _ a: [Arg]) { for n in names { s[n] = a; s[n + "_nocancel"] = a } }
         set(["read", "write"], [.fd, .ptr, .size])
         set(["pread", "pwrite"], [.fd, .ptr, .size, .int])
         set(["readv", "writev", "preadv", "pwritev"], [.fd, .ptr, .int])
-        set(["close", "sys_close", "fsync", "fchdir", "dup"], [.fd])   // trace.codes names close BSC_sys_close
+        set(["close", "fsync", "fchdir", "dup"], [.fd])
         set(["dup2"], [.fd, .fd])
-        set(["open"], [.ptr, .oflags, .mode])
-        set(["openat"], [.dirfd, .ptr, .oflags, .mode])
-        set(["guarded_open_np"], [.ptr, .ptr, .hex, .oflags])
+        set(["guarded_open_np"], [.path, .ptr, .hex, .oflags])
         set(["guarded_close_np"], [.fd, .ptr])
-        set(["fcntl"], [.fd, .int, .hex])
-        set(["ioctl"], [.fd, .hex, .ptr])
-        set(["lseek"], [.fd, .int, .int])
+        set(["ioctl"], [.fd, .ioctl, .ptr])
+        set(["lseek"], [.fd, .int, .whence])
         set(["fstat", "fstat64"], [.fd, .ptr])
-        set(["stat", "stat64", "lstat", "lstat64", "access", "chdir", "unlink", "rmdir", "readlink"], [.ptr, .ptr, .size])
-        set(["fstatat", "fstatat64"], [.dirfd, .ptr, .ptr, .hex])
-        set(["unlinkat"], [.dirfd, .ptr, .hex])
-        set(["mkdir"], [.ptr, .mode])
-        set(["mkdirat"], [.dirfd, .ptr, .mode])
-        set(["getattrlist", "setattrlist"], [.ptr, .ptr, .ptr, .size])
+        set(["stat", "stat64", "lstat", "lstat64", "statfs", "statfs64", "utimes", "lutimes"], [.path, .ptr])
+        set(["access"], [.path, .access])
+        set(["faccessat"], [.dirfd, .path, .access, .atFlags])
+        set(["chdir", "chroot", "unlink", "rmdir", "revoke", "undelete"], [.path])
+        set(["readlink"], [.path, .ptr, .size])
+        set(["readlinkat"], [.dirfd, .path, .ptr, .size])
+        set(["fstatat", "fstatat64"], [.dirfd, .path, .ptr, .atFlags])
+        set(["unlinkat"], [.dirfd, .path, .atFlags])
+        set(["mkdir", "mkfifo", "chmod"], [.path, .mode])
+        set(["mknod"], [.path, .mode, .int])
+        set(["mkdirat", "mkfifoat"], [.dirfd, .path, .mode])
+        set(["fchmodat"], [.dirfd, .path, .mode, .atFlags])
+        set(["chown", "lchown"], [.path, .int32, .int32])
+        set(["fchownat"], [.dirfd, .path, .int32, .int32])
+        set(["truncate", "pathconf"], [.path, .int])
+        set(["rename", "link", "exchangedata"], [.path, .path])
+        set(["renameat", "renameatx_np", "linkat", "clonefileat"], [.dirfd, .path, .dirfd, .path])
+        set(["symlink"], [.ptr, .path])               // the target is stored, not looked up
+        set(["symlinkat"], [.ptr, .dirfd, .path])
+        set(["fclonefileat"], [.fd, .dirfd, .path, .hex])
+        set(["getattrlist", "setattrlist"], [.path, .ptr, .ptr, .size])
+        set(["getattrlistat"], [.dirfd, .path, .ptr, .ptr])
         set(["fgetattrlist", "fsetattrlist"], [.fd, .ptr, .ptr, .size])
         set(["getattrlistbulk"], [.fd, .ptr, .ptr, .size])
+        set(["getxattr", "setxattr"], [.path, .ptr, .ptr, .size])
+        set(["removexattr"], [.path, .ptr, .hex])
+        set(["listxattr"], [.path, .ptr, .size, .hex])
+        // Path-taking calls also handled by pykdebugparser (github.com/matan1008/pykdebugparser), which reads
+        // their paths from VFS_LOOKUP the same way.
+        set(["acct", "ungraftdmg"], [.path])
+        set(["chflags"], [.path, .chflags])
+        set(["fchflags"], [.fd, .chflags])
+        set(["fchflagsat"], [.dirfd, .path, .chflags, .atFlags])
+        set(["fsctl"], [.path, .hex, .ptr, .hex])
+        set(["fs_snapshot"], [.snapshotOp, .dirfd, .path, .path])
+        set(["getfh"], [.path, .ptr])
+        set(["mknodat"], [.dirfd, .path, .mode, .int])
+        set(["open_dprotected_np"], [.path, .oflags, .int, .int])
+        set(["openat_dprotected_np"], [.dirfd, .path, .oflags, .int])
+        set(["guarded_open_dprotected_np"], [.path, .ptr, .hex, .oflags])
+        set(["pivot_root"], [.path, .path])
+        set(["quotactl"], [.path, .int, .int, .ptr])
+        set(["searchfs"], [.path, .ptr, .ptr, .uint])
+        set(["setattrlistat"], [.dirfd, .path, .ptr, .ptr])
+        set(["unmount"], [.path, .hex])
+        set(["mount"], [.ptr, .path, .hex, .ptr])                 // the type is a name, not a path
+        set(["getpriority"], [.prioWhich, .int32])
+        set(["setpriority"], [.prioWhich, .int32, .int32])
+        set(["getrusage"], [.rusageWho, .ptr])
+        set(["getrlimit", "setrlimit"], [.rlimit, .ptr])
+        set(["wait4"], [.int32, .ptr, .waitOptions, .ptr])
+        set(["sigaction"], [.signal, .ptr, .ptr])
+        set(["setuid", "seteuid", "setgid", "setegid", "getpgid", "getsid"], [.int32])
+        set(["setpgid"], [.int32, .int32])
+        set(["execve"], [.path, .ptr, .ptr])
+        set(["posix_spawn"], [.ptr, .path, .ptr, .ptr])
         set(["getdirentries64"], [.fd, .ptr, .size, .ptr])
         set(["fstatfs64", "fstatfs"], [.fd, .ptr])
         set(["ftruncate"], [.fd, .int])
-        set(["flock"], [.fd, .int])
+        set(["flock"], [.fd, .flock])
         set(["fchmod"], [.fd, .mode])
-        set(["fchown"], [.fd, .int, .int])
+        set(["fchown"], [.fd, .int32, .int32])
         set(["fgetxattr", "fsetxattr"], [.fd, .ptr, .ptr, .size])
-        set(["getxattr", "setxattr"], [.ptr, .ptr, .ptr, .size])
-        set(["mmap"], [.ptr, .size, .hex, .hex])
-        set(["munmap", "mprotect", "madvise", "msync"], [.ptr, .size, .hex])
-        set(["socket"], [.int, .int, .int])
+        set(["mmap"], [.ptr, .size, .prot, .mapFlags])   // fd and offset are the 5th and 6th
+        set(["munmap", "mlock", "munlock"], [.ptr, .size])
+        set(["mprotect"], [.ptr, .size, .prot])
+        set(["madvise"], [.ptr, .size, .madvise])
+        set(["msync"], [.ptr, .size, .msync])
+        set(["socket"], [.domain, .sockType, .proto])
+        set(["socketpair"], [.domain, .sockType, .proto, .ptr])
         set(["connect", "bind"], [.fd, .ptr, .size])
         set(["listen"], [.fd, .int])
         set(["accept"], [.fd, .ptr, .ptr])
-        set(["sendto", "recvfrom"], [.fd, .ptr, .size, .hex])
-        set(["sendmsg", "recvmsg"], [.fd, .ptr, .hex])
-        set(["sendmsg_x", "recvmsg_x"], [.fd, .ptr, .uint, .hex])
-        set(["shutdown"], [.fd, .int])
-        set(["setsockopt", "getsockopt"], [.fd, .int, .int, .ptr])
+        set(["sendto", "recvfrom"], [.fd, .ptr, .size, .msgFlags])
+        set(["sendmsg", "recvmsg"], [.fd, .ptr, .msgFlags])
+        set(["sendmsg_x", "recvmsg_x"], [.fd, .ptr, .uint, .msgFlags])
+        set(["shutdown"], [.fd, .shutdownHow])
         set(["select", "pselect"], [.int, .ptr, .ptr, .ptr])
         set(["poll"], [.ptr, .uint, .int])
         set(["kevent", "kevent64", "kevent_qos"], [.fd, .ptr, .int, .ptr])
@@ -433,44 +619,101 @@ enum SyscallFormat {
         set(["kqueue", "getpid", "getppid", "getuid", "geteuid", "getgid", "getegid", "fork", "vfork", "sync", "issetugid"], [])
         set(["kill"], [.int, .signal])
         set(["__pthread_kill"], [.hex, .signal])
-        set(["sigprocmask", "__pthread_sigmask"], [.int, .ptr, .ptr])
+        set(["sigprocmask", "__pthread_sigmask", "pthread_sigmask"], [.sigHow, .ptr, .ptr])
+        set(["guarded_write_np"], [.fd, .ptr, .ptr, .size])          // fd, guard, buf, nbyte
+        set(["guarded_pwrite_np"], [.fd, .ptr, .ptr, .size])         // ... offset is the 5th
+        set(["guarded_writev_np"], [.fd, .ptr, .ptr, .int])
         set(["psynch_mutexwait", "psynch_mutexdrop"], [.ptr, .hex, .hex, .hex])
         set(["psynch_cvwait", "psynch_cvsignal", "psynch_cvbroad"], [.ptr, .hex, .hex, .ptr])
-        set(["ulock_wait", "ulock_wait2"], [.hex, .ptr, .hex, .uint])
-        set(["ulock_wake"], [.hex, .ptr, .hex])
-        set(["workq_kernreturn"], [.hex, .ptr, .int, .int])
+        set(["ulock_wait"], [.ulock, .ptr, .hex, .uint])     // timeout in µs
+        set(["ulock_wait2"], [.ulock, .ptr, .hex, .uint])    // timeout in ns
+        set(["ulock_wake"], [.ulock, .ptr, .hex])
+        set(["workq_kernreturn"], [.workqOp, .ptr, .int, .int])
         set(["bsdthread_ctl"], [.hex, .hex, .hex, .hex])
         set(["exit"], [.int])
         set(["getentropy"], [.ptr, .size])
-        set(["csops", "csops_audittoken"], [.int, .uint, .ptr, .size])
-        set(["proc_info", "proc_info_extended_id"], [.int, .int, .uint, .uint])
+        set(["csops", "csops_audittoken"], [.int, .csops, .ptr, .size])
         set(["sysctl"], [.ptr, .uint, .ptr, .ptr])
         set(["sysctlbyname"], [.ptr, .size, .ptr, .ptr])
         set(["fsgetpath"], [.ptr, .size, .ptr, .hex])
         set(["shared_region_check_np"], [.ptr])
         set(["thread_selfid", "thread_selfusage"], [])
         // Mach traps
-        set(["mach_msg_trap", "mach_msg_overwrite_trap"], [.ptr, .hex, .size, .size])
-        set(["mach_msg2_trap"], [.ptr, .hex, .hex, .hex])
+        set(["mach_msg_trap", "mach_msg_overwrite_trap"], [.ptr, .machOptions, .size, .size])
         set(["mach_reply_port", "thread_self_trap", "task_self_trap", "host_self_trap", "thread_get_special_reply_port"], [])
         set(["semaphore_signal_trap", "semaphore_wait_trap"], [.hex])
         set(["semaphore_timedwait_trap"], [.hex, .uint, .uint])
         set(["mk_timer_arm"], [.hex, .uint])
         set(["mk_timer_cancel"], [.hex, .ptr])
-        set(["mach_vm_allocate_trap", "mach_vm_deallocate_trap"], [.hex, .ptr, .size, .hex])
-        set(["mach_port_deallocate_trap", "mach_port_mod_refs_trap"], [.hex, .hex, .int, .int])
+        set(["mach_vm_allocate_trap"], [.hex, .ptr, .size, .vmFlags])
+        set(["mach_vm_deallocate_trap"], [.hex, .ptr, .size])
+        set(["mach_vm_protect_trap"], [.hex, .ptr, .size, .int])     // set_maximum; the protection is the 5th
+        set(["mach_vm_map_trap"], [.hex, .ptr, .size, .hex])         // mask; flags and protection come after
+        set(["mach_port_allocate_trap"], [.hex, .portRight, .ptr])
+        set(["mach_port_deallocate_trap", "mach_port_destroy_trap"], [.hex, .hex])
+        set(["mach_port_mod_refs_trap"], [.hex, .hex, .portRight, .int32])
+        set(["mach_port_insert_right_trap"], [.hex, .hex, .hex, .hex])
+        set(["mach_port_insert_member_trap", "mach_port_extract_member_trap"], [.hex, .hex, .hex])   // task, port, set
+        set(["mach_port_construct_trap"], [.hex, .ptr, .hex, .ptr])                                    // task, options, context, name out
+        set(["mach_port_destruct_trap"], [.hex, .hex, .int32, .hex])                                   // task, name, srdelta, guard
+        set(["mach_port_get_attributes_trap"], [.hex, .hex, .int, .ptr])                               // task, name, flavor, info
+        set(["mach_port_request_notification_trap"], [.hex, .hex, .machNotify, .uint])                 // task, name, msgid, sync
+        set(["mk_timer_arm_leeway"], [.hex, .hex, .uint, .uint])                                       // timer, flags, deadline, leeway
+        set(["iokit_user_client"], [.hex, .int, .hex, .hex])                                           // connection, trap index, p1, p2
+        set(["work_interval_ctl"], [.int, .hex, .ptr, .size])                                          // operation, id, arg, len
+        set(["pthread_fchdir"], [.fd])
+        set(["mac_syscall"], [.ptr, .int, .ptr])                                                       // policy name, call, arg
+        set(["disable_threadsignal"], [.int])
+        set(["kern_mach_vm_purgable_control_trap", "mach_vm_purgable_control_trap"], [.hex, .ptr, .purgable, .ptr])
+        set(["mach_port_guard_trap"], [.hex, .hex, .hex, .int])
+        set(["mach_port_unguard_trap"], [.hex, .hex, .hex])
+        set(["mach_port_type_trap"], [.hex, .hex, .ptr])
+        set(["mach_generate_activity_id"], [.hex, .int, .ptr])
+        set(["mk_timer_destroy"], [.hex])
+        set(["mk_timer_create"], [])
+        set(["thread_selfcounts"], [.int, .ptr, .size])
+        set(["persona"], [.personaOp, .hex, .ptr, .ptr])
+        set(["gettimeofday"], [.ptr, .ptr, .ptr])
+        set(["iopolicysys"], [.iopolCmd, .ptr])
+        set(["gettid"], [.ptr, .ptr])
+        set(["kdebug_typefilter"], [.ptr, .ptr])
+        set(["semwait_signal"], [.hex, .hex, .int, .int])
+        set(["task_name_for_pid", "task_for_pid", "task_read_for_pid", "task_inspect_for_pid"], [.hex, .int32, .ptr])
+        set(["pid_for_task"], [.hex, .ptr])
+        set(["kqueue_workloop_ctl"], [.workloopCmd, .hex, .ptr, .size])
+        set(["getaudit_addr", "setaudit_addr"], [.ptr, .size])
+        set(["fileport_makefd"], [.hex])
+        set(["fileport_makeport"], [.fd, .ptr])
+        set(["coalition"], [.coalitionOp, .ptr, .hex])
+        set(["coalition_info"], [.coalitionInfo, .ptr, .ptr, .ptr])
+        set(["memorystatus_control"], [.memorystatusCmd, .int32, .hex, .ptr])
+        set(["bsdthread_create"], [.ptr, .ptr, .ptr, .ptr])
+        set(["bsdthread_terminate"], [.ptr, .size, .hex, .hex])
+        set(["pipe"], [])
+        set(["mach_vm_reclaim_update_kernel_accounting_trap"], [.ptr, .ptr])
         set(["swtch_pri", "swtch"], [.int])
         set(["thread_switch"], [.hex, .int, .uint])
         return s
     }()
 
+    /// The signature for a name, ignoring a _nocancel suffix the table doesn't list.
+    static func signature(_ name: String) -> [Arg]? {
+        signatures[name] ?? (name.hasSuffix("_nocancel") ? signatures[String(name.dropLast(9))] : nil)
+    }
+
     static func fill(_ r: inout SyscallRecord) {
         if let a = r.args {
-            let sig = signatures[r.name]
-            let n = sig?.count ?? a.count
-            r.argsText = (0..<min(n, a.count)).map { arg(a[$0], sig?[$0]) }.joined(separator: ", ")
+            r.argValues = special(r.name, a, paths: r.paths) ?? {
+                let sig = signature(r.name)
+                // Path arguments take the looked-up paths in order. O_CREAT looks its path up twice: a repeat is one.
+                var paths = r.paths.enumerated().filter { $0.offset == 0 || r.paths[$0.offset - 1] != $0.element }.map(\.element)[...]
+                return (0..<min(sig?.count ?? a.count, a.count)).map { i -> String in
+                    if sig?[i] == .path, let p = paths.popFirst() { return quote(p) }
+                    return arg(a[i], sig?[i])
+                }
+            }()
         } else {
-            r.argsText = "…"
+            r.argValues = ["…"]
         }
         switch r.state {
         case .inProgress:
@@ -489,7 +732,7 @@ enum SyscallFormat {
                 r.resultText = kr == 0 ? "KERN_SUCCESS" : machError(kr)
             } else if r.error == 0 {
                 r.failed = false
-                r.resultText = value(r.ret)
+                r.resultText = result(r)
             } else {
                 // EJUSTRETURN and ERESTART are the kernel's own bookkeeping, not failures the process sees.
                 r.failed = r.error > 0
@@ -498,16 +741,203 @@ enum SyscallFormat {
         }
     }
 
+    /// What a successful return value is, from each call's man page.
+    enum Returns { case fd, bytes, pid, uid, gid, threadID, offset, address, count(String), mask, priority, bool, length, waiters, negErrno, sequence }
+    static let returns: [String: Returns] = {
+        var t: [String: Returns] = [:]
+        func set(_ names: [String], _ k: Returns) { for n in names { t[n] = k; t[n + "_nocancel"] = k } }
+        set(["open", "openat", "dup", "dup2", "dup3", "socket", "accept", "kqueue", "guarded_kqueue_np", "guarded_open_np",
+             "guarded_open_dprotected_np", "open_dprotected_np", "openat_dprotected_np", "openbyid_np", "fhopen", "shm_open",
+             "fileport_makefd", "necp_open", "necp_session_open", "peeloff"], .fd)
+        set(["read", "write", "pread", "pwrite", "readv", "writev", "preadv", "pwritev", "recvfrom", "sendto", "recvmsg", "sendmsg",
+             "getxattr", "fgetxattr", "listxattr", "flistxattr", "readlink", "readlinkat", "freadlink", "getdirentries64",
+             "proc_info", "proc_info_extended_id", "guarded_write_np", "guarded_pwrite_np", "guarded_writev_np"], .bytes)
+        set(["getpid", "getppid", "fork", "vfork", "wait4", "getpgrp", "getpgid", "getsid", "setsid"], .pid)
+        set(["getuid", "geteuid"], .uid)
+        set(["getgid", "getegid"], .gid)
+        set(["thread_selfid", "gettid"], .threadID)
+        set(["lseek"], .offset)
+        set(["mmap", "shmat", "bsdthread_create"], .address)
+        set(["kevent", "kevent64", "kevent_qos", "kevent_id"], .count("event"))
+        set(["poll", "select", "pselect"], .count("ready descriptor"))
+        set(["getfsstat", "getfsstat64"], .count("filesystem"))
+        set(["getattrlistbulk"], .count("entry"))
+        set(["recvmsg_x", "sendmsg_x"], .count("message"))
+        set(["getgroups"], .count("group"))
+        set(["getdtablesize"], .count("descriptor"))
+        set(["umask"], .mask)
+        set(["getpriority"], .priority)
+        set(["issetugid"], .bool)
+        set(["fpathconf", "pathconf"], .length)
+        set(["fsgetpath"], .bytes)
+        // bsd/kern/sys_ulock.c: wait returns the waiters left; with ULF_NO_ERRNO both return -errno instead of failing.
+        set(["ulock_wait", "ulock_wait2"], .waiters)
+        set(["ulock_wake"], .negErrno)
+        // libpthread's kern_synch.c: the kernel's updated sequence word for the lock or condition variable.
+        set(["psynch_mutexwait", "psynch_mutexdrop", "psynch_cvwait", "psynch_cvsignal", "psynch_cvbroad", "psynch_rw_rdlock",
+             "psynch_rw_wrlock", "psynch_rw_unlock"], .sequence)
+        return t
+    }()
+
+    /// A successful result where the call says what it is.
+    private static func result(_ r: SyscallRecord) -> String {
+        let base = r.name.hasSuffix("_nocancel") ? String(r.name.dropLast(9)) : r.name
+        if base == "fcntl", let a = r.args, a.count > 1 {
+            switch Int32(truncatingIfNeeded: a[1]) {
+            case F_GETFL: return openFlags(Int32(truncatingIfNeeded: r.ret))
+            case F_GETFD: return SyscallFlags.bits(r.ret, [(UInt64(FD_CLOEXEC), "FD_CLOEXEC")])
+            case F_DUPFD, F_DUPFD_CLOEXEC: return "fd \(Int32(truncatingIfNeeded: r.ret))"
+            case F_GETOWN: return "pid \(Int32(truncatingIfNeeded: r.ret))"
+            default: break
+            }
+        }
+        if base == "pipe" { return "fds [\(Int32(truncatingIfNeeded: r.ret)), \(Int32(truncatingIfNeeded: r.ret1))]" }
+        let v = wideReturns.contains(base) ? wide(r) : r.ret
+        let i = Int64(Int32(truncatingIfNeeded: v))
+        switch returns[base] {
+        case .fd: return "fd \(i)"
+        case .bytes: return v == 1 ? "1 byte" : "\(Int64(bitPattern: v)) bytes"
+        case .pid: return i == 0 && (base == "fork" || base == "vfork") ? "0 (in the child)" : "pid \(i)"
+        case .uid: return "uid \(UInt32(truncatingIfNeeded: v))"
+        case .gid: return "gid \(UInt32(truncatingIfNeeded: v))"
+        case .threadID: return "thread \(v)"
+        case .offset: return "offset \(Int64(bitPattern: v))"
+        case .address: return "0x" + String(v, radix: 16)
+        case .count(let what): return "\(i) " + (i == 1 ? what : what.hasSuffix("y") ? what.dropLast() + "ies" : what + "s")
+        case .mask: return "old mask 0" + String(v & 0o777, radix: 8)
+        case .priority: return "priority \(i)"
+        case .bool: return v == 0 ? "0 (false)" : "1 (true)"
+        case .length: return "\(i)"
+        case .waiters:
+            if i < 0 { return "\(i) (\(errnoNames[Int(-i)] ?? "errno \(-i)"))" }
+            return i == 1 ? "1 other waiter" : "\(i) other waiters"
+        case .negErrno: return i < 0 ? "\(i) (\(errnoNames[Int(-i)] ?? "errno \(-i)"))" : "\(i)"
+        case .sequence: return "seq 0x" + String(UInt32(truncatingIfNeeded: v), radix: 16)
+        case nil: return value(v)
+        }
+    }
+
+    /// Calls returning a 64-bit value (user_addr_t, off_t, user_ssize_t in syscalls.master).
+    static let wideReturns: Set<String> = ["mmap", "bsdthread_create", "lseek", "read", "write", "pread", "pwrite", "readv", "writev", "preadv", "pwritev",
+                                           "recvfrom", "sendto", "recvmsg", "sendmsg", "recvmsg_x", "sendmsg_x", "getxattr", "fgetxattr",
+                                           "listxattr", "flistxattr", "getdirentries64", "sendfile"]
+    private static func wide(_ r: SyscallRecord) -> UInt64 { (r.ret & 0xffff_ffff) | r.ret1 << 32 }
+
+    /// The path as the kernel looked it up. After a symlink that is the link's target (with the rest of the
+    /// path), not the string the caller passed: /etc/hosts shows as "private/etc/hosts", since /etc is a
+    /// relative symlink to private/etc.
+    static func quote(_ p: String) -> String { "\"" + p + "\"" }
+
+    /// Names for the arguments `fill` shows: per command where a call's decoding depends on its first argument,
+    /// else as xnu declares them (SyscallArgNames). Kernel and kdebug names differ a little: kdebug drops the sys_
+    /// prefix (sys_fcntl) and Mach trap names may or may not end in _trap (mk_timer_arm, struct
+    /// mk_timer_arm_trap_args; mach_port_allocate_trap, struct _kernelrpc_mach_port_allocate_args).
+    static func argNames(_ r: SyscallRecord) -> [String] {
+        let base = r.name.hasSuffix("_nocancel") ? String(r.name.dropLast(9)) : r.name
+        let a = r.args ?? []
+        switch base {
+        case "bsdthread_ctl": if let first = a.first, let n = SyscallFlags.bsdthreadCtlNames(first) { return n }
+        case "workq_kernreturn": if let first = a.first, let n = SyscallFlags.workqKernreturnNames(first) { return n }
+        case "mach_msg2_trap": return ["msg", "options", "header"]
+        default: break
+        }
+        if r.mach {
+            let t = SyscallArgNames.mach
+            // trace.codes calls a few traps kern_... (kern_mach_vm_purgable_control_trap).
+            let b = base.hasPrefix("kern_") ? String(base.dropFirst(5)) : base
+            return t[b] ?? t[b + "_trap"] ?? (b.hasSuffix("_trap") ? t[String(b.dropLast(5))] : nil) ?? []
+        }
+        let t = SyscallArgNames.bsd
+        return t[r.name] ?? t[base] ?? t["sys_" + base] ?? t["__" + base] ?? []
+    }
+
+    /// Calls `special` formats itself (so they need no signature).
+    static let specialNames: Set<String> = ["open", "openat", "fcntl", "setsockopt", "getsockopt", "proc_info", "proc_info_extended_id",
+                                            "mach_msg2_trap", "bsdthread_ctl", "workq_kernreturn"]
+
+    /// Calls whose arguments depend on each other.
+    private static func special(_ name: String, _ a: [UInt64], paths: [String]) -> [String]? {
+        let base = name.hasSuffix("_nocancel") ? String(name.dropLast(9)) : name
+        switch base {
+        case "open" where a.count >= 3:
+            // The mode only matters with O_CREAT.
+            let f = Int32(truncatingIfNeeded: a[1])
+            return [paths.first.map(quote) ?? arg(a[0], .ptr), openFlags(f)] + (f & O_CREAT != 0 ? [arg(a[2], .mode)] : [])
+        case "openat" where a.count >= 4:
+            let f = Int32(truncatingIfNeeded: a[2])
+            return [arg(a[0], .dirfd), paths.first.map(quote) ?? arg(a[1], .ptr), openFlags(f)] + (f & O_CREAT != 0 ? [arg(a[3], .mode)] : [])
+        case "fcntl" where a.count >= 3:
+            return [arg(a[0], .fd), SyscallFlags.one(a[1], SyscallFlags.fcntlCmds)] + (SyscallFlags.fcntlArg(cmd: a[1], a[2]).map { [$0] } ?? [])
+        case "setsockopt", "getsockopt":
+            guard a.count >= 4 else { return nil }
+            let (level, opt) = SyscallFlags.sockopt(level: a[1], a[2])
+            return [arg(a[0], .fd), level, opt, arg(a[3], .ptr)]
+        case "proc_info", "proc_info_extended_id":
+            guard a.count >= 4 else { return nil }
+            // (call, pid, flavor, arg): flavors are named for PROC_INFO_CALL_PIDINFO.
+            let flavor = a[0] == 2 ? SyscallFlags.one(a[2], SyscallFlags.pidInfoFlavors) : "\(a[2])"
+            return [SyscallFlags.one(a[0], SyscallFlags.procInfoCalls), "\(Int32(truncatingIfNeeded: a[1]))", flavor, value(a[3])]
+        case "mach_msg2_trap":
+            return SyscallFlags.machMsg2(a)
+        case "bsdthread_ctl":
+            return SyscallFlags.bsdthreadCtl(a)
+        case "workq_kernreturn":
+            return SyscallFlags.workqKernreturn(a)
+        default:
+            return nil
+        }
+    }
+
+
     static func arg(_ v: UInt64, _ kind: Arg?) -> String {
+        typealias F = SyscallFlags
         switch kind {
         case .fd: return "\(Int32(truncatingIfNeeded: v))"
         case .dirfd: return Int32(truncatingIfNeeded: v) == -2 ? "AT_FDCWD" : "\(Int32(truncatingIfNeeded: v))"
         case .int: return "\(Int64(bitPattern: v))"
+        case .int32: return "\(Int32(truncatingIfNeeded: v))"
         case .uint, .size: return "\(v)"
-        case .hex, .ptr: return v == 0 ? (kind == .ptr ? "NULL" : "0") : "0x" + String(v, radix: 16)
+        case .hex, .ptr, .path: return v == 0 ? (kind == .hex ? "0" : "NULL") : "0x" + String(v, radix: 16)
         case .oflags: return openFlags(Int32(truncatingIfNeeded: v))
         case .mode: return "0" + String(v & 0o7777, radix: 8)
         case .signal: return signalName(Int32(truncatingIfNeeded: v))
+        case .prot: return F.bits(v, F.prot, zero: "PROT_NONE")
+        case .vmProt: return F.bits(v, F.prot, zero: "VM_PROT_NONE")
+        case .mapFlags: return F.bits(v, F.mapFlags, zero: "0")
+        case .madvise: return F.one(v, F.madvise)
+        case .msync: return F.bits(v, F.msync)
+        case .vmFlags: return F.vmFlagsText(v)
+        case .access: return F.bits(v, F.access, zero: "F_OK")
+        case .atFlags: return F.bits(v, F.atFlags)
+        case .whence: return F.one(v, F.whence)
+        case .flock: return F.bits(v, F.flock)
+        case .ioctl: return F.ioctl(v)
+        case .domain: return F.one(v, F.domains)
+        case .sockType: return F.one(v, F.sockTypes)
+        case .proto: return F.one(v, F.protocols)
+        case .msgFlags: return F.bits(v, F.msgFlags)
+        case .shutdownHow: return F.one(v, F.shutdownHow)
+        case .sigHow: return F.one(v, F.sigHow)
+        case .ulock: return F.ulock(v)
+        case .workqOp: return F.one(v, F.workqOps)
+        case .csops: return F.one(v, F.csops)
+        case .procInfoCall: return F.one(v, F.procInfoCalls)
+        case .portRight: return F.one(v, F.portRights)
+        case .machNotify: return F.one(v, F.machNotifications)
+        case .chflags: return F.bits(v, F.chflags)
+        case .prioWhich: return F.one(v, F.prioWhich)
+        case .rusageWho: return F.one(UInt64(bitPattern: Int64(Int32(truncatingIfNeeded: v))), F.rusageWho)
+        case .rlimit: return F.one(v, F.rlimits)
+        case .waitOptions: return F.bits(v, F.waitOptions)
+        case .snapshotOp: return F.one(v, F.snapshotOps)
+        case .purgable: return F.one(v, F.purgableControls)
+        case .personaOp: return F.one(v, F.personaOps)
+        case .iopolCmd: return F.one(v, F.iopolCmds)
+        case .workloopCmd: return F.one(v, F.workloopCmds)
+        case .coalitionOp: return F.one(v, F.coalitionOps)
+        case .coalitionInfo: return F.one(v, F.coalitionInfos)
+        case .memorystatusCmd: return F.one(v, F.memorystatusCmds)
+        case .machOptions: return F.bits(v, F.machOptions)
         case nil: return value(v)
         }
     }

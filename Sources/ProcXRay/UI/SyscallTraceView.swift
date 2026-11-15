@@ -63,6 +63,7 @@ final class SyscallTracer {
         }
         await tracer.setPhase(.running)
         var dec = SyscallDecoder(stacks: stacks && format == .kdebug)
+        var fds = FdLabeler()
         var stopSent = false
         var endNote: String?
         let deadlineAfterStop: TimeInterval = 6
@@ -86,6 +87,7 @@ final class SyscallTracer {
             let (evs, bad) = format == .kdebug ? (KdebugEvent.decodeRaw(data), 0) : KdebugEvent.decode(data)
             symbols.add(regions)
             var recs = dec.feed(evs)
+            fds.label(&recs) { s.describeFds($0) }
             for i in recs.indices where !recs[i].stack.isEmpty { recs[i].caller = symbols.caller(recs[i].stack) }
             var n = notes.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
             if bad > 0 { n.append("\(bad) unreadable trace lines skipped.") }
@@ -98,6 +100,7 @@ final class SyscallTracer {
             if data.count < SyscallTraceConfig.maxRead / 2 { try? await Task.sleep(for: .milliseconds(250)) }
         }
         var last = dec.flush()
+        fds.label(&last) { s.describeFds($0) }
         for i in last.indices where !last[i].stack.isEmpty { last[i].caller = symbols.caller(last[i].stack) }
         if !last.isEmpty { await tracer.append(last, events: 0, notes: []) }
         await tracer.finish(dec.pending(), note: endNote)
@@ -140,6 +143,7 @@ struct SyscallTraceView: View {
     @State private var tracer = SyscallTracer()
     @AppStorage("syscallTrace.mode") private var mode = "Calls"
     @AppStorage("syscallTrace.stacks") private var stacks = false
+    @AppStorage("syscallTrace.argNames") private var argNames = true
     @State private var filter = ""
     @State private var errorsOnly = false
     @State private var sort = [KeyPathComparator(\SyscallRecord.time, order: .reverse)]
@@ -205,6 +209,8 @@ struct SyscallTraceView: View {
                 Text("Summary").tag("Summary")
             }
             .pickerStyle(.segmented).labelsHidden().fixedSize()
+            Toggle("Names", isOn: $argNames).toggleStyle(.checkbox).font(.caption)
+                .help("Show argument names (as xnu declares them) with the values")
             Toggle("Errors only", isOn: $errorsOnly).toggleStyle(.checkbox).font(.caption)
             TextField("filter", text: $filter).textFieldStyle(.roundedBorder).frame(width: 160)
             Button("Clear") { tracer.clear(); selection = [] }.disabled(tracer.isActive || tracer.phase == .idle)
@@ -249,7 +255,10 @@ struct SyscallTraceView: View {
                 Text(r.name).foregroundStyle(r.mach ? Color.purple : Color.primary).truncationHelp(r.name)
             }
             .width(min: 90, ideal: 150)
-            TableColumn("Arguments") { r in Text(r.argsText).foregroundStyle(.secondary).truncationHelp(r.argsText) }
+            TableColumn("Arguments") { r in
+                let t = argNames ? r.namedArgsText : r.argsText
+                Text(t).foregroundStyle(.secondary).truncationHelp(t)
+            }
                 .width(min: 100, ideal: 240)
             TableColumn("Result") { r in
                 Text(r.resultText)
@@ -360,7 +369,7 @@ struct SyscallTraceView: View {
             let d = r.duration.map { " <\(Self.duration($0))>" } ?? ""
             let p = r.paths.isEmpty ? "" : "  \(r.pathText)"
             let stack = tracer.symbols.frames(r.stack).map { "\n    " + $0.text }.joined()
-            return "\(t) [\(r.thread)] \(r.name)(\(r.argsText)) = \(r.resultText)\(d)\(p)\(stack)"
+            return "\(t) [\(r.thread)] \(r.name)(\(argNames ? r.namedArgsText : r.argsText)) = \(r.resultText)\(d)\(p)\(stack)"
         }.joined(separator: "\n")
     }
 

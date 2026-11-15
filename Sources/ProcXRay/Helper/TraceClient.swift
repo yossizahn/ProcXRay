@@ -37,6 +37,14 @@ final class HelperTraceSession: @unchecked Sendable {
         }
     }
 
+    /// What the traced process's descriptors are now; empty when the helper can't say.
+    func describeFds(_ fds: Set<Int32>) -> [Int32: String] {
+        guard !fds.isEmpty, let req = try? JSONEncoder().encode(Array(fds)),
+              let d: Data = call(timeout: 5, { p, done in p.traceDescribeFds(req) { done($0) } }),
+              let m = try? JSONDecoder().decode([String: String].self, from: d) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: m.compactMap { k, v in Int32(k).map { ($0, v) } })
+    }
+
     func stop() {
         _ = call(timeout: 5) { p, done in p.traceStop { done(()) } }
     }

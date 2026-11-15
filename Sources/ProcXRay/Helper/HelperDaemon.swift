@@ -142,6 +142,7 @@ enum HelperDaemon {
 
         private let traceLock = NSLock()
         private var trace: TraceSource?
+        private var tracedPid: Int32 = 0
         private var traceRunning: Bool { trace.map { $0.read(max: 0).1 } ?? false }
 
         func traceStart(pid: Int32, stacks: Bool, reply: @escaping (String?, Int) -> Void) {
@@ -156,6 +157,7 @@ enum HelperDaemon {
                 switch KdebugTrace.start(pid: pid, stacks: stacks, maxPending: SyscallTraceConfig.maxPending, maxSeconds: SyscallTraceConfig.maxSeconds) {
                 case .success(let t):
                     trace = t
+                    tracedPid = pid
                     reply(nil, SyscallTraceConfig.Format.kdebug.rawValue)
                     return
                 case .failure(.refused(let why)):
@@ -169,6 +171,7 @@ enum HelperDaemon {
             let t = TraceProcess(maxPending: SyscallTraceConfig.maxPending, note: note)
             if let err = t.start(path, args) { reply(err, 0); return }
             trace = t
+            tracedPid = pid
             reply(nil, SyscallTraceConfig.Format.ndjson.rawValue)
         }
 
@@ -178,6 +181,13 @@ enum HelperDaemon {
             let (d, running, notes) = t.read(max: SyscallTraceConfig.maxRead)
             // After the read: the regions for every frame in `d` were queued before its records were.
             reply(d, running, notes, t.newRegions())
+        }
+
+        func traceDescribeFds(_ fds: Data, reply: @escaping (Data) -> Void) {
+            traceLock.lock(); let pid = trace == nil ? 0 : tracedPid; traceLock.unlock()
+            guard pid > 0, let list = try? JSONDecoder().decode([Int32].self, from: fds) else { reply(Data()); return }
+            let d = NativeLsof.describe(pid, fds: Set(list.prefix(4096)))
+            reply((try? JSONEncoder().encode(Dictionary(uniqueKeysWithValues: d.map { (String($0.key), $0.value) }))) ?? Data())
         }
 
         func traceStop(reply: @escaping () -> Void) {

@@ -73,6 +73,9 @@ enum HelperConfig {
     /// the images behind stack frames found since the last read (JSON [StackRegion], empty Data when none).
     func traceRead(reply: @escaping (Data, Bool, String, Data) -> Void)
     func traceStop(reply: @escaping () -> Void)
+    /// What some descriptors of the traced process are now (JSON [Int32] in, JSON [String: String] by fd out):
+    /// for labelling fd arguments. Empty when no trace runs on this connection.
+    func traceDescribeFds(_ fds: Data, reply: @escaping (Data) -> Void)
 }
 
 /// What the helper traces, and the one ktrace command line it runs when it doesn't read kdebug itself.

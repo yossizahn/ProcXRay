@@ -120,6 +120,7 @@ enum Bench {
         }
         let started = -t0.timeIntervalSinceNow
         var dec = SyscallDecoder()
+        var fds = FdLabeler()
         var recs: [SyscallRecord] = []
         var events = 0, bytes = 0, bad = 0
         var decodeTime = 0.0
@@ -130,12 +131,17 @@ enum Bench {
             if !notes.isEmpty { print("note: " + notes.trimmingCharacters(in: .whitespacesAndNewlines)) }
             let d0 = Date()
             let (evs, b) = ktrace ? KdebugEvent.decode(d) : (KdebugEvent.decodeRaw(d), 0)
-            recs += dec.feed(evs)
+            var batch = dec.feed(evs)
+            fds.label(&batch) { NativeLsof.describe(pid, fds: $0) }
+            recs += batch
             decodeTime += -d0.timeIntervalSinceNow
             events += evs.count; bytes += d.count; bad += b
             if !running { break }
             if d.count < SyscallTraceConfig.maxRead / 2 { usleep(250_000) }
         }
+        var tail = dec.flush()
+        fds.label(&tail) { NativeLsof.describe(pid, fds: $0) }
+        recs += tail
         let inFlight = dec.pending()
         var ru = rusage(), rc = rusage(); getrusage(RUSAGE_SELF, &ru); getrusage(RUSAGE_CHILDREN, &rc)
         func secs(_ t: timeval) -> Double { Double(t.tv_sec) + Double(t.tv_usec) / 1e6 }
@@ -176,6 +182,75 @@ enum Bench {
             }
             return
         }
+        if what == "survey" {
+            // survey <seconds> <processes>: traces the busiest processes one after another (one trace at a time) and
+            // lists the calls still shown as raw numbers, by count: no argument table, no argument names, or a result
+            // without a meaning.
+            let secs = args.dropFirst().first.flatMap { Double($0) } ?? 3
+            let n = args.dropFirst(2).first.flatMap { Int($0) } ?? 12
+            let ps = Shell.exec("/bin/ps", ["-A", "-r", "-o", "pid=,comm="], timeout: 10, maxBytes: 1 << 20).output
+            let me = getpid()
+            let pids = ps.split(separator: "\n").compactMap { line -> (Int32, String)? in
+                let f = line.split(separator: " ", maxSplits: 1)
+                guard f.count == 2, let p = Int32(f[0]), p != me, !f[1].contains("ProcXRay") else { return nil }
+                return (p, String(f[1].split(separator: "/").last ?? ""))
+            }.prefix(n)
+            struct Agg { var count = 0; var reasons: Set<String> = []; var examples: [String] = []; var procs: Set<String> = [] }
+            var agg: [String: Agg] = [:]
+            var total = 0, fdArgs = 0, fdLabeled = 0
+            var socketExamples: [String] = []
+            for (pid, comm) in pids {
+                let s = HelperTraceSession()
+                guard case .success(let format) = s.start(pid: pid) else { s.close(); continue }
+                var dec = SyscallDecoder(), recs: [SyscallRecord] = [], stopped = false
+                var fds = FdLabeler()
+                let t0 = Date()
+                while let (d, running, _, _) = s.read() {
+                    if !stopped && -t0.timeIntervalSinceNow > secs { s.stop(); stopped = true }
+                    var batch = dec.feed(format == .kdebug ? KdebugEvent.decodeRaw(d) : KdebugEvent.decode(d).events)
+                    fds.label(&batch) { s.describeFds($0) }
+                    recs += batch
+                    if !running { break }
+                    if d.count < SyscallTraceConfig.maxRead / 2 { usleep(250_000) }
+                }
+                s.close()
+                recs += dec.flush()
+                total += recs.count
+                print("\(comm) (\(pid)): \(recs.count) calls")
+                for r in recs {
+                    let base = r.name.hasSuffix("_nocancel") ? String(r.name.dropLast(9)) : r.name
+                    for (i, _) in FdLabeler.fdArgs(r) {
+                        fdArgs += 1
+                        if r.argValues[i].contains(" (") { fdLabeled += 1 }
+                        if socketExamples.count < 8, r.argValues[i].contains("TCP") || r.argValues[i].contains("UDP"),
+                           !socketExamples.contains(where: { $0.hasPrefix(r.name) }) {
+                            socketExamples.append("\(r.name)(\(r.argsText)) = \(r.resultText)  [\(comm)]")
+                        }
+                    }
+                    var why: [String] = []
+                    if let a = r.args, !a.isEmpty, !r.argValues.isEmpty, r.argValues != ["…"] {
+                        if SyscallFormat.signature(base) == nil && !SyscallFormat.specialNames.contains(base) { why.append("no args table") }
+                        if SyscallFormat.argNames(r).isEmpty { why.append("no names") }
+                    }
+                    if !r.mach && r.error == 0 && r.state == .done && r.ret != 0 && SyscallFormat.returns[base] == nil
+                        && !["fcntl", "pipe"].contains(base) { why.append("result unnamed") }
+                    guard !why.isEmpty else { continue }
+                    var g = agg[r.name] ?? Agg()
+                    g.count += 1; g.reasons.formUnion(why); g.procs.insert(comm)
+                    let ex = "\(r.name)(\(r.namedArgsText)) = \(r.resultText)"
+                    if g.examples.count < 2 && !g.examples.contains(ex) { g.examples.append(ex) }
+                    agg[r.name] = g
+                }
+            }
+            print("\nfd arguments: \(fdLabeled) of \(fdArgs) labelled")
+            for e in socketExamples { print("  " + e.prefix(220)) }
+            print("\n\(total) calls in all; still raw, by count:")
+            for (name, g) in agg.sorted(by: { $0.value.count > $1.value.count }).prefix(60) {
+                print("  \(g.count)  \(name)  [\(g.reasons.sorted().joined(separator: ", "))]  in \(g.procs.sorted().prefix(3).joined(separator: ", "))")
+                for e in g.examples { print("        " + e.prefix(200)) }
+            }
+            return
+        }
         if what == "trace" {
             // trace <pid> <seconds> [stacks]: through the helper over XPC, as SyscallTracer does.
             let secs = args.dropFirst(2).first.flatMap { Double($0) } ?? 3
@@ -189,6 +264,8 @@ enum Bench {
             }
             print(String(format: "trace: format %@, started in %.0f ms", "\(format)", -t0.timeIntervalSinceNow * 1000))
             var dec = SyscallDecoder(stacks: stacks); var recs = 0, events = 0, stopped = false
+            var fds = FdLabeler(), shown = 0
+            let show = args.contains("show")
             var names: [String: Int] = [:]
             let symbols = StackSymbols()
             var withStack = 0, callers: [String: Int] = [:], examples: [String: SyscallRecord] = [:]
@@ -208,11 +285,17 @@ enum Bench {
                 if !notes.isEmpty { print("note: " + notes.trimmingCharacters(in: .whitespacesAndNewlines)) }
                 let evs = format == .kdebug ? KdebugEvent.decodeRaw(d) : KdebugEvent.decode(d).events
                 events += evs.count
-                take(dec.feed(evs))
+                var batch = dec.feed(evs)
+                fds.label(&batch) { s.describeFds($0) }
+                if show { for r in batch where shown < 40 && !r.name.contains("semwait") { print("  \(r.name)(\(r.namedArgsText)) = \(r.resultText)"); shown += 1 } }
+                take(batch)
                 if !running { break }
                 if d.count < SyscallTraceConfig.maxRead / 2 { usleep(250_000) }
             }
             take(dec.flush())
+            // Calls whose arguments have no signature yet (shown as raw words), by count.
+            let unknown = names.filter { SyscallFormat.signature($0.key) == nil && $0.key != "mach_msg2_trap" && !["fcntl", "fcntl_nocancel", "open", "open_nocancel", "openat", "openat_nocancel", "setsockopt", "getsockopt", "proc_info", "proc_info_extended_id"].contains($0.key) }
+            print("no signature: " + unknown.sorted { $0.value > $1.value }.prefix(15).map { "\($0.key) \($0.value)" }.joined(separator: ", "))
             print("trace: \(events) events, \(recs) records, \(dec.gaps) gaps; top: " + names.sorted { $0.value > $1.value }.prefix(6).map { "\($0.key) \($0.value)" }.joined(separator: ", "))
             if stacks {
                 print("stacks: \(withStack) of \(recs) records")

@@ -141,6 +141,28 @@ enum NativeLsof {
         return item
     }
 
+    /// Short descriptions of some of a process's descriptors, for a syscall trace's fd arguments: the path of a
+    /// file, "TCP 10.0.0.2:52311->1.1.1.1:443 ESTABLISHED" for a socket, "pipe", "kqueue". Missing: closed fds.
+    static func describe(_ pid: pid_t, fds wanted: Set<Int32>) -> [Int32: String] {
+        let need = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        guard need > 0, !wanted.isEmpty else { return [:] }
+        var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(need) / MemoryLayout<proc_fdinfo>.size + 16)
+        let got = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fds, Int32(fds.count * MemoryLayout<proc_fdinfo>.size))
+        var out: [Int32: String] = [:]
+        for f in fds.prefix(max(0, Int(got)) / MemoryLayout<proc_fdinfo>.size) where wanted.contains(f.proc_fd) {
+            guard let i = descriptor(pid, fd: f.proc_fd, type: f.proc_fdtype) else { continue }
+            switch i.type {
+            case "IPv4", "IPv6": out[f.proc_fd] = [i.proto, i.name, i.tcpState].filter { !$0.isEmpty }.joined(separator: " ")
+            case "unix": out[f.proc_fd] = "unix " + i.name
+            case "PIPE": out[f.proc_fd] = "pipe"
+            case "KQUEUE": out[f.proc_fd] = "kqueue"
+            case "systm", "ndrv", "rte", "vsockp", "sock": out[f.proc_fd] = ([i.type] + (i.name.isEmpty ? [] : [i.name])).joined(separator: " ")
+            default: out[f.proc_fd] = i.name.isEmpty ? i.type : i.name
+            }
+        }
+        return out
+    }
+
     /// Descriptors a process holds as fileports (launchd keeps sockets for its jobs this way): "fp." rows.
     private static func fileports(_ pid: pid_t) -> [Item] {
         let need = proc_pidinfo(pid, PROC_PIDLISTFILEPORTS, 0, nil, 0)
