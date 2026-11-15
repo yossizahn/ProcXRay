@@ -423,10 +423,10 @@ private let catalogue: [Column] = [
 
     // Network
     .amount(id: "netIn", title: "Received/s",
-            tooltip: "Network bytes received per second, from nettop, which is sampled about every 5 s while this column is shown. Covers the sockets open at each sample. Group rows: the sum.",
+            tooltip: "Network bytes received per second over the last 2 s, from the kernel's per-socket counts (the ones nettop shows), read every 2 s since the app started. Includes connections that closed in that time, and loopback traffic. Group rows: the sum.",
             section: .network, width: 80, reads: .network, format: bytesPerSecFormat) { $0.netIn },
     .amount(id: "netOut", title: "Sent/s",
-            tooltip: "Network bytes sent per second, from nettop, which is sampled about every 5 s while this column is shown. Covers the sockets open at each sample. Group rows: the sum.",
+            tooltip: "Network bytes sent per second over the last 2 s, from the kernel's per-socket counts (the ones nettop shows), read every 2 s since the app started. Includes connections that closed in that time, and loopback traffic. Group rows: the sum.",
             section: .network, width: 80, reads: .network, format: bytesPerSecFormat) { $0.netOut },
 
     // Mach ports

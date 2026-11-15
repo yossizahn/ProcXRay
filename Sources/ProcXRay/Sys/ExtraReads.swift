@@ -103,14 +103,22 @@ enum ExtraRead {
     }
 }
 
-/// Per-process network throughput from `nettop`. nettop spends ~5 s starting up whatever it is asked, and
-/// holds its output back when writing to a pipe, so it can't be streamed: while a network column is shown,
-/// one-sample runs follow each other in the background, and rates come from consecutive runs (a reading every
-/// ~5 s). It sees every user's sockets without the helper. Its counts cover the sockets open at each run, so a
-/// connection that closed between runs drops out; a falling count is shown as no traffic, not negative.
+/// Per-process network throughput. Read natively from launch to quit (NativeNetStats: a reading every 2 s,
+/// closed connections included, and per-process totals) unless the framework is missing or PROCXRAY_APPLE_TOOLS
+/// is set; then from `nettop`, only while something shows network data. nettop spends ~5 s starting up whatever it is asked, and holds its output back when writing to
+/// a pipe, so it can't be streamed: one-sample runs follow each other in the background, and rates come from
+/// consecutive runs (a reading every ~5 s). Both see every user's sockets without the helper. nettop's counts
+/// cover the sockets open at each run, so a connection that closed between runs drops out; a falling count is
+/// shown as no traffic, not negative.
 final class NetSampler: @unchecked Sendable {
     static let shared = NetSampler()
-    struct Rate: Sendable { var inPerSec: Double; var outPerSec: Double }
+    struct Rate: Sendable {
+        var inPerSec: Double
+        var outPerSec: Double
+        /// Bytes over every socket the native reader has seen the process use (nil from nettop).
+        var inTotal: UInt64? = nil
+        var outTotal: UInt64? = nil
+    }
 
     private let lock = NSLock()
     private var wanted = false
@@ -118,8 +126,23 @@ final class NetSampler: @unchecked Sendable {
     private var last: (at: Date, bytes: [pid_t: (UInt64, UInt64)])?
     private var rates: [pid_t: Rate] = [:]
 
-    /// Called by every snapshot: starts the loop when wanted, lets it stop when not.
+    private static let useNative = NativeTools.enabled && NativeNetStats.available
+    /// The native reader runs from launch to quit (startAtLaunch), so totals cover everything since the app
+    /// started; it costs ~0.3 % of one core. nettop still runs only while something shows network data.
+    static var alwaysOn: Bool { useNative }
+    private var native: NativeNetStats?
+
+    /// Starts the native reader for the app's whole life; a no-op with nettop.
+    func startAtLaunch() { if Self.useNative { want(true) } }
+
+    /// When the native reader started (nil with nettop): totals of processes started before it miss sockets
+    /// they closed before then.
+    var since: Date? { lock.lock(); defer { lock.unlock() }; return native?.since }
+
+    /// Called by every snapshot: starts the loop when wanted, lets it stop when not. The native reader, once
+    /// started, never stops.
     func want(_ on: Bool) {
+        if Self.useNative { wantNative(on); return }
         lock.lock()
         wanted = on
         let start = on && !running
@@ -133,6 +156,16 @@ final class NetSampler: @unchecked Sendable {
     /// had no sockets open, so it gets no entry and counts as no traffic.
     func current() -> [pid_t: Rate]? { lock.lock(); defer { lock.unlock() }; return compared ? rates : nil }
     private var compared = false
+
+    private func wantNative(_ on: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard on, native == nil else { return }
+        native = NativeNetStats { [weak self] r in
+            guard let self else { return }
+            self.lock.lock(); defer { self.lock.unlock() }
+            self.rates = r; self.compared = true
+        }
+    }
 
     private func loop() {
         while true {

@@ -4,8 +4,8 @@ import SwiftUI
 /// The inspector for a group row (an app with its helpers, a category, a role group, a coalition…):
 /// what the whole group costs, now and since start, and which processes are in it.
 ///
-/// Only values that really add up are summed: CPU, footprint, disk, energy, wakeups, system calls and
-/// messages. Resident and virtual size count shared pages once per process, and peaks happened at
+/// Only values that really add up are summed: CPU, footprint, disk, network, energy, wakeups, system calls
+/// and messages. Resident and virtual size count shared pages once per process, and peaks happened at
 /// different times, so the group page leaves them out. Ratios (P-core share, instructions per cycle)
 /// are worked out from the summed parts, not averaged.
 struct GroupInspectorView: View {
@@ -41,6 +41,7 @@ struct GroupInspectorView: View {
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .readsNetwork()
         }
     }
 
@@ -179,6 +180,9 @@ struct GroupInspectorView: View {
             ("Logical writes", sum(ms) { $0.rates?.logicalWrites }.map(bytesPerSecFormat) ?? "—",
              bytes(sum(ms) { $0.counters?.logicalWrites.map { Double($0) } })),
         ])
+        UsageTab.networkSection(summedHistory(ms, \.network), inRate: sum(ms) { $0.netIn }, outRate: sum(ms) { $0.netOut },
+                                inTotal: sum(ms) { $0.netInTotal.map(Double.init) }, outTotal: sum(ms) { $0.netOutTotal.map(Double.init) },
+                                start: ms.map(\.start).min())
         UsageTab.section("Energy and wakeups", "bolt", summedHistory(ms, \.power), format: wattsFormat, rows: [
             ("CPU energy", sum(ms) { $0.rates?.watts }.map(wattsFormat) ?? "—",
              sum(ms) { $0.energyNJ.map { Double($0) } }.map { String(format: "%.2f J", $0 / 1e9) } ?? "—"),

@@ -662,6 +662,29 @@ enum Bench {
         print("network: \(net.count) processes with rates; " + busiest.map { "\(names[$0.key] ?? "?") in \(Int($0.value.inPerSec)) B/s out \(Int($0.value.outPerSec)) B/s" }.joined(separator: "; "))
     }
 
+    /// `ProcXRay --net [seconds]`: NetSampler's rates every 2 s (the five busiest processes), and the CPU time
+    /// this process spent reading them. PROCXRAY_APPLE_TOOLS=1 reads them from nettop instead.
+    static func net(seconds: Double) {
+        // Children too: nettop's own CPU time is the cost of reading through it.
+        func cpu() -> Double {
+            var u = rusage(), c = rusage(); getrusage(RUSAGE_SELF, &u); getrusage(RUSAGE_CHILDREN, &c)
+            func secs(_ t: timeval) -> Double { Double(t.tv_sec) + Double(t.tv_usec) / 1e6 }
+            return secs(u.ru_utime) + secs(u.ru_stime) + secs(c.ru_utime) + secs(c.ru_stime)
+        }
+        let c0 = cpu(), t0 = Date()
+        NetSampler.shared.want(true)
+        while Date().timeIntervalSince(t0) < seconds {
+            Thread.sleep(forTimeInterval: 2)
+            NetSampler.shared.want(true)
+            guard let net = NetSampler.shared.current() else { print(String(format: "%5.1f s  no rates yet", Date().timeIntervalSince(t0))); continue }
+            let top = net.sorted { $0.value.inPerSec + $0.value.outPerSec > $1.value.inPerSec + $1.value.outPerSec }.prefix(5)
+            print(String(format: "%5.1f s  %d procs  ", Date().timeIntervalSince(t0), net.count) + top.map {
+                "\(Native.process($0.key)?.comm ?? "?")[\($0.key)] in \(Int($0.value.inPerSec)) out \(Int($0.value.outPerSec)) total \($0.value.inTotal.map(String.init) ?? "-")/\($0.value.outTotal.map(String.init) ?? "-")" }.joined(separator: "; "))
+        }
+        NetSampler.shared.want(false)
+        print(String(format: "CPU (self + children): %.3f s over %.1f s", cpu() - c0, Date().timeIntervalSince(t0)))
+    }
+
     /// `ProcXRay --qos <pid>`: CPU time by QoS class against total CPU time, over 2 s.
     /// The Sandbox card's checks for each pid, as a table (0 allowed, 1 denied, ? unknown), and their cost.
     static func sandbox(_ pids: [pid_t]) {

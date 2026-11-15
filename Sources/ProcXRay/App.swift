@@ -52,6 +52,10 @@ struct ProcXRayApp: App {
             Bench.sandbox(Array(CommandLine.arguments[(i + 1)...]).compactMap { pid_t($0) })
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--net") {
+            Bench.net(seconds: CommandLine.arguments.count > i + 1 ? Double(CommandLine.arguments[i + 1]) ?? 20 : 20)
+            exit(0)
+        }
         if CommandLine.arguments.contains("--extras") {
             Bench.extras(root: CommandLine.arguments.contains("--root"))
             exit(0)

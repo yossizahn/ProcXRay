@@ -44,9 +44,13 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var assertions: [String]?
     /// GPU time since the process started, nanoseconds; nil when it has never used the GPU.
     var gpuNanos: UInt64?
-    /// Network bytes per second from nettop's latest pair of samples (NetSampler).
+    /// Network bytes per second over NetSampler's latest reading.
     var netIn: Double?
     var netOut: Double?
+    /// Network bytes over every socket NetSampler has seen the process use; nil from nettop. A lower bound for
+    /// a process started before NetSampler.since.
+    var netInTotal: UInt64?
+    var netOutTotal: UInt64?
     /// Port space totals from the last lsmp snapshot (MachLoader); nil for a process started after it.
     var machPorts: MachPortCounts?
     /// Per-second rates over the last refresh interval (nil on a process's first sample).
@@ -286,6 +290,9 @@ final class Store {
     @ObservationIgnored private var readingDomains = false
     /// The extra reads the shown columns need (see Column.reads); set by the process table.
     @ObservationIgnored var extraReads: ExtraReads = []
+    /// Inspector pages showing network usage (Resources, the group page): while any is, refreshes read the
+    /// network rates as the network columns do.
+    @ObservationIgnored var networkViewers = 0
     /// Each process's counters at the last refresh, by key: CPU % and the rate columns divide the change
     /// by the time between the two readings.
     @ObservationIgnored private var prevSamples: [String: Sample] = [:]
@@ -299,6 +306,8 @@ final class Store {
     @ObservationIgnored private var probeTimer: Timer?
 
     init() {
+        // From launch, so the network totals cover everything since the app started.
+        NetSampler.shared.startAtLaunch()
         // A dropped helper connection (helper died, disabled, replaced): re-probe right away rather than
         // keep showing it as running until the next probe.
         HelperClient.shared.onConnectionLost = { [weak self] in
@@ -436,7 +445,7 @@ final class Store {
         let argv = argvCache
         let jobParents = jobParentCache
         let hosts = domainHostOf
-        let extras = extraReads
+        let extras = extraReads.union(networkViewers > 0 ? .network : [])
         let useHelper = helperState.isRunning
         let readSlow = full || ticksSinceSlow + 1 >= Self.slowEvery || lsApps.isEmpty
         ticksSinceSlow = readSlow ? 0 : ticksSinceSlow + 1
@@ -725,8 +734,10 @@ final class Store {
         // Whole-system reads, one call each, only when a shown column needs them.
         let assertions = extras.contains(.assertions) ? ExtraRead.assertionsByPid() : nil
         let gpu = extras.contains(.gpu) ? ExtraRead.gpuNanosByPid() : nil
-        NetSampler.shared.want(extras.contains(.network))
-        let net = extras.contains(.network) ? NetSampler.shared.current() : nil
+        // The native reader runs anyway, so its rates and totals are always taken: one lookup per process.
+        let readNet = extras.contains(.network) || NetSampler.alwaysOn
+        NetSampler.shared.want(readNet)
+        let net = readNet ? NetSampler.shared.current() : nil
         let mach = extras.contains(.machPorts) ? MachLoader.current() : nil
 
         let now = DispatchTime.now().uptimeNanoseconds
@@ -758,9 +769,15 @@ final class Store {
             if extras.contains(.nice) { p.nice = ExtraRead.nice(k.pid) }
             if extras.contains(.compressed) { p.compressed = ExtraRead.compressed(k.pid) }
             if let assertions { p.assertions = assertions[k.pid] ?? [] }
-            // A process with no GPU clients has used no GPU time, and one nettop didn't list had no sockets.
+            // A process with no GPU clients has used no GPU time, and one NetSampler didn't list moved no bytes.
             if let gpu { p.gpuNanos = gpu[k.pid] ?? 0 }
-            if let net { p.netIn = net[k.pid]?.inPerSec ?? 0; p.netOut = net[k.pid]?.outPerSec ?? 0 }
+            if let net {
+                p.netIn = net[k.pid]?.inPerSec ?? 0; p.netOut = net[k.pid]?.outPerSec ?? 0
+                // A process the reader hasn't seen a socket of has moved nothing since it started reading.
+                let native = NetSampler.shared.since != nil
+                p.netInTotal = net[k.pid]?.inTotal ?? (native ? 0 : nil)
+                p.netOutTotal = net[k.pid]?.outTotal ?? (native ? 0 : nil)
+            }
             // A pid reused since the snapshot would get another process's ports.
             if let mach, p.start <= mach.at { p.machPorts = mach.counts[k.pid] }
             out[k.pid] = p
@@ -1202,6 +1219,7 @@ struct History: Sendable {
     var memory: [Double?] = []            // footprint, bytes
     var disk: [Double?] = []              // read + written, bytes per second
     var power: [Double?] = []             // watts
+    var network: [Double?] = []           // received + sent, bytes per second; nil while not read
 
     mutating func append(_ p: ProcInfo) {
         let r = p.rates
@@ -1213,5 +1231,6 @@ struct History: Sendable {
         push(&memory, p.footprint.map { Double($0) })
         push(&disk, r.flatMap { r in r.diskRead.flatMap { a in r.diskWrite.map { a + $0 } } })
         push(&power, r?.watts)
+        push(&network, p.netIn.flatMap { i in p.netOut.map { i + $0 } })
     }
 }

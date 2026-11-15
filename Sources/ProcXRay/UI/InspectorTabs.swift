@@ -497,6 +497,9 @@ struct UsageTab: View {
                     ("Written", r?.diskWrite.map(bytesPerSecFormat) ?? "—", Fmt.bytes(p.diskWrite)),
                     ("Logical writes", r?.logicalWrites.map(bytesPerSecFormat) ?? "—", Fmt.bytes(c?.logicalWrites)),
                 ])
+                Self.networkSection(h?.network, inRate: p.netIn, outRate: p.netOut,
+                                    inTotal: p.netInTotal.map(Double.init), outTotal: p.netOutTotal.map(Double.init),
+                                    start: p.start)
                 Self.section("Energy and wakeups", "bolt", h?.power, format: wattsFormat, rows: [
                     ("CPU energy", r?.watts.map(wattsFormat) ?? "—", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
                     ("Wakeups (idle + interrupt)", rate(r?.wakeups), Fmt.count(p.wakeups)),
@@ -514,6 +517,7 @@ struct UsageTab: View {
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .readsNetwork()
         // Each refresh: these are read for the shown process only, not every process.
         .task(id: "\(p.key)|\(store.dataGen)|\(exited)") {
             guard !exited else { return }
@@ -563,6 +567,30 @@ struct UsageTab: View {
     }
 
     private func rate(_ v: Double?) -> String { v.map(perSecFormat) ?? "—" }
+
+    /// Received and sent, now and in total; the group page passes sums. `start`: the process's start (the
+    /// group's earliest member's). One started before the reader (NetSampler.since) may have closed sockets
+    /// before then, so its total is a lower bound, shown as "≥"; with nothing seen, "none since" the reader's start.
+    static func networkSection(_ spark: [Double?]?, inRate: Double?, outRate: Double?, inTotal: Double?, outTotal: Double?,
+                               start: Date?) -> some View {
+        let since = NetSampler.shared.since
+        let lowerBound = since.flatMap { s in start.map { $0 < s } } ?? false
+        let sinceText = since.map { $0.formatted(Calendar.current.isDateInToday($0) ? .dateTime.hour().minute() : .dateTime.month().day().hour().minute()) } ?? ""
+        let total: (Double?) -> String = { v in
+            guard let v else { return "—" }
+            if v == 0 { return lowerBound ? "none since \(sinceText)" : "none" }
+            return (lowerBound ? "≥ " : "") + Fmt.bytes(UInt64(v))
+        }
+        return section("Network", "network", spark, format: bytesPerSecFormat, rows: [
+            ("Received", inRate.map(bytesPerSecFormat) ?? "—", total(inTotal)),
+            ("Sent", outRate.map(bytesPerSecFormat) ?? "—", total(outTotal)),
+        ])
+        .help("TCP and UDP traffic, loopback included, from the kernel's per-socket counts (the ones nettop shows), read every 2 s since the app started"
+              + (since.map { " (\($0.formatted(date: .abbreviated, time: .standard)))" } ?? "")
+              + ". \"Now\" is the last 2 s, connections that closed in them included. \"Since start\" adds up every socket seen, over each socket's whole life"
+              + (lowerBound ? ". \"≥\" and \"since\": the process started before the app, so sockets it closed before then aren't counted." : "."))
+    }
+
 
     /// The process's port space from the last lsmp snapshot (the Mach ports columns' or the Connections
     /// tab's, whichever ran); none until one has been taken. Counts at that moment, so under "Now".
@@ -622,6 +650,20 @@ struct UsageTab: View {
             }
         }
     }
+}
+
+/// While shown, the store reads network rates (Store.networkViewers), as it does for the network columns.
+private struct ReadsNetwork: ViewModifier {
+    @Environment(Store.self) var store
+    func body(content: Content) -> some View {
+        content
+            .onAppear { store.networkViewers += 1; NetSampler.shared.want(true) }   // starts now, not at the next refresh
+            .onDisappear { store.networkViewers -= 1 }
+    }
+}
+
+extension View {
+    func readsNetwork() -> some View { modifier(ReadsNetwork()) }
 }
 
 // MARK: - Origin
