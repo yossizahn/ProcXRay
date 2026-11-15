@@ -58,6 +58,10 @@ struct ProcXRayApp: App {
             Bench.rates(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--threads"), i + 1 < CommandLine.arguments.count {
+            Bench.threads(pid_t(CommandLine.arguments[i + 1]) ?? 0)
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--qos") {
             Bench.qos(pid_t(CommandLine.arguments[i + 1]) ?? 0)
             exit(0)

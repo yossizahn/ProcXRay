@@ -738,6 +738,30 @@ enum Bench {
         }
     }
 
+    /// `ProcXRay --threads <pid>`: the Threads pane's data without the UI, read as the caller (no helper):
+    /// read time, kind from one local sample, and the per-core counters.
+    static func threads(_ pid: pid_t) {
+        var best = Double.infinity
+        var s: ThreadSnapshot?
+        for _ in 0..<20 {
+            let t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            s = ThreadReader.read(pid)
+            best = min(best, Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6)
+        }
+        guard let s else { print("threads \(pid): not readable"); return }
+        print(String(format: "threads %d: %d threads, read in %.3f ms (best of 20), %d with core counters", pid, s.threads.count, best,
+                     s.threads.filter { $0.cores != nil }.count))
+        var d = ThreadDetails()
+        d.listedUserNanos = Dictionary(s.threads.map { ($0.id, $0.userNanos) }, uniquingKeysWith: { a, _ in a })
+        if let (path, args) = HelperTool.stacks.argv(pid: pid) { d.mergeSample(Shell.run(path, args, timeout: HelperTool.stacks.timeout)) }
+        let main = s.threads.first?.id
+        for t in s.threads {
+            let kind = d.kind(t.id) ?? (t.id == main ? ThreadKind.main : nil)
+            let cores = (t.cores ?? []).map { "\(Fmt.secs($0.nanos)) \(ThreadsView.joules($0.energyNJ))" }.joined(separator: " | ")
+            print("  \(t.id) \(kind?.text ?? "-") '\(t.name)' cpu \(Fmt.secs(t.cpuNanos)) P \(t.perfShare.map(Fmt.pct) ?? "-") % IPC \(t.ipc.map { String(format: "%.2f", $0) } ?? "-") [\(cores)] queue \(d.byID[t.id]?.queue ?? "-")")
+        }
+    }
+
     static func qos(_ pid: pid_t) {
         if pid == 0 {
             // Every process: the QoS rates should add up to CPU %, both from one pair of snapshots.

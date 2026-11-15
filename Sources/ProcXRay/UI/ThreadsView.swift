@@ -15,8 +15,11 @@ struct ThreadsView: View {
         /// Share of one core over the last interval; nil for a thread first seen this read.
         let cpu: Double?
         let isMain: Bool
+        /// Milliwatts over the last interval, from the energy counters; nil without them or a previous read.
+        let power: Double?
         /// From the last stack / QoS capture; nil for a thread that didn't exist then.
         var detail: ThreadDetail? = nil
+        var kind: ThreadKind? = nil
         var id: UInt64 { t.id }
         var shownName: String { t.name.isEmpty ? (isMain ? "main thread" : "") : t.name }
         // Sort keys.
@@ -30,6 +33,11 @@ struct ThreadsView: View {
         var queueKey: String { detail?.queue ?? "" }
         var qosKey: Int { ThreadsView.qosRank[detail?.effectiveQoS ?? ""] ?? -1 }
         var waitKey: String { detail?.leaf?.symbol ?? "" }
+        var kindKey: Int { kind?.rawValue ?? Int.max }
+        var perfKey: Double { t.perfShare ?? -1 }
+        var ipcKey: Double { t.ipc ?? -1 }
+        var powerKey: Double { power ?? -1 }
+        var energyKey: UInt64 { t.energyNJ ?? 0 }
     }
     static let qosRank = ["Maintenance": 0, "Background": 1, "Utility": 2, "Default": 3, "User initiated": 4, "User interactive": 5]
 
@@ -48,10 +56,16 @@ struct ThreadsView: View {
     private var shown: [Row] {
         let f = filter.trimmingCharacters(in: .whitespaces)
         let byID = details?.byID ?? [:]
-        return rows.map { r in var r = r; r.detail = byID[r.id]; return r }.filter { r in
+        return rows.map { r in
+            var r = r; r.detail = byID[r.id]
+            // The stack wins: when the main thread has exited (dispatch_main does that), the first listed one isn't it.
+            r.kind = details?.kind(r.id) ?? (r.isMain ? .main : nil)
+            return r
+        }.filter { r in
             (!busyOnly || (r.cpu ?? 0) > 0)
                 && (f.isEmpty || r.shownName.localizedCaseInsensitiveContains(f) || String(r.id).contains(f)
                     || (r.detail?.queue?.localizedCaseInsensitiveContains(f) ?? false)
+                    || (r.kind?.text.localizedCaseInsensitiveContains(f) ?? false)
                     || (r.detail?.stack.contains { $0.symbol.localizedCaseInsensitiveContains(f) } ?? false))
         }
         .sorted(using: sort)
@@ -101,6 +115,10 @@ struct ThreadsView: View {
                             DispatchQueue.global(qos: .userInitiated).async(group: group) {
                                 ti = HelperClient.shared.run(.taskinfo, pid: pid, timeout: 15)
                             }
+                        }
+                        // Listed before sampling: which threads existed, and whether they had run user code.
+                        if let s = ThreadReader.read(pid) ?? (helper ? HelperClient.shared.threads(pid) : nil) {
+                            d.listedUserNanos = Dictionary(s.threads.map { ($0.id, $0.userNanos) }, uniquingKeysWith: { a, _ in a })
                         }
                         let stacks: String
                         if helper { stacks = HelperClient.shared.run(.stacks, pid: pid, timeout: 20) ?? "" }
@@ -154,14 +172,18 @@ struct ThreadsView: View {
     }
 
     private static func rows(_ s: ThreadSnapshot, prev: ThreadSnapshot?) -> [Row] {
-        let before = Dictionary((prev?.threads ?? []).map { ($0.id, $0.cpuNanos) }, uniquingKeysWith: { a, _ in a })
+        let before = Dictionary((prev?.threads ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let wall = prev.map { Double(s.at &- $0.at) } ?? 0
         // The task's thread list starts with the thread the process was created with.
         let main = s.threads.first?.id
         return s.threads.map { t in
-            var cpu: Double?
-            if wall > 0, let b = before[t.id] { cpu = Double(t.cpuNanos >= b ? t.cpuNanos - b : 0) / wall * 100 }
-            return Row(t: t, cpu: cpu, isMain: t.id == main)
+            var cpu: Double?, power: Double?
+            if wall > 0, let b = before[t.id] {
+                cpu = Double(t.cpuNanos >= b.cpuNanos ? t.cpuNanos - b.cpuNanos : 0) / wall * 100
+                // nJ per ns = W; × 1000 for mW.
+                if let e = t.energyNJ, let e0 = b.energyNJ { power = Double(e >= e0 ? e - e0 : 0) / wall * 1000 }
+            }
+            return Row(t: t, cpu: cpu, isMain: t.id == main, power: power)
         }
     }
 
@@ -173,6 +195,10 @@ struct ThreadsView: View {
         return HStack(spacing: 8) {
             StatTile(title: "Threads", value: Fmt.count(rows.count), sub: "\(busy) used CPU")
             StatTile(title: "CPU", value: rows.contains { $0.cpu != nil } ? "\(Fmt.pct(total)) %" : "—", sub: "sum of threads")
+            if rows.contains(where: { $0.power != nil }) {
+                StatTile(title: "Power", value: Self.mW(rows.compactMap(\.power).reduce(0, +)), sub: "sum of threads")
+                    .help("CPU energy of all threads over the last interval, from the kernel's per-thread energy counters (PROC_PIDTHREADCOUNTS). CPU cores only: no GPU, memory or display.")
+            }
             if let wq = last?.workqueue {
                 StatTile(title: "Workqueue", value: Fmt.count(wq.total), sub: "\(wq.running) running · \(wq.blocked) blocked")
                     .help("Threads in the process's GCD pool (PROC_PIDWORKQUEUEINFO): all of them, those running work items, and those blocked in one.")
@@ -223,56 +249,93 @@ struct ThreadsView: View {
 
     private var table: some View {
         Table(shown, selection: $selection, sortOrder: $sort) {
-            TableColumn("ID", value: \.id) { r in Text(String(r.id)).monospacedDigit().foregroundStyle(.secondary) }
+          // A table builder block takes at most 10 columns.
+          Group {
+            TableColumn("ID", value: \Row.id) { r in Text(String(r.id)).monospacedDigit().foregroundStyle(.secondary) }
                 .width(min: 50, ideal: 72, max: 110)
-            TableColumn("Name", value: \.shownName) { r in
+            TableColumn("Name", value: \Row.shownName) { r in
                 Text(r.shownName.isEmpty ? "—" : r.shownName)
                     .foregroundStyle(r.t.name.isEmpty ? .secondary : .primary)
                     .italic(r.t.name.isEmpty && r.isMain)
                     .truncationHelp(r.shownName)
             }
             .width(min: 90, ideal: 180)
-            TableColumn("CPU %", value: \.cpuKey) { r in
+            TableColumn("Kind", value: \Row.kindKey) { r in
+                Text(r.kind?.text ?? "").foregroundStyle(r.kind == .gcdIdle || r.kind == .gcdNotRun ? .secondary : .primary)
+                    .help(r.kind?.help ?? (details == nil ? "From the stack capture." : "No stack for this thread in the last capture."))
+            }
+            .width(min: 50, ideal: 110, max: 150)
+            TableColumn("CPU %", value: \Row.cpuKey) { r in
                 Text(r.cpu.map(Fmt.pct) ?? "—").monospacedDigit()
                     .foregroundStyle((r.cpu ?? 0) > 0 ? .primary : .secondary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
             .width(min: 60, ideal: 64, max: 90)
-            TableColumn("CPU time", value: \.timeKey) { r in
+            TableColumn("CPU time", value: \Row.timeKey) { r in
                 Text(Fmt.secs(r.t.cpuNanos)).monospacedDigit().frame(maxWidth: .infinity, alignment: .trailing)
                     .help("User \(Fmt.secs(r.t.userNanos)), system \(Fmt.secs(r.t.systemNanos))")
             }
             .width(min: 60, ideal: 80, max: 110)
-            TableColumn("Waiting in", value: \.waitKey) { r in
+          }
+          Group {
+            TableColumn("P cores", value: \Row.perfKey) { r in
+                Text(r.t.perfShare.map { "\(Fmt.pct($0)) %" } ?? "—").monospacedDigit()
+                    .foregroundStyle(r.t.perfShare == nil ? .secondary : .primary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .help(Self.coresHelp(r.t))
+            }
+            .width(min: 50, ideal: 60, max: 90)
+            TableColumn("IPC", value: \Row.ipcKey) { r in
+                Text(r.t.ipc.map { $0.formatted(.number.precision(.fractionLength(2))) } ?? "—").monospacedDigit()
+                    .foregroundStyle(r.t.ipc == nil ? .secondary : .primary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .help(Self.coresHelp(r.t))
+            }
+            .width(min: 36, ideal: 44, max: 70)
+            TableColumn("Power", value: \Row.powerKey) { r in
+                Text(r.power.map(Self.mW) ?? "—").monospacedDigit()
+                    .foregroundStyle((r.power ?? 0) > 0 ? .primary : .secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .help("CPU energy over the last interval, from the kernel's per-thread counters.")
+            }
+            .width(min: 50, ideal: 64, max: 90)
+            TableColumn("Energy", value: \Row.energyKey) { r in
+                Text(r.t.energyNJ.map(Self.joules) ?? "—").monospacedDigit()
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .help(Self.coresHelp(r.t))
+            }
+            .width(min: 50, ideal: 64, max: 90)
+            TableColumn("Waiting in", value: \Row.waitKey) { r in
                 let w = Self.waitText(r.detail)
                 Text(w.isEmpty ? "—" : w).foregroundStyle(w.isEmpty ? .secondary : .primary).truncationHelp(w)
             }
             .width(min: 100, ideal: 260)
-            TableColumn("Queue", value: \.queueKey) { r in
+            TableColumn("Queue", value: \Row.queueKey) { r in
                 Text(r.detail?.queue ?? "").foregroundStyle(.secondary).truncationHelp(r.detail?.queue ?? "")
             }
             .width(min: 50, ideal: 140)
-            TableColumn("QoS", value: \.qosKey) { r in
+            TableColumn("QoS", value: \Row.qosKey) { r in
                 Text(r.detail?.effectiveQoS ?? (r.detail?.requestedQoS == nil && r.detail?.schedMode != nil ? "unspecified" : ""))
                     .foregroundStyle(r.detail?.darwinBG == true ? .orange : .primary)
                     .help(Self.qosHelp(r.detail))
             }
             .width(min: 60, ideal: 96, max: 130)
-            TableColumn("State", value: \.stateKey) { r in
+            TableColumn("State", value: \Row.stateKey) { r in
                 Text(r.t.stateText).foregroundStyle(Self.stateColor(r.t.runState))
             }
             .width(min: 50, ideal: 64, max: 110)
-            TableColumn("Priority", value: \.priorityKey) { r in
+            TableColumn("Priority", value: \Row.priorityKey) { r in
                 Text(r.t.curPriority == r.t.basePriority ? "\(r.t.curPriority)" : "\(r.t.curPriority) (base \(r.t.basePriority))")
                     .monospacedDigit()
                     .help("Current \(r.t.curPriority), base \(r.t.basePriority), max \(r.t.maxPriority). Higher runs first; 31 is the default, 46–47 is user-interactive work.")
             }
             .width(min: 44, ideal: 56, max: 110)
-            TableColumn("Policy", value: \.policyKey) { r in
+            TableColumn("Policy", value: \Row.policyKey) { r in
                 Text(r.t.policyText).foregroundStyle(r.t.policy == 1 ? .secondary : .primary)
                     .help(r.t.policy == 1 ? "Timesharing: the usual policy." : "Fixed-priority policy, as real-time threads (audio, for example) use.")
             }
             .width(min: 60, ideal: 76, max: 110)
+          }
         }
         .font(.system(size: 11))
         .contextMenu(forSelectionType: UInt64.self) { ids in
@@ -287,6 +350,27 @@ struct ThreadsView: View {
         guard let leaf = d?.leaf else { return "" }
         guard let c = d?.caller, c != leaf else { return leaf.symbol }
         return "\(leaf.symbol) ← \(c.symbol)"
+    }
+
+    static func mW(_ v: Double) -> String {
+        v >= 1000 ? "\((v / 1000).formatted(.number.precision(.fractionLength(2)))) W" : "\(v.formatted(.number.precision(.fractionLength(v < 10 ? 1 : 0)))) mW"
+    }
+
+    static func joules(_ nJ: UInt64) -> String {
+        let j = Double(nJ) / 1e9
+        return j >= 1 ? "\(j.formatted(.number.precision(.fractionLength(1)))) J" : "\((j * 1000).formatted(.number.precision(.fractionLength(1)))) mJ"
+    }
+
+    /// Per core type, over the thread's life: time, instructions per cycle and energy.
+    static func coresHelp(_ t: ThreadSample) -> String {
+        guard let cores = t.cores else { return "The kernel didn't return core counters for this thread." }
+        let names = ["Performance cores", "Efficiency cores"]
+        var lines = ["Over the thread's life (PROC_PIDTHREADCOUNTS):"]
+        for (i, c) in cores.enumerated() {
+            let ipc = c.cycles > 0 ? (Double(c.instructions) / Double(c.cycles)).formatted(.number.precision(.fractionLength(2))) : "—"
+            lines.append("\(i < names.count ? names[i] : "Perf level \(i)"): \(Fmt.secs(c.nanos)), IPC \(ipc), \(joules(c.energyNJ))")
+        }
+        return lines.joined(separator: "\n")
     }
 
     static func qosHelp(_ d: ThreadDetail?) -> String {
@@ -331,7 +415,7 @@ struct ThreadsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
-                Text(details == nil ? "Capturing…" : "No stack for this thread: it started after the last capture, or sampling failed. Recapture to get it.")
+                Text(details.map { $0.noStackReason(id) } ?? "Capturing…")
                     .font(.caption).foregroundStyle(.secondary).padding(8)
                 Spacer(minLength: 0)
             }
@@ -348,7 +432,9 @@ struct ThreadsView: View {
 
     private func text(for ids: Set<UInt64>) -> String {
         shown.filter { ids.contains($0.id) }.map { r in
-            [String(r.id), r.shownName, r.cpu.map(Fmt.pct) ?? "—", Fmt.secs(r.t.cpuNanos), Self.waitText(r.detail),
+            [String(r.id), r.shownName, r.kind?.text ?? "", r.cpu.map(Fmt.pct) ?? "—", Fmt.secs(r.t.cpuNanos),
+             r.t.perfShare.map(Fmt.pct) ?? "—", r.t.ipc.map { String(format: "%.2f", $0) } ?? "—",
+             r.power.map(Self.mW) ?? "—", r.t.energyNJ.map(Self.joules) ?? "—", Self.waitText(r.detail),
              r.detail?.queue ?? "", r.detail?.effectiveQoS ?? "", r.t.stateText, "\(r.t.curPriority)", r.t.policyText].joined(separator: "\t")
         }.joined(separator: "\n")
     }
