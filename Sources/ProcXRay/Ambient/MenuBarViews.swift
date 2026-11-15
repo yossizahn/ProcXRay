@@ -102,14 +102,33 @@ struct MenuBarLabel: View {
         // drawn in the menu bar's own color: white on a dark menu bar, black on a light one.
         let colored = colors && graphs
         if colored { appearance.attachSoon() }
-        let view = MenuBarWidgets(metrics: list, alert: alert, graphs: graphs, system: monitor.system, history: monitor.systemHistory,
-                                  io: monitor.ioHistory,
-                                  ink: colored && appearance.dark ? .white : .black, colored: colored)
-        let r = ImageRenderer(content: view)
+        let ink: Color = colored && appearance.dark ? .white : .black
+        func widgets(_ ms: [AmbientMetric], alert: Bool) -> MenuBarWidgets {
+            MenuBarWidgets(metrics: ms, alert: alert, graphs: graphs, system: monitor.system, history: monitor.systemHistory,
+                           io: monitor.ioHistory, ink: ink, colored: colored)
+        }
+        let r = ImageRenderer(content: widgets(list, alert: alert))
         r.scale = NSScreen.main?.backingScaleFactor ?? 2
         let img = r.nsImage ?? NSImage()
         img.isTemplate = !colored
+        MenuBarHit.shared.layout(Self.ranges(list, alert: alert, widgets: widgets), imageWidth: img.size.width)
         return img
+    }
+
+    /// Each widget's x range in the label, for telling which one a click hit: each widget rendered on its own
+    /// (the alert sign too), laid end to end with the HStack's spacing.
+    @MainActor
+    private static func ranges(_ list: [AmbientMetric], alert: Bool,
+                               widgets: ([AmbientMetric], Bool) -> MenuBarWidgets) -> [(AmbientMetric, ClosedRange<CGFloat>)] {
+        func width(_ v: MenuBarWidgets) -> CGFloat { ImageRenderer(content: v).nsImage?.size.width ?? 0 }
+        var x: CGFloat = alert ? width(widgets([], true)) + MenuBarWidgets.spacing : 0
+        var out: [(AmbientMetric, ClosedRange<CGFloat>)] = []
+        for m in list {
+            let w = width(widgets([m], false))
+            out.append((m, x...(x + w)))
+            x += w + MenuBarWidgets.spacing
+        }
+        return out
     }
 }
 
@@ -180,8 +199,11 @@ struct MenuBarWidgets: View {
         colored ? (Color(red: 0.04, green: 0.52, blue: 1), Color(red: 1, green: 0.27, blue: 0.23)) : (ink, ink)
     }
 
+    /// Between widgets (and after the alert sign); MenuBarLabel.ranges lays them out with it too.
+    static let spacing: CGFloat = 6
+
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Self.spacing) {
             if alert {
                 Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(colored ? Color(red: 1, green: 0.62, blue: 0.04) : ink)

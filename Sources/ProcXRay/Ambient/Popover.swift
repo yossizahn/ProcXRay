@@ -44,6 +44,8 @@ struct MenuBarPopover: View {
         // The detail tile follows the metric picked in the tiles (or the Sort by menu).
         .onChange(of: metric) { _, m in detail = m }
         .onAppear { detail = metric }
+        // Opened from one of the menu bar's widgets: show that one (MenuBarHit sets it as the window becomes key).
+        .onChange(of: MenuBarHit.shared.opens) { _, _ in if let m = MenuBarHit.shared.metric { metric = m } }
     }
 
     // MARK: Tiles
