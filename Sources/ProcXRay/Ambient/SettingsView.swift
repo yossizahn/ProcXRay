@@ -49,6 +49,7 @@ struct SettingsView: View {
 
 private struct GeneralSettings: View {
     @AppStorage(AmbientPrefs.showIn) private var showIn: AmbientPrefs.ShowIn = .both
+    @AppStorage(AmbientPrefs.launchToMenuBar) private var launchToMenuBar = false
     @AppStorage(AmbientPrefs.interval) private var interval = 3.0
     @State private var loginItem = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
@@ -62,6 +63,10 @@ private struct GeneralSettings: View {
             Text(showIn == .dock ? "No menu bar item, and nothing is sampled while the window is closed."
                  : showIn == .menuBar ? "No Dock icon while no window is open. Closing the last window keeps Proc X-Ray running in the menu bar."
                  : "Closing the last window keeps Proc X-Ray running in the menu bar.")
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("Start in the menu bar", isOn: $launchToMenuBar)
+                .disabled(showIn == .dock)
+            Text("Open no window at launch. The window opens from the menu bar item, where it was last.")
                 .font(.caption).foregroundStyle(.secondary)
             Toggle("Open at login", isOn: $loginItem)
                 .onChange(of: loginItem) { _, on in

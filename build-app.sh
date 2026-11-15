@@ -33,11 +33,11 @@ cp "$BIN" "$APP/Contents/MacOS/ProcXRay"
 # App icon (regenerate with: swift tools/make-icon.swift Resources)
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-# SwiftPM stamps the binary with sdk == deployment target (14.0). AppKit then runs the app in
+# SwiftPM stamps the binary with sdk == deployment target (15.0). AppKit then runs the app in
 # macOS-14 compatibility mode (opaque toolbar band, thicker split divider → a 2pt "kink" where the
-# sidebar meets the toolbar). Record the SDK we actually built against, keeping minos 14.0.
+# sidebar meets the toolbar). Record the SDK we actually built against, keeping minos 15.0.
 SDK_VER="$(xcrun --sdk macosx --show-sdk-version)"
-vtool -set-build-version macos 14.0 "$SDK_VER" -replace -output "$APP/Contents/MacOS/ProcXRay" "$APP/Contents/MacOS/ProcXRay"
+vtool -set-build-version macos 15.0 "$SDK_VER" -replace -output "$APP/Contents/MacOS/ProcXRay" "$APP/Contents/MacOS/ProcXRay"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -52,7 +52,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1</string>
   <key>CFBundleVersion</key><string>1</string>
-  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>

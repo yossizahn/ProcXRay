@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "ProcXRay",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("15.0")],
     targets: [
         // C shim for the variadic sandbox_check, which Swift can't call itself.
         .target(name: "CSandbox", path: "Sources/CSandbox"),
@@ -11,7 +11,7 @@ let package = Package(
             name: "ProcXRay",
             dependencies: ["CSandbox"],
             path: "Sources/ProcXRay",
-            linkerSettings: [.linkedFramework("Security"), .linkedFramework("AppKit"), .linkedFramework("IOKit")]
+            linkerSettings: [.linkedFramework("Security"), .linkedFramework("AppKit"), .linkedFramework("IOKit"), .linkedLibrary("sqlite3")]
         )
     ]
 )

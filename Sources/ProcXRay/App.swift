@@ -5,7 +5,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppActivation.install()
         AmbientMonitor.shared.update()
-        NSApp.activate(ignoringOtherApps: true)
+        if !AmbientPrefs.launchesHidden { NSApp.activate(ignoringOtherApps: true) }
+    }
+    /// A Dock click (or opening the app again) with no window open. SwiftUI opens one itself, except when the
+    /// main scene's launch is suppressed ("Start in the menu bar"): then it does nothing, so open it here.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard !flag, AmbientPrefs.launchesHidden, let open = AppRouter.openWindow else { return true }
+        AppRouter.openMain(open)
+        return false
     }
     /// With the menu bar item, closing the last window leaves the app running there.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !AmbientPrefs.menuBarShown }
@@ -20,6 +27,11 @@ enum Entry {
         // In milliseconds; 0 counts as unset, so 1. Registered, not set: a user default still wins.
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 1])
         AmbientPrefs.register()
+        // Inspector windows keep no state: restorationBehavior(.disabled) neither reopens them nor applies a saved
+        // frame (each opens at the default size), but AppKit still writes one; cleared here.
+        for k in UserDefaults.standard.dictionaryRepresentation().keys where k.hasPrefix("NSWindow Frame \(ProcessWindow.id)-AppWindow-") {
+            UserDefaults.standard.removeObject(forKey: k)
+        }
         ProcXRayApp.main()
     }
 }
@@ -28,6 +40,7 @@ struct ProcXRayApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @State private var store = Store()
     @AppStorage(AmbientPrefs.showIn) private var showIn: AmbientPrefs.ShowIn = .both
+    @AppStorage(AmbientPrefs.launchToMenuBar) private var launchToMenuBar = false
 
     init() {
         ColumnPrefs.migrate()
@@ -188,6 +201,8 @@ struct ProcXRayApp: App {
         }
     }
 
+    private var launchHidden: Bool { showIn != .dock && launchToMenuBar }
+
     var body: some Scene {
         // The explicit id keeps the saved window frame ("main-AppWindow-1") stable across builds.
         WindowGroup("Proc X-Ray", id: "main") {
@@ -197,6 +212,8 @@ struct ProcXRayApp: App {
                 .background(RestoreWindowScreen(sceneID: "main"))
         }
         .defaultSize(width: 1500, height: 900)
+        // "Start in the menu bar": no window at launch.
+        .defaultLaunchBehavior(launchHidden ? .suppressed : .automatic)
         .commands {
             InspectCommand()
             ColumnsCommands()
@@ -224,6 +241,7 @@ struct ProcXRayApp: App {
             if $ref.wrappedValue != nil { ProcessWindow(ref: $ref).environment(store) }
         }
         .defaultSize(width: 900, height: 640)
+        .restorationBehavior(.disabled)   // not reopened at launch, no saved frame
         .commandsRemoved()   // no "New Process Window": these only open from a process row
     }
 }

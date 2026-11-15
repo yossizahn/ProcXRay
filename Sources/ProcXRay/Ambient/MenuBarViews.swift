@@ -10,6 +10,9 @@ final class AppRouter {
     struct Reveal: Equatable { var pid: pid_t; var gen: Int }
     private(set) var reveal: Reveal?
     func show(_ pid: pid_t) { reveal = Reveal(pid: pid, gen: (reveal?.gen ?? 0) + 1) }
+    /// For the app delegate, which has no SwiftUI environment: kept by the menu bar label, which is always there
+    /// when "Start in the menu bar" can be on.
+    static var openWindow: OpenWindowAction?
 
     /// Brings the main window forward, opening one if none is open.
     static func openMain(_ openWindow: OpenWindowAction) {
@@ -85,8 +88,10 @@ struct MenuBarLabel: View {
     @AppStorage(AmbientPrefs.widgets) private var widgets = "cpu,memory"
     @AppStorage(AmbientPrefs.widgetGraphs) private var graphs = true
     @AppStorage(AmbientPrefs.widgetColors) private var colors = true
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        let _ = AppRouter.openWindow = openWindow
         let list = widgets.split(separator: ",").compactMap { AmbientMetric(rawValue: String($0)) }
         let alert = monitor.attentionCount > 0
         if list.isEmpty {

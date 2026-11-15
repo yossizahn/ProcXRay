@@ -17,6 +17,7 @@ enum AmbientPrefs {
         }
     }
     static let showIn = "app.showIn"
+    static let launchToMenuBar = "app.launchToMenuBar"   // at launch, open no window (only with the menu bar item)
     static let widgets = "menuBar.widgets"            // comma-separated AmbientMetric raw values
     static let widgetGraphs = "menuBar.graphs"
     static let widgetColors = "menuBar.colors"
@@ -35,7 +36,7 @@ enum AmbientPrefs {
 
     static func register() {
         UserDefaults.standard.register(defaults: [
-            showIn: ShowIn.both.rawValue, widgets: "cpu,memory", widgetGraphs: true, widgetColors: true, interval: 3.0,
+            showIn: ShowIn.both.rawValue, launchToMenuBar: false, widgets: "cpu,memory", widgetGraphs: true, widgetColors: true, interval: 3.0,
             alertsOn: true, cpu: 80.0, gpu: 60.0, diskMB: 50.0, netMB: 10.0, seconds: 30.0, unresponsive: true, system: true,
             ignore: "", keepMinutes: 10.0, thirdPartyOnly: true,
         ])
@@ -43,6 +44,8 @@ enum AmbientPrefs {
 
     static var showInValue: ShowIn { ShowIn(rawValue: UserDefaults.standard.string(forKey: showIn) ?? "") ?? .both }
     static var menuBarShown: Bool { showInValue != .dock }
+    /// Launch with no window: the menu bar item only. The main window still opens at its saved frame later.
+    static var launchesHidden: Bool { menuBarShown && UserDefaults.standard.bool(forKey: launchToMenuBar) }
     static var widgetList: [AmbientMetric] {
         (UserDefaults.standard.string(forKey: widgets) ?? "").split(separator: ",").compactMap { AmbientMetric(rawValue: String($0)) }
     }
