@@ -174,7 +174,7 @@ struct SandboxProfileSection: View {
                     }
                 }
                 if shownSource == s.path {
-                    MonoText(text: (try? String(contentsOfFile: s.path, encoding: .utf8)) ?? "Couldn't read \(s.path).")
+                    MonoText(text: (try? String(contentsOfFile: s.path, encoding: .utf8)) ?? ";; Couldn't read \(s.path).", sbpl: true)
                         .frame(height: 260)
                 }
             }
@@ -200,6 +200,9 @@ struct SandboxProfileSection: View {
             }
             .font(.caption)
         }
+        if let data = i.profileData {
+            SandboxRulesView(data: data)
+        }
         HStack {
             Text("From secinitd's cache next to the container, written when the app last launched. Folders granted after launch are added on top and don't appear here; the checks above include them.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -215,6 +218,65 @@ struct SandboxProfileSection: View {
         s += "."
         if changed > 0 { s += " \(changed) source file\(changed == 1 ? " has" : "s have") changed since." }
         return s
+    }
+}
+
+/// The compiled profile decoded back into readable SBPL rules, with a search field. Decoding runs the first
+/// time the group is opened (it's a few milliseconds, but there's no reason to do it for every process).
+struct SandboxRulesView: View {
+    let data: Data
+    @State private var expanded = false
+    @State private var ruleset: SandboxRules.Ruleset?
+    @State private var failure: String?
+    @State private var query = ""
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            if let rs = ruleset {
+                VStack(alignment: .leading, spacing: 6) {
+                    TextField("Filter by operation or rule text", text: $query)
+                        .textFieldStyle(.roundedBorder).controlSize(.small)
+                    MonoText(text: text(rs), sbpl: true).frame(height: 320)
+                    Text("Each operation's effective policy, reconstructed from the compiled profile. These describe what the kernel enforces; they aren't the original source and don't necessarily recompile to the same bytes (the compiler merges wildcard and inherited rules into each operation).")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            } else if let why = failure {
+                Text("Couldn't decode the rules: \(why)").font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        } label: {
+            Text("Decoded rules\(ruleset.map { " (\($0.operations.count) operations)" } ?? "")")
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+        }
+        .font(.caption)
+        // Decode on first expand. .task re-runs if the view reappears, so an interrupted decode restarts.
+        .task(id: expanded) {
+            guard expanded, ruleset == nil, failure == nil else { return }
+            let data = self.data
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try SandboxRules.build(data: data) }
+            }.value
+            switch result {
+            case .success(let rs?): ruleset = rs
+            case .success(nil): failure = "libsandbox name tables unavailable"
+            case .failure(let e): failure = "\(e)"
+            }
+        }
+    }
+
+    /// The default rule, then operations whose name or rules contain the query (case-insensitive).
+    private func text(_ rs: SandboxRules.Ruleset) -> String {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        var lines = [rs.defaultRule]
+        for op in rs.operations {
+            if q.isEmpty || op.name.lowercased().contains(q) || op.rules.contains(where: { $0.lowercased().contains(q) }) {
+                lines.append(contentsOf: op.rules)
+            }
+        }
+        if lines.count == 1 && !q.isEmpty { lines.append(";; no operation matches “\(query)”") }
+        return lines.joined(separator: "\n")
     }
 }
 

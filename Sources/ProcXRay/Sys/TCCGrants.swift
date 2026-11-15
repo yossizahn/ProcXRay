@@ -9,8 +9,13 @@ import SQLite3
 /// Two databases, measured on macOS 27.2:
 /// - /Library/Application Support/com.apple.TCC/TCC.db (system-wide: Full Disk Access, Accessibility, Screen
 ///   Recording, Input Monitoring, …) is readable by any user, no Full Disk Access needed.
-/// - ~/Library/Application Support/com.apple.TCC/TCC.db (per user: camera, microphone, contacts, photos, files
-///   and folders, automation) opens only with Full Disk Access, even as root.
+/// - The per-user database (camera, microphone, contacts, photos, files and folders, automation). Before macOS 27
+///   it's ~/Library/Application Support/com.apple.TCC/TCC.db and opens only with Full Disk Access, even as root.
+///   On 27.2 that folder is gone: tccd keeps it in its ProtectedSystem container,
+///   /private/var/containers/Data/ProtectedSystem/<UUID>/Data/Library/Application Support/com.apple.TCC/TCC.db,
+///   which with SIP on refuses root with Full Disk Access too ("authorization denied"; only tccd, with Apple's
+///   private protected-system-container entitlement, gets in). With SIP off any process of the user can read it.
+///   (26.x not checked: the move is assumed to come with 27.)
 /// Entitlements Apple builds into its own binaries (com.apple.private.tcc.allow) grant services without a row.
 enum TCCGrants {
     struct Grant: Identifiable {
@@ -27,7 +32,8 @@ enum TCCGrants {
 
     enum Database: String { case system = "system", user = "user" }
 
-    enum Availability { case read, needsFullDiskAccess, missing, failed(String) }
+    /// `sipProtected`: the database is in tccd's protected container and SIP is on, so it wasn't tried.
+    enum Availability { case read, needsFullDiskAccess, sipProtected, missing, failed(String) }
 
     struct Report {
         var grants: [Grant]
@@ -36,13 +42,40 @@ enum TCCGrants {
     }
 
     static let systemPath = "/Library/Application Support/com.apple.TCC/TCC.db"
-    static var userPath: String { NSHomeDirectory() + "/Library/Application Support/com.apple.TCC/TCC.db" }
+    static var legacyUserPath: String { NSHomeDirectory() + "/Library/Application Support/com.apple.TCC/TCC.db" }
+    static let protectedContainers = "/private/var/containers/Data/ProtectedSystem"
+
+    enum UserDatabase { case at(String), unavailable(Availability) }
+
+    /// Where the per-user database is, or why it can't be read.
+    static func userDatabase() -> UserDatabase {
+        if FileManager.default.fileExists(atPath: legacyUserPath) { return .at(legacyUserPath) }
+        if ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 27 {
+            // The folder is TCC-protected too: without Full Disk Access it can look absent.
+            return .unavailable(.needsFullDiskAccess)
+        }
+        guard SystemSecurity.current.sipRelaxed else { return .unavailable(.sipProtected) }
+        // The container's metadata (which names com.apple.tccd) is root-only, so find it by the file and its owner:
+        // one container per user.
+        let fm = FileManager.default
+        let uid = getuid()
+        for c in (try? fm.contentsOfDirectory(atPath: protectedContainers)) ?? [] {
+            let p = "\(protectedContainers)/\(c)/Data/Library/Application Support/com.apple.TCC/TCC.db"
+            var st = stat()
+            if stat(p, &st) == 0, st.st_uid == uid { return .at(p) }
+        }
+        return .unavailable(.missing)
+    }
 
     /// Decisions for any of `clients` (bundle IDs and executable paths).
     static func read(clients: Set<String>) -> Report {
         var grants: [Grant] = []
         let sys = query(systemPath, .system, clients, into: &grants)
-        let usr = query(userPath, .user, clients, into: &grants)
+        let usr: Availability
+        switch userDatabase() {
+        case .at(let p): usr = query(p, .user, clients, into: &grants)
+        case .unavailable(let a): usr = a
+        }
         grants.sort { ($0.database.rawValue, displayName($0.service)) < ($1.database.rawValue, displayName($1.service)) }
         return Report(grants: grants, system: sys, user: usr)
     }

@@ -235,7 +235,8 @@ enum RegexText {
     static func escape(_ c: UInt8, inClass: Bool = false) -> String {
         if c < 0x20 || c >= 0x7f { return String(format: "\\x%02x", c) }
         let s = String(UnicodeScalar(c))
-        if inClass { return "]\\^-".contains(s) ? "\\" + s : s }
+        // Inside a bracket class libsandbox rejects a backslash-escaped `] \ ^ -`; use the hex form instead.
+        if inClass { return "]\\^-".contains(s) ? String(format: "\\x%02x", c) : s }
         return ".^$|()[]{}*+?\\".contains(s) ? "\\" + s : s
     }
     static func literal(_ b: [UInt8]) -> String { b.map { escape($0) }.joined() }

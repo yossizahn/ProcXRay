@@ -700,6 +700,40 @@ enum Bench {
 
     /// `ProcXRay --qos <pid>`: CPU time by QoS class against total CPU time, over 2 s.
     /// The Sandbox card's checks for each pid, as a table (0 allowed, 1 denied, ? unknown), and their cost.
+    /// The Trust tab for `pid` laid out offscreen at the inspector's width: its content height, and PNGs of the
+    /// top and of the content around y = 9000 pt (to <dir>, SANDBOX_PNG_DIR), for checking tall tabs.
+    static func trustLayout(_ pid: pid_t) {
+        let snap = Store.snapshot(prev: [:], signCache: [:], priv: { nil })
+        guard let p = snap.procs[pid] else { print("pid \(pid): not found"); return }
+        let sign = CodeSign.inspect(pid: pid, path: p.path)
+        MainActor.assumeIsolated {
+            let store = Store(); store.procs = snap.procs; store.lsApps = snap.ls
+            let host = NSHostingView(rootView: TrustTab(proc: p, sign: sign).environment(store))
+            let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+            win.contentView = host
+            // Let the cards' .task reads (sandbox checks, TCC) finish and lay out again.
+            for _ in 0..<40 { RunLoop.main.run(until: Date().addingTimeInterval(0.1)); host.layoutSubtreeIfNeeded() }
+            func find(_ v: NSView) -> NSScrollView? {
+                if let s = v as? NSScrollView, (s.documentView?.frame.height ?? 0) > s.frame.height { return s }
+                for c in v.subviews { if let s = find(c) { return s } }
+                return nil
+            }
+            guard let sv = find(host), let doc = sv.documentView else { print("no tall scroll view"); return }
+            print("pid \(pid) \(p.name): entitlement keys \(sign.entitlementKeys.count), content \(Int(doc.frame.width))x\(Int(doc.frame.height)) pt, \(Int(doc.frame.height * (win.backingScaleFactor))) px at \(win.backingScaleFactor)x")
+            guard let dir = ProcessInfo.processInfo.environment["SANDBOX_PNG_DIR"] else { return }
+            for (name, y) in [("top", 0.0), ("1500", 1500.0), ("2300", 2300.0), ("9000", 9000.0)] where y < doc.frame.height {
+                sv.contentView.scroll(to: NSPoint(x: 0, y: doc.isFlipped ? y : max(0, doc.frame.height - y - sv.frame.height)))
+                sv.reflectScrolledClipView(sv.contentView)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+                let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+                host.cacheDisplay(in: host.bounds, to: rep)
+                let url = URL(fileURLWithPath: dir).appendingPathComponent("trust-\(pid)-\(name).png")
+                try? rep.representation(using: .png, properties: [:])?.write(to: url)
+                print("  rendered \(url.path)")
+            }
+        }
+    }
+
     static func sandbox(_ pids: [pid_t]) {
         func v(_ x: SandboxProbes.Verdict) -> String { switch x { case .allowed: "0"; case .denied: "1"; case .unknown: "?" } }
         for pid in pids {

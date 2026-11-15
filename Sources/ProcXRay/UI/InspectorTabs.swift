@@ -1080,7 +1080,9 @@ struct TrustTab: View {
     let sign: SignInfo?
     var exited = false
     @State private var filter = ""
+    @State private var expanded: Set<EntitlementInfo.Capability> = []
     @AppStorage("showRawOutput") private var showRaw = false
+    static let shownKeys = 30
 
     var body: some View {
         if let s = sign {
@@ -1156,9 +1158,12 @@ struct TrustTab: View {
             let grouped = Dictionary(grouping: keys, by: EntitlementInfo.capability)
             ForEach(EntitlementInfo.Capability.allCases, id: \.self) { cap in
                 if let ks = grouped[cap] {
+                    // A filter shows every match; otherwise a long group stops at `shownKeys` until asked, since
+                    // past ~16k pixels the tab stops drawing its text (Safari: 130 private-Apple keys).
+                    let capped = filter.isEmpty && !expanded.contains(cap) && ks.count > Self.shownKeys + 5
                     Card(title: cap.title, systemImage: cap.symbol, trailing: "\(ks.count)") {
                         VStack(alignment: .leading, spacing: 5) {
-                            ForEach(ks, id: \.self) { k in
+                            ForEach(capped ? Array(ks.prefix(Self.shownKeys)) : ks, id: \.self) { k in
                                 let note = EntitlementInfo.notable(k, platform: platform)
                                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                                     if note != nil {
@@ -1170,6 +1175,12 @@ struct TrustTab: View {
                                     PlistValue(value: dict[k]!)
                                 }
                                 Divider().opacity(0.5)
+                            }
+                            if filter.isEmpty && ks.count > Self.shownKeys + 5 {
+                                Button(capped ? "Show all \(ks.count)" : "Show fewer") {
+                                    if capped { expanded.insert(cap) } else { expanded.remove(cap) }
+                                }
+                                .buttonStyle(.link).font(.caption)
                             }
                         }
                     }

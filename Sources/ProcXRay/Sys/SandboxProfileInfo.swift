@@ -34,6 +34,7 @@ struct SandboxProfileInfo {
     let containerPath: String       // …/Containers/<id>/Data
     let metadataPath: String
     let compiledSize: Int?
+    let profileData: Data?          // the compiled profile bytes, for decoding its rules
     let sources: [SourceFile]
     let parameters: [(String, String)]
     let entitlementCount: Int
@@ -79,10 +80,12 @@ struct SandboxProfileInfo {
         let params = (v["Parameters"] as? [String: Any] ?? [:])
             .map { ($0.key, "\($0.value)") }
             .sorted { $0.0 < $1.0 }
+        let profileData = info["SandboxProfileData"] as? Data
         return .success(SandboxProfileInfo(
             containerPath: container,
             metadataPath: meta,
-            compiledSize: (info["SandboxProfileData"] as? Data)?.count,
+            compiledSize: profileData?.count,
+            profileData: profileData,
             sources: sources,
             parameters: params,
             entitlementCount: (v["Entitlements"] as? [String: Any])?.count ?? 0,

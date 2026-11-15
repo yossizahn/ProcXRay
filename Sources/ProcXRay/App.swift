@@ -87,6 +87,10 @@ struct ProcXRayApp: App {
             Bench.qos(pid_t(CommandLine.arguments[i + 1]) ?? 0)
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--trust-layout"), i + 1 < CommandLine.arguments.count {
+            Bench.trustLayout(pid_t(CommandLine.arguments[i + 1]) ?? 0)
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--sandbox") {
             Bench.sandbox(Array(CommandLine.arguments[(i + 1)...]).compactMap { pid_t($0) })
             exit(0)
@@ -166,6 +170,34 @@ struct ProcXRayApp: App {
         }
         if CommandLine.arguments.contains("--security") {
             print(SystemSecurity.current.summary)
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--sandbox-rules") {
+            // --sandbox-rules <pid|file>: decode a compiled sandbox profile back to SBPL rules. A number is
+            // read as a pid (its cached profile); anything else is a path to a compiled profile.
+            guard i + 1 < CommandLine.arguments.count else { print("usage: --sandbox-rules <pid|file>"); exit(2) }
+            let arg = CommandLine.arguments[i + 1]
+            var data: Data?
+            if let pid = pid_t(arg) {
+                switch SandboxProfileInfo.read(pid: pid) {
+                case .success(let info): data = info.profileData
+                case .failure(let f): FileHandle.standardError.write(Data("\(SandboxProfileSection.text(f))\n".utf8)); exit(1)
+                }
+                if data == nil { FileHandle.standardError.write(Data("no cached profile for pid \(pid)\n".utf8)); exit(1) }
+            } else {
+                data = try? Data(contentsOf: URL(fileURLWithPath: arg))
+                if data == nil { FileHandle.standardError.write(Data("couldn't read \(arg)\n".utf8)); exit(1) }
+            }
+            do {
+                guard let rs = try SandboxRules.build(data: data!) else {
+                    FileHandle.standardError.write(Data("libsandbox name tables unavailable\n".utf8)); exit(1)
+                }
+                print("(version 1)")
+                print(rs.defaultRule)
+                for op in rs.operations { for r in op.rules { print(r) } }
+            } catch {
+                FileHandle.standardError.write(Data("couldn't decode profile: \(error)\n".utf8)); exit(1)
+            }
             exit(0)
         }
         if let i = CommandLine.arguments.firstIndex(of: "--native-vm-regions") {

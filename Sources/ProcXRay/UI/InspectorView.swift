@@ -346,6 +346,8 @@ struct CommandTab<Parsed, Visual: View>: View {
 /// Fast, selectable monospaced text (SwiftUI Text chokes on 10k-line outputs).
 struct MonoText: NSViewRepresentable {
     let text: String
+    /// Color it as SBPL (sandbox profile source or decoded rules).
+    var sbpl = false
 
     func makeNSView(context: Context) -> NSScrollView {
         let sv = NSTextView.scrollableTextView()
@@ -361,6 +363,10 @@ struct MonoText: NSViewRepresentable {
     func updateNSView(_ sv: NSScrollView, context: Context) {
         let tv = sv.documentView as! NSTextView
         if tv.string != text {
+            if sbpl {
+                tv.textStorage?.setAttributedString(SandboxSyntax.highlight(text))
+                return
+            }
             tv.string = text
             tv.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
             tv.textColor = .labelColor

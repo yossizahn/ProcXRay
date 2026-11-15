@@ -102,6 +102,7 @@ struct TCCCard: View {
         switch a {
         case .read: nil
         case .needsFullDiskAccess: "\(what) not read: it needs Full Disk Access for Proc X-Ray, so camera, microphone, contacts, photos, files and folders, and automation aren't shown."
+        case .sipProtected: "\(what) not read: macOS keeps it in a container that only TCC itself can open while System Integrity Protection is on (Full Disk Access isn't enough, even as root), so camera, microphone, contacts, photos, files and folders, and automation aren't shown."
         case .missing: "\(what) not found."
         case .failed(let m): "\(what) couldn't be read: \(m)"
         }

@@ -1436,11 +1436,7 @@ struct PlistValue: View {
         } else if let n = value as? NSNumber {
             Text(n.stringValue).monospacedDigit()
         } else if let a = value as? [Any] {
-            VStack(alignment: .trailing, spacing: 2) {
-                ForEach(Array(a.enumerated()), id: \.offset) { _, v in
-                    if let s = v as? String { Pill(text: s, color: .accentColor) } else { PlistValue(value: v) }
-                }
-            }
+            ArrayValue(items: a)
         } else if let d = value as? [String: Any] {
             VStack(alignment: .trailing, spacing: 2) {
                 ForEach(d.keys.sorted(), id: \.self) { k in
@@ -1451,6 +1447,52 @@ struct PlistValue: View {
             Text("\(data.count) bytes").foregroundStyle(.secondary)
         } else {
             Text(String(describing: value)).foregroundStyle(.secondary)
+        }
+    }
+
+    /// An array, one item per line; past `shown` items the rest wait behind a button. Every line adds to the page's
+    /// height, and a page past ~16k pixels stops drawing its text (Safari's Trust tab: 92 mach-lookup names alone).
+    struct ArrayValue: View {
+        let items: [Any]
+        static let shown = 8
+        @State private var all = false
+
+        var body: some View {
+            let visible = all || items.count <= Self.shown + 2 ? items : Array(items.prefix(Self.shown))
+            VStack(alignment: .trailing, spacing: 2) {
+                ForEach(Array(visible.enumerated()), id: \.offset) { _, v in
+                    if let s = v as? String {
+                        if PlistValue.isLong(s) { LongValue(text: s) } else { Pill(text: s, color: .accentColor) }
+                    } else {
+                        PlistValue(value: v)
+                    }
+                }
+                if items.count > Self.shown + 2 {
+                    Button(all ? "Show fewer" : "Show all \(items.count)") { all.toggle() }
+                        .buttonStyle(.link).font(.caption)
+                }
+            }
+        }
+    }
+
+    /// Too long for a one-line pill: a pill doesn't wrap, so one long value (Safari's
+    /// temporary-exception.sbpl rules run to 475 characters) widens the whole page past the window.
+    static func isLong(_ s: String) -> Bool { s.count > 80 || s.hasPrefix("(") }
+
+    /// A long array value: wrapping monospaced text, colored as SBPL when it is SBPL (an s-expression).
+    struct LongValue: View {
+        let text: String
+        var body: some View {
+            Group {
+                if text.hasPrefix("(") { Text(SandboxSyntax.attributed(text)) } else { Text(verbatim: text).foregroundStyle(.secondary) }
+            }
+            .font(.system(.caption, design: .monospaced))
+            .textSelection(.enabled)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: 560, alignment: .leading)
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
         }
     }
 }
