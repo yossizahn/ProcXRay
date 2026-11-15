@@ -108,6 +108,8 @@ struct ProcessesView: View {
                 }
                 .fixedSize()
                 .help("Smart tree, flat list, or the flat list grouped by one field. Clicking a column header shows the flat list sorted by it; a third click comes back here.")
+                Button { WindowPicker.start { AppRouter.shared.show($0) } } label: { Label("Pick Window", systemImage: "scope") }
+                    .help("Click any window on screen to select the process that owns it (⌥⌘P)")
                 Button { store.paused.toggle() } label: {
                     Label(store.paused ? "Resume" : "Pause", systemImage: store.paused ? "play.fill" : "pause.fill")
                 }
@@ -115,6 +117,7 @@ struct ProcessesView: View {
             }
         }
         .navigationTitle("Processes")
+        .onChange(of: AppRouter.shared.reveal, initial: true) { _, r in if let r { reveal(r.pid, tries: 4) } }
         .confirmationDialog(pendingSignal.map { "Send \($0.2) to \($0.0.name) (pid \($0.0.pid))?" } ?? "",
                             isPresented: Binding(get: { pendingSignal != nil }, set: { if !$0 { pendingSignal = nil } })) {
             Button(pendingSignal?.2 ?? "Send", role: .destructive) {
@@ -123,6 +126,19 @@ struct ProcessesView: View {
             }
         }
         .signalFailureAlert($signalError)
+    }
+
+    /// Selects `pid` in the tree (the outline expands its group and scrolls to it). A process newer than the
+    /// last snapshot isn't listed yet: refresh, and try again shortly.
+    private func reveal(_ pid: pid_t, tries: Int) {
+        if store.procs[pid] != nil {
+            if !search.isEmpty || !chips.isEmpty { search = ""; savedChips = "" }   // never hide the target
+            selection = Int(pid)
+            return
+        }
+        guard tries > 0 else { return }
+        store.refresh()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { reveal(pid, tries: tries - 1) }
     }
 
     private func send(_ sig: Int32, _ label: String, to p: ProcInfo) {

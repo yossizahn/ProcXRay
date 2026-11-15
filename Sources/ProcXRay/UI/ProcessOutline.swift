@@ -970,7 +970,8 @@ struct ProcessOutline: NSViewRepresentable {
             }
             set(image: IconCache.icon(for: p) ?? Self.terminalIcon, tint: nil)
             let orphan = p.leftBehindGroup != nil
-            let color: NSColor = p.isZombie || !p.isInspectable ? .secondaryLabelColor : orphan ? .systemOrange : .labelColor
+            let color: NSColor = p.notResponding ? .systemRed
+                : p.isZombie || !p.isInspectable ? .secondaryLabelColor : orphan ? .systemOrange : .labelColor
             let s = NSMutableAttributedString(string: n.title, attributes: [.font: Self.body, .foregroundColor: color])
             // An app extension says what kind it is (its declared extension point), unless a group above does.
             if let e = p.extensionPoint, !n.extensionPointShownAbove {
@@ -985,6 +986,7 @@ struct ProcessOutline: NSViewRepresentable {
                     .backgroundColor: c.withAlphaComponent(0.2), .baselineOffset: 1,
                 ]))
             }
+            if p.notResponding { badge("NOT RESPONDING", .systemRed) }
             if orphan { badge("LEFT", .systemOrange) }
             if p.isZombie { badge("ZOMBIE", .systemGray) }
             if p.isTranslated { badge("ROSETTA", .systemPurple) }

@@ -3,7 +3,7 @@ import Foundation
 /// Quick filters above the process tree. They combine with the search text and with each other (all must
 /// hold), and are judged on process rows only: a group stays when any process under it passes.
 enum FilterChip: String, CaseIterable, Identifiable, Sendable {
-    case recent, nonAppleRoot, unsigned, notSandboxed, rosetta, busy
+    case recent, nonAppleRoot, unsigned, notSandboxed, rosetta, busy, notResponding
 
     var id: String { rawValue }
     var title: String {
@@ -14,6 +14,7 @@ enum FilterChip: String, CaseIterable, Identifiable, Sendable {
         case .notSandboxed: "Not sandboxed"
         case .rosetta: "Rosetta"
         case .busy: "CPU > 5 %"
+        case .notResponding: "Not responding"
         }
     }
     var help: String {
@@ -24,6 +25,7 @@ enum FilterChip: String, CaseIterable, Identifiable, Sendable {
         case .notSandboxed: "Not in the App Sandbox (processes whose sandbox state can't be read are left out)."
         case .rosetta: "Intel code translated by Rosetta."
         case .busy: "Using more than 5 % of one core over the last refresh."
+        case .notResponding: "Apps WindowServer reports as hung (Activity Monitor's \"Not Responding\")."
         }
     }
 
@@ -35,6 +37,7 @@ enum FilterChip: String, CaseIterable, Identifiable, Sendable {
         case .notSandboxed: p.sandboxed == false
         case .rosetta: p.isTranslated
         case .busy: (p.cpuPercent ?? 0) > 5
+        case .notResponding: p.notResponding
         }
     }
 

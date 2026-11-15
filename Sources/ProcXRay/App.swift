@@ -3,10 +3,12 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        AppActivation.install()
+        AmbientMonitor.shared.update()
         NSApp.activate(ignoringOtherApps: true)
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// With the menu bar item, closing the last window leaves the app running there.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !AmbientPrefs.menuBarShown }
 }
 
 @main
@@ -17,6 +19,7 @@ enum Entry {
         // Tooltips (full text of truncated fields, mostly) appear at once instead of after AppKit's ~1 s.
         // In milliseconds; 0 counts as unset, so 1. Registered, not set: a user default still wins.
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 1])
+        AmbientPrefs.register()
         ProcXRayApp.main()
     }
 }
@@ -24,6 +27,7 @@ enum Entry {
 struct ProcXRayApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @State private var store = Store()
+    @AppStorage(AmbientPrefs.showIn) private var showIn: AmbientPrefs.ShowIn = .both
 
     init() {
         ColumnPrefs.migrate()
@@ -35,6 +39,16 @@ struct ProcXRayApp: App {
             try? p.run()
             print("spawned leftover sleep pid \(p.processIdentifier) from pid \(getpid())")
             exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--ambient") {
+            // --ambient <seconds> [interval]: the menu bar monitor's sampling, timed, without the UI. Runs off the
+            // main thread, which keeps a run loop going so NSWorkspace's app list stays current.
+            let a = CommandLine.arguments.dropFirst(i + 1).compactMap(Double.init)
+            Thread.detachNewThread {
+                AmbientMonitor.bench(seconds: a.first ?? 30, interval: a.count > 1 ? a[1] : 3)
+                exit(0)
+            }
+            RunLoop.main.run()
         }
         if CommandLine.arguments.contains("--bench") {
             Bench.run()
@@ -190,9 +204,22 @@ struct ProcXRayApp: App {
         }
 
         WindowGroup("Process", id: ProcessWindow.id, for: ProcessRef.self) { $ref in
+                Button("Pick Process by Window…") { WindowPicker.start { AppRouter.shared.show($0) } }
+                    .keyboardShortcut("p", modifiers: [.command, .option])
             if $ref.wrappedValue != nil { ProcessWindow(ref: $ref).environment(store) }
         }
         .defaultSize(width: 900, height: 640)
+        MenuBarExtra(isInserted: Binding(get: { showIn != .dock }, set: { if !$0 { showIn = .dock } })) {
+            MenuBarPopover().environment(store)
+        } label: {
+            MenuBarLabel()
+        }
+        .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView()
+        }
+
         .commandsRemoved()   // no "New Process Window": these only open from a process row
     }
 }
@@ -229,6 +256,7 @@ enum Section: String, CaseIterable, Identifiable {
     case ghosts = "Left Behind"
     case apps = "LaunchServices Apps"
     case background = "Background Items"
+    case triage = "Triage"
     case launchd = "launchd Jobs"
     var id: String { rawValue }
     var icon: String {
@@ -237,6 +265,7 @@ enum Section: String, CaseIterable, Identifiable {
         case .ghosts: "figure.walk.departure"
         case .apps: "app.badge"
         case .background: "gearshape.2"
+        case .triage: "stethoscope"
         case .launchd: "bolt.horizontal"
         }
     }
@@ -264,6 +293,7 @@ struct ContentView: View {
                         Text(verbatim: "\(store.ghostCount)").font(.caption).padding(.horizontal, 6)
                             .background(.orange.opacity(0.3), in: Capsule())
                     }
+                    if s == .triage { TriageBadge() }
                 }.tag(s)
             }
             .navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 300)
@@ -280,8 +310,10 @@ struct ContentView: View {
             switch savedSection {
             case .processes: ProcessesView()
             case .ghosts: GhostsView()
+            .onChange(of: AppRouter.shared.reveal) { _, r in if r != nil { savedSection = .processes } }
             case .apps: AppsView()
             case .background: BackgroundItemsView()
+            case .triage: TriageSection()
             case .launchd: LaunchdView()
             }
         }

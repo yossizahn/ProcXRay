@@ -1,0 +1,471 @@
+import AppKit
+import SwiftUI
+
+/// Requests from outside the main window (the menu bar popover, the window picker) to show a process in
+/// the process list.
+@MainActor
+@Observable
+final class AppRouter {
+    static let shared = AppRouter()
+    struct Reveal: Equatable { var pid: pid_t; var gen: Int }
+    private(set) var reveal: Reveal?
+    func show(_ pid: pid_t) { reveal = Reveal(pid: pid, gen: (reveal?.gen ?? 0) + 1) }
+
+    /// Brings the main window forward, opening one if none is open.
+    static func openMain(_ openWindow: OpenWindowAction) {
+        AppActivation.willShowWindow()
+        if let w = NSApp.windows.first(where: { $0.identifier?.rawValue.hasPrefix("main") == true && $0.styleMask.contains(.titled) }) {
+            if w.isMiniaturized { w.deminiaturize(nil) }
+            w.makeKeyAndOrderFront(nil)
+        } else {
+            openWindow(id: "main")
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    static func inspect(_ ref: ProcessRef, _ openWindow: OpenWindowAction) {
+        AppActivation.willShowWindow()
+        openWindow(id: ProcessWindow.id, value: ref)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+// MARK: Menu bar label
+
+/// Compact numbers for the menu bar: "512K", "1.2M", "34M".
+enum Compact {
+    static func bytes(_ v: Double) -> String {
+        let units = ["", "K", "M", "G", "T"]
+        var x = max(0, v), i = 0
+        while x >= 1000 && i < units.count - 1 { x /= 1024; i += 1 }
+        if i == 0 { return String(format: "%.0f", x) }
+        return x < 10 ? String(format: "%.1f%@", x, units[i]) : String(format: "%.0f%@", x, units[i])
+    }
+    static func percent(_ v: Double?) -> String { v.map { String(format: "%.0f%%", $0) } ?? "–" }
+}
+
+/// What the menu bar shows: the chosen widgets, drawn into one template image so the system tints it for
+/// the menu bar's appearance; a warning sign first while any alert is live.
+struct MenuBarLabel: View {
+    @State private var monitor = AmbientMonitor.shared
+    @AppStorage(AmbientPrefs.widgets) private var widgets = "cpu,memory"
+    @AppStorage(AmbientPrefs.widgetGraphs) private var graphs = true
+
+    var body: some View {
+        let list = widgets.split(separator: ",").compactMap { AmbientMetric(rawValue: String($0)) }
+        let alert = !monitor.alerts.isEmpty
+        if list.isEmpty {
+            Image(systemName: alert ? "exclamationmark.triangle.fill" : "waveform.path.ecg")
+        } else {
+            Image(nsImage: render(list, alert: alert))
+        }
+    }
+
+    @MainActor
+    private func render(_ list: [AmbientMetric], alert: Bool) -> NSImage {
+        let view = MenuBarWidgets(metrics: list, alert: alert, graphs: graphs, system: monitor.system, history: monitor.systemHistory)
+        let r = ImageRenderer(content: view)
+        r.scale = NSScreen.main?.backingScaleFactor ?? 2
+        let img = r.nsImage ?? NSImage()
+        img.isTemplate = true
+        return img
+    }
+}
+
+/// The widgets as one view (rendered to an image by MenuBarLabel). Black on clear: the image is a template.
+struct MenuBarWidgets: View {
+    let metrics: [AmbientMetric]
+    let alert: Bool
+    let graphs: Bool
+    let system: SystemStats.Rates
+    let history: [AmbientMetric: [Double]]
+    /// Black for the menu bar's template image; the Settings preview draws in the label color.
+    var ink: Color = .black
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if alert {
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 12, weight: .semibold))
+            }
+            ForEach(metrics) { m in widget(m) }
+        }
+        .foregroundStyle(ink)
+        .frame(height: 18)
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private func widget(_ m: AmbientMetric) -> some View {
+        HStack(spacing: 3) {
+            if graphs, m != .disk, m != .network {
+                MiniGraph(values: history[m] ?? [], maxValue: 100, color: ink, filled: true)
+                    .frame(width: 22, height: 14)
+                    .overlay(RoundedRectangle(cornerRadius: 1.5).stroke(ink.opacity(0.5), lineWidth: 0.75))
+            }
+            switch m {
+            case .disk, .network:
+                let (a, b): (Double?, Double?) = m == .disk ? (system.diskRead, system.diskWrite) : (system.netIn, system.netOut)
+                VStack(alignment: .trailing, spacing: -2) {
+                    Text(verbatim: (m == .disk ? "R " : "↓ ") + (a.map(Compact.bytes) ?? "–"))
+                    Text(verbatim: (m == .disk ? "W " : "↑ ") + (b.map(Compact.bytes) ?? "–"))
+                }
+                .font(.system(size: 8.5, weight: .semibold).monospacedDigit())
+                .frame(minWidth: 34, alignment: .trailing)
+            default:
+                VStack(alignment: .leading, spacing: -2) {
+                    Text(verbatim: m.short).font(.system(size: 7, weight: .bold))
+                    Text(verbatim: Compact.percent(value(m))).font(.system(size: 10, weight: .semibold).monospacedDigit())
+                }
+                .frame(minWidth: 26, alignment: .leading)
+            }
+        }
+    }
+
+    private func value(_ m: AmbientMetric) -> Double? {
+        switch m {
+        case .cpu: system.cpuPercent
+        case .gpu: system.gpuPercent
+        case .memory: system.memory.map { $0.usedFraction * 100 }
+        case .disk, .network: nil
+        }
+    }
+}
+
+/// A small area or line graph of the last readings, newest on the right; `maxValue` nil scales to the peak.
+struct MiniGraph: View {
+    let values: [Double]
+    var maxValue: Double?
+    var color: Color = .accentColor
+    var filled = true
+    var capacity = AmbientMonitor.historyLength
+
+    var body: some View {
+        Canvas { ctx, size in
+            guard values.count > 1 else { return }
+            let top = max(maxValue ?? (values.max() ?? 1), 1e-9)
+            let step = size.width / CGFloat(max(capacity - 1, 1))
+            let start = size.width - CGFloat(values.count - 1) * step
+            var line = Path()
+            for (i, v) in values.enumerated() {
+                let p = CGPoint(x: start + CGFloat(i) * step, y: size.height - CGFloat(min(v / top, 1)) * size.height)
+                if i == 0 { line.move(to: p) } else { line.addLine(to: p) }
+            }
+            if filled {
+                var area = line
+                area.addLine(to: CGPoint(x: size.width, y: size.height))
+                area.addLine(to: CGPoint(x: start, y: size.height))
+                area.closeSubpath()
+                ctx.fill(area, with: .color(color.opacity(0.55)))
+            }
+            ctx.stroke(line, with: .color(color), lineWidth: 1)
+        }
+    }
+}
+
+// MARK: Popover
+
+struct MenuBarPopover: View {
+    @State private var monitor = AmbientMonitor.shared
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                TriageView(compact: true).padding(12)
+            }
+            .frame(maxHeight: 640)
+            Divider()
+            HStack(spacing: 10) {
+                Button { AppRouter.openMain(openWindow) } label: { Label("Open Proc X-Ray", systemImage: "macwindow") }
+                Button {
+                    WindowPicker.start { pid in
+                        guard let k = Native.process(pid) else { return }
+                        AppRouter.inspect(ProcessRef(pid: pid, start: k.start.timeIntervalSince1970), openWindow)
+                    }
+                } label: { Label("Pick Window", systemImage: "scope") }
+                .help("Click any window on screen to inspect the process that owns it")
+                Spacer()
+                Button { AppActivation.willShowWindow(); openSettings(); NSApp.activate(ignoringOtherApps: true) } label: { Image(systemName: "gearshape") }
+                    .help("Settings")
+                Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }
+                    .help("Quit Proc X-Ray")
+            }
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+        }
+        .frame(width: 400)
+    }
+}
+
+/// The triage dashboard: system figures, what needs attention, top consumers, and what started and ended
+/// lately. In the menu bar popover (compact) and the main window's Triage section.
+struct TriageView: View {
+    var compact = false
+    @State private var monitor = AmbientMonitor.shared
+    @AppStorage("triage.topMetric") private var topMetric: AmbientMetric = .cpu
+    @AppStorage(AmbientPrefs.thirdPartyOnly) private var thirdPartyOnly = true
+    @AppStorage(AmbientPrefs.alertsOn) private var alertsOn = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            tiles
+            section("Needs attention", count: monitor.alerts.count, symbol: "exclamationmark.triangle") {
+                if !alertsOn {
+                    empty("Alerts are off (Settings ▸ Alerts)")
+                } else if monitor.alerts.isEmpty {
+                    empty("Nothing needs attention")
+                }
+                ForEach(monitor.alerts) { a in AlertRow(alert: a) }
+            }
+            section("Top \(topMetric.title.lowercased())", count: nil, symbol: topMetric.symbol) {
+                let list = monitor.top[topMetric] ?? []
+                if list.isEmpty { empty("No readings yet") }
+                let peak = list.compactMap { topMetric.value($0) }.max() ?? 1
+                ForEach(list) { p in
+                    ProcRow(proc: p, detail: topMetric.value(p).map(topMetric.format) ?? "–",
+                            fraction: (topMetric.value(p) ?? 0) / max(peak, 1e-9))
+                }
+            }
+            section("Just launched", count: monitor.launched.count, symbol: "sparkle") {
+                if monitor.launched.isEmpty { empty(thirdPartyOnly ? "No third-party process started lately" : "Nothing started lately") }
+                ForEach(monitor.launched.prefix(compact ? 5 : 30)) { e in
+                    ProcRow(proc: e.proc, detail: "\(Fmt.age(e.at)) ago", running: true)
+                }
+            }
+            section("Recently ended", count: monitor.ended.count, symbol: "xmark.circle") {
+                if monitor.ended.isEmpty { empty(thirdPartyOnly ? "No third-party process ended lately" : "Nothing ended lately") }
+                ForEach(monitor.ended.prefix(compact ? 5 : 30)) { e in
+                    ProcRow(proc: e.proc, detail: "ran \(duration(e.at.timeIntervalSince(e.proc.start))), \(Fmt.age(e.at)) ago", running: false)
+                }
+            }
+            if !monitor.cleared.isEmpty {
+                section("Earlier alerts", count: monitor.cleared.count, symbol: "clock.arrow.circlepath", trailing: {
+                    Button("Clear") { monitor.clearEnded() }.buttonStyle(.borderless).font(.caption)
+                }) {
+                    ForEach(monitor.cleared.prefix(compact ? 5 : 30)) { a in AlertRow(alert: a) }
+                }
+            }
+        }
+    }
+
+    private var tiles: some View {
+        let s = monitor.system
+        let h = monitor.systemHistory
+        let mem = s.memory
+        return HStack(spacing: 6) {
+            tile(.cpu, Compact.percent(s.cpuPercent), h[.cpu] ?? [], max: 100,
+                 help: "Whole machine, all cores. Per core now: " + s.perCore.map { String(format: "%.0f", $0) }.joined(separator: " "))
+            tile(.gpu, Compact.percent(s.gpuPercent), h[.gpu] ?? [], max: 100, help: "GPU utilization (IOAccelerator).")
+            tile(.memory, mem.map { Fmt.bytes($0.used) } ?? "–", h[.memory] ?? [], max: 100,
+                 help: mem.map { "Used \(Fmt.bytes($0.used)) of \(Fmt.bytes($0.total)): app \(Fmt.bytes($0.app)), wired \(Fmt.bytes($0.wired)), compressed \(Fmt.bytes($0.compressed)); cached files \(Fmt.bytes($0.cached)). Pressure: \($0.pressure == 4 ? "critical" : $0.pressure == 2 ? "warning" : "normal")." } ?? "")
+            tile(.disk, s.disk.map { Compact.bytes($0) + "/s" } ?? "–", h[.disk] ?? [], max: nil,
+                 help: "Read \(Fmt.bytes(s.diskRead.map { UInt64($0) }))/s, written \(Fmt.bytes(s.diskWrite.map { UInt64($0) }))/s, every disk.")
+            tile(.network, s.net.map { Compact.bytes($0) + "/s" } ?? "–", h[.network] ?? [], max: nil,
+                 help: "Received \(Fmt.bytes(s.netIn.map { UInt64($0) }))/s, sent \(Fmt.bytes(s.netOut.map { UInt64($0) }))/s, every interface but loopback.")
+        }
+    }
+
+    private func tile(_ m: AmbientMetric, _ value: String, _ values: [Double], max: Double?, help: String) -> some View {
+        let on = topMetric == m
+        let tint: Color = m == .memory && (monitor.system.memory?.pressure ?? 1) >= 2 ? .orange : .accentColor
+        return Button { topMetric = m } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(m.title).font(.caption2).foregroundStyle(.secondary)
+                Text(verbatim: value).font(.system(size: 13, weight: .semibold, design: .rounded)).monospacedDigit()
+                    .lineLimit(1).minimumScaleFactor(0.7)
+                MiniGraph(values: values, maxValue: max, color: tint).frame(height: 18)
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(on ? AnyShapeStyle(Color.accentColor.opacity(0.15)) : AnyShapeStyle(.quaternary.opacity(0.5)), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(on ? Color.accentColor.opacity(0.6) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help + " Click to list the top processes by \(m.title.lowercased()).")
+    }
+
+    private func section<C: View, T: View>(_ title: String, count: Int?, symbol: String,
+                                           @ViewBuilder trailing: () -> T = { EmptyView() },
+                                           @ViewBuilder content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 14)
+                Text(title).font(.subheadline.weight(.semibold))
+                if let count, count > 0 {
+                    Text(verbatim: "\(count)").font(.caption).monospacedDigit().padding(.horizontal, 5)
+                        .background(.quaternary, in: Capsule())
+                }
+                Spacer()
+                trailing()
+            }
+            content()
+        }
+    }
+
+    private func empty(_ s: String) -> some View {
+        Text(s).font(.caption).foregroundStyle(.secondary).padding(.leading, 19)
+    }
+}
+
+func duration(_ s: TimeInterval) -> String {
+    let s = max(0, Int(s))
+    if s < 60 { return "\(s) s" }
+    if s < 3600 { return "\(s / 60) m \(s % 60) s" }
+    return "\(s / 3600) h \(s % 3600 / 60) m"
+}
+
+/// Icons for paths, cached (NSWorkspace.icon is slow enough to notice in a list redrawn every tick).
+@MainActor
+enum PathIcon {
+    private static var cache: [String: NSImage] = [:]
+    static func icon(_ path: String?) -> NSImage? {
+        guard let path else { return nil }
+        let key = path.range(of: ".app/", options: .backwards).map { String(path[..<$0.lowerBound]) + ".app" } ?? path
+        if let i = cache[key] { return i }
+        let i = NSWorkspace.shared.icon(forFile: key)
+        i.size = NSSize(width: 16, height: 16)
+        cache[key] = i
+        return i
+    }
+}
+
+/// One process in the triage lists. A click inspects it; the context menu has the rest.
+struct ProcRow: View {
+    let proc: AmbientProc
+    let detail: String
+    var fraction: Double? = nil
+    var running = true
+    var reason: String? = nil
+    var tint: Color = .primary
+    @Environment(\.openWindow) private var openWindow
+    @State private var hover = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let i = PathIcon.icon(proc.path) { Image(nsImage: i).resizable().frame(width: 16, height: 16) }
+            else { Image(systemName: "terminal").frame(width: 16, height: 16).foregroundStyle(.secondary) }
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 4) {
+                    Text(verbatim: proc.name).lineLimit(1).truncationMode(.middle).foregroundStyle(running ? tint : .secondary)
+                    Text(verbatim: "\(proc.pid)").font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+                    if proc.notResponding {
+                        Text("NOT RESPONDING").font(.system(size: 8, weight: .bold)).foregroundStyle(.red)
+                            .padding(.horizontal, 3).background(.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 2))
+                    }
+                }
+                if let reason { Text(verbatim: reason).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+            }
+            Spacer(minLength: 4)
+            Text(verbatim: detail).font(.caption).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
+        }
+        .font(.callout)
+        .padding(.vertical, 2).padding(.horizontal, 4)
+        .background(alignment: .leading) {
+            if let fraction {
+                GeometryReader { g in
+                    RoundedRectangle(cornerRadius: 3).fill(Color.accentColor.opacity(0.13))
+                        .frame(width: g.size.width * min(max(fraction, 0), 1))
+                }
+            }
+        }
+        .background(hover ? AnyShapeStyle(.quaternary.opacity(0.6)) : AnyShapeStyle(.clear), in: RoundedRectangle(cornerRadius: 4))
+        .contentShape(Rectangle())
+        .onHover { hover = $0 }
+        .onTapGesture { inspect() }
+        .help(running ? "\(proc.path ?? proc.name)\nClick to inspect." : "\(proc.path ?? proc.name)\nExited; click to see its last state if Proc X-Ray still has it.")
+        .contextMenu {
+            Button("Inspect") { inspect() }
+            Button("Show in Process List") { AppRouter.openMain(openWindow); AppRouter.shared.show(proc.pid) }.disabled(!running)
+            if let path = proc.path {
+                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+            }
+            Button("Copy PID") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("\(proc.pid)", forType: .string) }
+            if running {
+                Divider()
+                Button("Quit (SIGTERM)…") { signal(SIGTERM, "Quit") }
+                Button("Force Quit (SIGKILL)…") { signal(SIGKILL, "Force Quit") }
+            }
+        }
+    }
+
+    private func inspect() { AppRouter.inspect(proc.ref, openWindow) }
+
+    private func signal(_ sig: Int32, _ verb: String) {
+        let a = NSAlert()
+        a.messageText = "\(verb) \(proc.name) (pid \(proc.pid))?"
+        a.informativeText = sig == SIGKILL ? "The process ends at once and loses anything unsaved." : "The process is asked to quit."
+        a.addButton(withTitle: verb)
+        a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        // The pid must still be this process: pids are reused.
+        guard let live = Native.process(proc.pid), live.start.timeIntervalSince1970 == proc.start.timeIntervalSince1970 else {
+            NSSound.beep(); return
+        }
+        if kill(proc.pid, sig) != 0 {
+            let e = NSAlert()
+            e.messageText = "Couldn't \(verb.lowercased()) \(proc.name)"
+            e.informativeText = errno == EPERM ? "It belongs to another user or is protected by macOS." : String(cString: strerror(errno))
+            e.runModal()
+        }
+        AmbientMonitor.shared.tick()
+    }
+}
+
+struct AlertRow: View {
+    let alert: AmbientAlert
+
+    var body: some View {
+        let live = alert.until == nil
+        let span = (alert.until ?? Date()).timeIntervalSince(alert.since)
+        let reason: String = {
+            guard let m = alert.kind.metric else {
+                return live ? "\(alert.kind.title) for \(duration(span))" : "Was not responding for \(duration(span)), \(Fmt.age(alert.until!)) ago"
+            }
+            return live ? "\(alert.kind.title) for \(duration(span)) · peak \(m.format(alert.peak))"
+                        : "\(alert.kind.title) for \(duration(span)) · peak \(m.format(alert.peak)) · ended \(Fmt.age(alert.until!)) ago"
+        }()
+        ProcRow(proc: alert.proc, detail: live ? alert.kind.metric.map { $0.format(alert.current) } ?? "" : "",
+                running: live || AmbientMonitor.shared.procs.contains { $0.key == alert.proc.key },
+                reason: reason, tint: live ? (alert.kind == .notResponding ? .red : .orange) : .primary)
+    }
+}
+
+// MARK: Main window
+
+/// The sidebar's Triage section: the popover's dashboard at full size. Keeps the monitor sampling while
+/// shown, even with the menu bar item off.
+struct TriageSection: View {
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        ScrollView {
+            TriageView().padding(16).frame(maxWidth: 720, alignment: .leading).frame(maxWidth: .infinity)
+        }
+        .navigationTitle("Triage")
+        .toolbar {
+            Button {
+                WindowPicker.start { pid in
+                    guard let k = Native.process(pid) else { return }
+                    AppRouter.inspect(ProcessRef(pid: pid, start: k.start.timeIntervalSince1970), openWindow)
+                }
+            } label: { Label("Pick Window", systemImage: "scope") }
+            .help("Click any window on screen to inspect the process that owns it (⌥⌘P shows it in the process list)")
+        }
+        .onAppear { AmbientMonitor.shared.addViewer() }
+        .onDisappear { AmbientMonitor.shared.removeViewer() }
+    }
+}
+
+/// Live alert count next to Triage in the sidebar.
+struct TriageBadge: View {
+    @State private var monitor = AmbientMonitor.shared
+    var body: some View {
+        let n = monitor.alerts.count
+        if n > 0 {
+            Spacer()
+            Text(verbatim: "\(n)").font(.caption).padding(.horizontal, 6).background(.orange.opacity(0.3), in: Capsule())
+        }
+    }
+}

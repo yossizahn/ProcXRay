@@ -228,6 +228,7 @@ private func yesNo(_ b: Bool?) -> CellValue {
 /// process. There is no running/sleeping: `p_stat` says runnable for nearly every process (143 of 143 app
 /// processes measured), and the running-thread count is a single instant that reads 0 for most processes.
 private func state(_ p: ProcInfo) -> CellValue {
+    if p.notResponding { return .text("not responding", .danger) }
     switch p.stat {
     case 4: return .text("stopped", .warning)
     case 5: return .text("zombie", .warning)
@@ -268,11 +269,11 @@ private let catalogue: [Column] = [
         #endif
     },
     Column(id: "state", title: "State",
-           tooltip: "Stopped (by a signal such as SIGSTOP), zombie (exited, waiting for its parent) or starting, from the kernel's process state. Empty for a normal live process. Group rows: how many are stopped, zombie or starting.",
+           tooltip: "Not responding (WindowServer reports the app hung, as in Activity Monitor), stopped (by a signal such as SIGSTOP), zombie (exited, waiting for its parent) or starting, from the kernel's process state. Empty for a normal live process. Group rows: how many are stopped, zombie or starting.",
            section: .identity, width: 76,
            rule: .custom { ms, _ in
                let n = ms.filter { state($0).hasValue }.count
-               return n == 0 ? .empty : .number(Double(n), "\(n) stopped or zombie", .warning)
+               return n == 0 ? .empty : .number(Double(n), "\(n) stopped, zombie or hung", .warning)
            }) { p, _ in state(p) },
 
     // Ownership

@@ -82,6 +82,8 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     /// Set once reading argv was tried, so the cell can tell "not read yet" from "unreadable".
     var commandLineRead = false
     var viaHelper = false              // metrics came from the root helper
+    /// WindowServer reports the app as hung (Responsiveness). Apps only; false for everything else.
+    var notResponding = false
     /// Set when this process outlived the app that launched it (see Store.ghosts): the Left Behind
     /// group's id, and the app's name and pid where known.
     var leftBehindGroup: Int?
@@ -337,8 +339,11 @@ final class Store {
     @ObservationIgnored private var visibilityObservers: [NSObjectProtocol] = []
 
     private func visibilityChanged() {
+        // Titled windows only: the menu bar item and its popover are windows too, always "visible", and
+        // keeping the process table refreshing for them would cost the snapshot every tick for nothing (the
+        // popover has its own light sampler, AmbientMonitor).
         let visible = !NSApp.isHidden && NSApp.windows.contains {
-            $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible)
+            $0.styleMask.contains(.titled) && $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible)
         }
         guard visible != onScreen else { return }
         onScreen = visible
@@ -371,6 +376,7 @@ final class Store {
             let s = HelperClient.shared.probe()
             await MainActor.run {
                 guard gen == self.probeGen else { return }
+                AmbientMonitor.shared.helperRunning = s.isRunning
                 if self.helperState != s {
                     // Other users' processes the app couldn't read: the helper can, so try them again.
                     if s.isRunning {
@@ -802,6 +808,9 @@ final class Store {
             out[pid] = p
         }
         if !domainHosts.isEmpty { applyDomainOwners(&out, domainHosts) }
+        for pid in Responsiveness.unresponsive(out.values.lazy.filter { Responsiveness.isCandidate(lsType: $0.lsType) }.map(\.pid)) {
+            out[pid]?.notResponding = true
+        }
         return Snapshot(procs: out, ls: ls, jobs: jobs, otherJobs: otherJobs, samples: samples)
     }
 
