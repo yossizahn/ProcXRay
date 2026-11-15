@@ -386,43 +386,97 @@ struct OverviewTab: View {
 
 /// A line of the last `History.capacity` values, newest at the right edge. Rates are scaled from zero to
 /// their maximum; a level such as memory (`fromZero` false) between its minimum and maximum, or it would
-/// be a flat line at the top. Gaps (no reading for that refresh) break the line.
+/// be a flat line at the top. Gaps (no reading for that refresh) break the line. Hovering marks the
+/// nearest sample and shows its value (through `format`) and how long ago it was read.
 struct Sparkline: View {
     let values: [Double?]
     var fromZero = true
     var color: Color = .accentColor
+    var format: ((Double) -> String)?
+    @Environment(Store.self) private var store: Store?
+    @State private var hover: CGPoint?
+
+    private func step(_ width: CGFloat) -> CGFloat { width / CGFloat(History.capacity - 1) }
+    private func x(_ i: Int, _ width: CGFloat) -> CGFloat { width - CGFloat(values.count - 1 - i) * step(width) }
+    /// The sample under `x`, or nil left of the oldest one.
+    private func index(at x: CGFloat, _ width: CGFloat) -> Int? {
+        guard !values.isEmpty, width > 0 else { return nil }
+        let back = Int(((width - x) / step(width)).rounded())
+        let i = values.count - 1 - max(back, 0)
+        return i >= 0 ? i : nil
+    }
 
     var body: some View {
-        Canvas { ctx, size in
-            let known = values.compactMap { $0 }
-            let bottom = fromZero ? 0 : (known.min() ?? 0)
-            let top = (known.max() ?? 0) - bottom
-            let step = size.width / CGFloat(History.capacity - 1)
-            var line = Path(), area = Path()
-            var runStart: CGPoint?, last: CGPoint?
-            func close() {
-                if let s = runStart, let l = last {
-                    area.addLine(to: CGPoint(x: l.x, y: size.height))
-                    area.addLine(to: CGPoint(x: s.x, y: size.height))
-                    area.closeSubpath()
+        GeometryReader { geo in
+            let size = geo.size
+            let hovered = hover.flatMap { index(at: $0.x, size.width) }
+            Canvas { ctx, size in
+                let known = values.compactMap { $0 }
+                let bottom = fromZero ? 0 : (known.min() ?? 0)
+                let top = (known.max() ?? 0) - bottom
+                var line = Path(), area = Path()
+                var runStart: CGPoint?, last: CGPoint?, mark: CGPoint?
+                func close() {
+                    if let s = runStart, let l = last {
+                        area.addLine(to: CGPoint(x: l.x, y: size.height))
+                        area.addLine(to: CGPoint(x: s.x, y: size.height))
+                        area.closeSubpath()
+                    }
+                    runStart = nil; last = nil
                 }
-                runStart = nil; last = nil
+                for (i, v) in values.enumerated() {
+                    guard let v else { close(); continue }
+                    // A flat level (top 0) sits mid-height; a flat zero rate sits on the baseline.
+                    let y = top > 0 ? size.height - CGFloat((v - bottom) / top) * (size.height - 1) - 0.5
+                                    : (fromZero ? size.height - 0.5 : size.height / 2)
+                    let pt = CGPoint(x: x(i, size.width), y: y)
+                    if i == hovered { mark = pt }
+                    if runStart == nil { line.move(to: pt); area.move(to: pt); runStart = pt } else { line.addLine(to: pt); area.addLine(to: pt) }
+                    last = pt
+                }
+                close()
+                ctx.fill(area, with: .color(color.opacity(0.15)))
+                ctx.stroke(line, with: .color(color), lineWidth: 1.2)
+                if let hovered {
+                    let hx = x(hovered, size.width)
+                    ctx.stroke(Path { $0.move(to: CGPoint(x: hx, y: 0)); $0.addLine(to: CGPoint(x: hx, y: size.height)) },
+                               with: .color(.secondary.opacity(0.6)), lineWidth: 1)
+                    if let m = mark {
+                        ctx.fill(Path(ellipseIn: CGRect(x: m.x - 2.5, y: m.y - 2.5, width: 5, height: 5)), with: .color(color))
+                    }
+                }
             }
-            for (i, v) in values.enumerated() {
-                guard let v else { close(); continue }
-                let x = size.width - CGFloat(values.count - 1 - i) * step
-                // A flat level (top 0) sits mid-height; a flat zero rate sits on the baseline.
-                let y = top > 0 ? size.height - CGFloat((v - bottom) / top) * (size.height - 1) - 0.5
-                                : (fromZero ? size.height - 0.5 : size.height / 2)
-                let pt = CGPoint(x: x, y: y)
-                if runStart == nil { line.move(to: pt); area.move(to: pt); runStart = pt } else { line.addLine(to: pt); area.addLine(to: pt) }
-                last = pt
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                if case .active(let p) = phase { hover = p } else { hover = nil }
             }
-            close()
-            ctx.fill(area, with: .color(color.opacity(0.15)))
-            ctx.stroke(line, with: .color(color), lineWidth: 1.2)
+            .overlay {
+                // A fixed frame, so the label can sit outside it (a ZStack would grow to hold it, and a bare
+                // overlay ignores the label's alignment guides).
+                if let hovered {
+                    label(hovered, at: x(hovered, size.width), width: size.width)
+                        .frame(width: size.width, height: size.height, alignment: .topLeading)
+                }
+            }
         }
         .accessibilityHidden(true)
+    }
+
+    /// The hovered sample's value and age, centred above the chart on the sample and kept inside its width.
+    private func label(_ i: Int, at x: CGFloat, width: CGFloat) -> some View {
+        let value = values[i].map { format?($0) ?? String(format: "%.3g", $0) } ?? "no reading"
+        let ago = Double(values.count - 1 - i) * (store?.interval ?? 2)
+        let s = Int(ago.rounded())
+        let when = s == 0 ? "now" : s < 60 ? "\(s) s ago" : s % 60 == 0 ? "\(s / 60) min ago" : "\(s / 60) min \(s % 60) s ago"
+        return Text(verbatim: "\(value)  ·  \(when)")
+            .font(.caption).monospacedDigit()
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+            .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.separator))
+            .fixedSize()
+            .alignmentGuide(.leading) { d in -min(max(x - d.width / 2, 0), max(width - d.width, 0)) }
+            .alignmentGuide(.top) { d in d.height + 3 }
+            .allowsHitTesting(false)
     }
 }
 
@@ -439,7 +493,7 @@ struct SparkTile: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Text(verbatim: value).font(.system(size: 18, weight: .semibold, design: .rounded)).monospacedDigit()
-            Sparkline(values: values, fromZero: fromZero).frame(height: 24)
+            Sparkline(values: values, fromZero: fromZero, format: format).frame(height: 24)
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .frame(width: 150, alignment: .leading)
@@ -498,7 +552,7 @@ struct UsageTab: View {
                     ("Logical writes", r?.logicalWrites.map(bytesPerSecFormat) ?? "—", Fmt.bytes(c?.logicalWrites)),
                 ])
                 Self.networkSection(h?.network, inRate: p.netIn, outRate: p.netOut,
-                                    inTotal: p.netInTotal.map(Double.init), outTotal: p.netOutTotal.map(Double.init),
+                                    inTotal: p.netInTotal.map { Double($0) }, outTotal: p.netOutTotal.map { Double($0) },
                                     start: p.start)
                 Self.section("Energy and wakeups", "bolt", h?.power, format: wattsFormat, rows: [
                     ("CPU energy", r?.watts.map(wattsFormat) ?? "—", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
@@ -592,7 +646,6 @@ struct UsageTab: View {
               + (lowerBound ? ". \"≥\" and \"since\": the process started before the app, so sockets it closed before then aren't counted." : "."))
     }
 
-
     /// The process's port space from the last lsmp snapshot (the Mach ports columns' or the Connections
     /// tab's, whichever ran); none until one has been taken. Counts at that moment, so under "Now".
     private func machPortRows(_ p: ProcInfo) -> [(String, String, String)] {
@@ -631,7 +684,7 @@ struct UsageTab: View {
                 }
                 if let spark {
                     let known = spark.compactMap { $0 }
-                    Sparkline(values: spark, fromZero: fromZero).frame(width: 200, height: 44)
+                    Sparkline(values: spark, fromZero: fromZero, format: format).frame(width: 200, height: 44)
                         .help(known.isEmpty ? "No history yet"
                               : "Last \(spark.count) refreshes: \(format(known.min()!)) to \(format(known.max()!)); the line spans "
                                 + (fromZero ? "zero to the maximum." : "the minimum to the maximum."))

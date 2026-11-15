@@ -112,6 +112,18 @@ Filled in the background and cached by `codeKey`. `SecCodeCopyGuestWithAttribute
   - `sample <pid> 0 1` (`HelperTool.stacks`, as root through the helper, else as the user): one sample of every thread, symbolicated, with `Thread_<id>` headers that match the IDs above, and `DispatchQueue_N: <label>` for a thread running a queue's block. 0.2–0.4 s for Finder, Slack, WindowServer and launchd (1.8 s on a first run while symbols load), against ~20 s for the Sample pane's 1 s run of Slack. It suspends the target for that one sample. "Waiting in" is the innermost frame plus the innermost one outside libsystem_kernel / pthread / platform / c / malloc.
   - `taskinfo <pid> --threads --dq` (root only, 18–121 ms): requested, effective and promotion **QoS**, **sched mode** (timeshare / fixed-priority / real-time), effective I/O tier and darwin BG. Over the 40 busiest processes (651 threads), only 25 had a dispatch queue name at that instant, so queue names are mostly the main thread's; every override field (kevent, workloop, legacy, workqueue, turnstile) was unspecified except on 2 threads, so they are not shown.
 
+## Whole-machine figures (menu bar and Triage, `SystemStats`)
+
+All are read without privileges, once per menu bar tick (`AmbientMonitor`).
+
+- CPU per core: `host_processor_info(PROCESSOR_CPU_LOAD_INFO)`.
+- Memory: `host_statistics64(HOST_VM_INFO64)`, `hw.memsize`, `kern.memorystatus_vm_pressure_level` (1 normal, 2 warning, 4 critical), `kern.memorystatus_level` (share of memory available, 0–100), and `vm.swapusage` (swap used and the swap files' size).
+- Thermal pressure: notify(3) state of `kOSThermalNotificationPressureLevelName` (`com.apple.system.thermalpressurelevel`). On macOS it's 0 nominal, 1 moderate, 2 heavy, 3 trapping, 4 sleeping. It's read through a token registered once, so a read is a shared-memory load.
+- GPU: IORegistry `IOAccelerator` → `PerformanceStatistics`: `Device Utilization %`, `Renderer Utilization %`, `Tiler Utilization %` and `In use system memory`, from the busiest GPU.
+- CPU cluster and GPU clocks, and GPU power (`ClusterStats.swift`): one IOReport subscription (libIOReport, loaded with `dlopen`) to "CPU Stats" / "CPU Complex Performance States" (channels ECPU, PCPU, PCPU1…, MCPU), "GPU Stats" / "GPU Performance States" (GPUPH) and the "GPU Energy" channel of "Energy Model". It records cumulative residency per performance state; the clock is the residency-weighted average while running. The frequency of each state comes from pmgr's DVFS tables in the IORegistry (`voltage-states1-sram` E, `voltage-states5-sram` P, `voltage-states22-sram` M, `voltage-states9` GPU; Hz up to M3, kHz from M4). A table is used only if it fits: as many entries as the cluster has performance states, or for the GPU no residency past its end. Otherwise only the share of time running is shown. Measured on M1 (macOS 27.2): E 600–2064 MHz in 5 states, P 600–3204 MHz in 15, GPU 396–1278 MHz in P1–P6 of 15; one sample ~1 ms. The CPU energy channels of "Energy Model" read 0 without root there, so CPU power isn't shown.
+- Disk: IORegistry `IOBlockStorageDriver` → `Statistics` bytes read and written.
+- Network: `sysctl(NET_RT_IFLIST2)` 64-bit interface counters, loopback excluded.
+
 ## What else is available
 
 Grouped by how hard it is to get. "Same user" means the call worked for another process of this user (Finder) but failed for a root process (launchd); the helper would cover the rest.

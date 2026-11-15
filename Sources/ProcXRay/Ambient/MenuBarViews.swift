@@ -44,16 +44,51 @@ enum Compact {
     static func percent(_ v: Double?) -> String { v.map { String(format: "%.0f%%", $0) } ?? "–" }
 }
 
+/// Text for the system figures beyond the tiles' headline numbers: clocks, GPU detail, swap and pressure.
+extension SystemStats.Rates {
+    static func clock(_ mhz: Double) -> String { mhz >= 1000 ? String(format: "%.2f GHz", mhz / 1000) : String(format: "%.0f MHz", mhz) }
+
+    /// "2.06 GHz · 31 % active", "idle", or the share alone when the chip's DVFS table didn't fit.
+    static func cluster(_ c: ClusterStats.Cluster, short: Bool = false) -> String {
+        if c.active < 0.005 { return "idle" }
+        let share = String(format: short ? "%.0f %%" : "%.0f %% active", c.active * 100)
+        return c.mhz.map { clock($0) + " · " + share } ?? share
+    }
+
+    /// One line per CPU cluster, for tooltips.
+    var cpuClusterLines: [String] {
+        (clusters?.cpu ?? []).map { c in "\(c.title): \(Self.cluster(c))" + (c.maxMHz.map { " (max \(Self.clock($0)))" } ?? "") }
+    }
+
+    var gpuDetailLines: [String] {
+        var out: [String] = []
+        if let g = clusters?.gpu { out.append("Clock: \(Self.cluster(g))" + (g.maxMHz.map { " (max \(Self.clock($0)))" } ?? "")) }
+        if let w = clusters?.gpuWatts { out.append(String(format: "Power: %.2f W", w)) }
+        if let r = gpu?.renderer { out.append(String(format: "Renderer %.0f %%", r) + (gpu?.tiler.map { String(format: ", tiler %.0f %%", $0) } ?? "")) }
+        if let m = gpu?.memoryInUse { out.append("Memory in use: \(Fmt.bytes(m))") }
+        return out
+    }
+
+    var swapText: String? {
+        guard let m = memory, let used = m.swapUsed else { return nil }
+        return used == 0 ? "no swap in use" : "\(Fmt.bytes(used)) swapped" + (m.swapTotal.map { " (swap files \(Fmt.bytes($0)))" } ?? "")
+    }
+
+    var thermalText: String? { thermal.map { "Thermal pressure: " + SystemStats.thermalLevelName($0) } }
+}
+
 /// What the menu bar shows: the chosen widgets, drawn into one template image so the system tints it for
 /// the menu bar's appearance; a warning sign first while any alert is live.
 struct MenuBarLabel: View {
     @State private var monitor = AmbientMonitor.shared
+    @State private var appearance = MenuBarAppearance.shared
     @AppStorage(AmbientPrefs.widgets) private var widgets = "cpu,memory"
     @AppStorage(AmbientPrefs.widgetGraphs) private var graphs = true
+    @AppStorage(AmbientPrefs.widgetColors) private var colors = true
 
     var body: some View {
         let list = widgets.split(separator: ",").compactMap { AmbientMetric(rawValue: String($0)) }
-        let alert = !monitor.alerts.isEmpty
+        let alert = monitor.attentionCount > 0
         if list.isEmpty {
             Image(systemName: alert ? "exclamationmark.triangle.fill" : "waveform.path.ecg")
         } else {
@@ -63,29 +98,93 @@ struct MenuBarLabel: View {
 
     @MainActor
     private func render(_ list: [AmbientMetric], alert: Bool) -> NSImage {
-        let view = MenuBarWidgets(metrics: list, alert: alert, graphs: graphs, system: monitor.system, history: monitor.systemHistory)
+        // Colored graphs can't go in a template image (the system draws a template in one color), so the text is
+        // drawn in the menu bar's own color: white on a dark menu bar, black on a light one.
+        let colored = colors && graphs
+        if colored { appearance.attachSoon() }
+        let view = MenuBarWidgets(metrics: list, alert: alert, graphs: graphs, system: monitor.system, history: monitor.systemHistory,
+                                  io: monitor.ioHistory,
+                                  ink: colored && appearance.dark ? .white : .black, colored: colored)
         let r = ImageRenderer(content: view)
         r.scale = NSScreen.main?.backingScaleFactor ?? 2
         let img = r.nsImage ?? NSImage()
-        img.isTemplate = true
+        img.isTemplate = !colored
         return img
     }
 }
 
-/// The widgets as one view (rendered to an image by MenuBarLabel). Black on clear: the image is a template.
+/// The menu bar's appearance, which follows the wallpaper as well as Dark Mode: the status item window's
+/// effectiveAppearance (the app's own appearance doesn't follow the menu bar). Watched with KVO once that window
+/// exists, which is after the first label render.
+@MainActor
+@Observable
+final class MenuBarAppearance {
+    static let shared = MenuBarAppearance()
+    private(set) var dark = NSApp?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    @ObservationIgnored private var observation: NSKeyValueObservation?
+    @ObservationIgnored private var pending = false
+
+    /// Looks for the status item's window after the current render (state can't change during one).
+    func attachSoon() {
+        guard observation == nil, !pending else { return }
+        pending = true
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.attach() } }
+    }
+
+    private func attach() {
+        pending = false
+        guard observation == nil,
+              let w = NSApp.windows.first(where: { String(describing: type(of: $0)).contains("StatusBarWindow") }) else { return }
+        update(w.effectiveAppearance)
+        observation = w.observe(\.effectiveAppearance, options: [.new]) { w, _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { MenuBarAppearance.shared.update(w.effectiveAppearance) } }
+        }
+    }
+
+    private func update(_ a: NSAppearance) {
+        let d = a.bestMatch(from: [.aqua, .darkAqua, .vibrantDark, .vibrantLight]).map { $0 == .darkAqua || $0 == .vibrantDark } ?? false
+        if d != dark { dark = d }
+    }
+}
+
+/// The widgets as one view (rendered to an image by MenuBarLabel). Black on clear when the image is a template;
+/// with colored graphs, text in the menu bar's color and each graph in its metric's color.
 struct MenuBarWidgets: View {
     let metrics: [AmbientMetric]
     let alert: Bool
     let graphs: Bool
     let system: SystemStats.Rates
     let history: [AmbientMetric: [Double]]
+    var io: [IOSeries: [Double]] = [:]
     /// Black for the menu bar's template image; the Settings preview draws in the label color.
     var ink: Color = .black
+    var colored = false
+
+    /// Fixed colors (not dynamic system colors: the image is rendered outside any appearance). Memory follows
+    /// the kernel's pressure level.
+    private func graphColor(_ m: AmbientMetric) -> Color {
+        guard colored else { return ink }
+        switch m {
+        case .cpu: return Color(red: 0.20, green: 0.78, blue: 0.35)
+        case .gpu: return Color(red: 0.69, green: 0.32, blue: 0.87)
+        case .memory:
+            let p = system.memory?.pressure ?? 1
+            return p >= 4 ? Color(red: 1, green: 0.27, blue: 0.23) : p >= 2 ? Color(red: 1, green: 0.62, blue: 0.04) : Color(red: 0.04, green: 0.52, blue: 1)
+        case .disk, .network: return ink
+        }
+    }
+
+    /// Incoming (disk read, network received) up from the middle in blue, outgoing (written, sent) down in red,
+    /// as Activity Monitor colors them.
+    private func ioColors() -> (Color, Color) {
+        colored ? (Color(red: 0.04, green: 0.52, blue: 1), Color(red: 1, green: 0.27, blue: 0.23)) : (ink, ink)
+    }
 
     var body: some View {
         HStack(spacing: 6) {
             if alert {
                 Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(colored ? Color(red: 1, green: 0.62, blue: 0.04) : ink)
             }
             ForEach(metrics) { m in widget(m) }
         }
@@ -97,10 +196,20 @@ struct MenuBarWidgets: View {
     @ViewBuilder
     private func widget(_ m: AmbientMetric) -> some View {
         HStack(spacing: 3) {
-            if graphs, m != .disk, m != .network {
-                MiniGraph(values: history[m] ?? [], maxValue: 100, color: ink, filled: true)
-                    .frame(width: 22, height: 14)
-                    .overlay(RoundedRectangle(cornerRadius: 1.5).stroke(ink.opacity(0.5), lineWidth: 0.75))
+            if graphs {
+                Group {
+                    if m == .disk || m == .network {
+                        let (up, down) = ioColors()
+                        MirrorGraph(up: io[m == .disk ? .diskRead : .netIn] ?? [], down: io[m == .disk ? .diskWrite : .netOut] ?? [],
+                                    upColor: up, downColor: down)
+                    } else {
+                        MiniGraph(values: history[m] ?? [], maxValue: 100, color: graphColor(m), filled: true)
+                    }
+                }
+                .frame(width: 22, height: 14)
+                // White behind colored graphs (a template image can't have one: it would draw as a solid block).
+                .background(colored ? Color.white : .clear, in: RoundedRectangle(cornerRadius: 1.5))
+                .overlay(RoundedRectangle(cornerRadius: 1.5).stroke(ink.opacity(0.5), lineWidth: 0.75))
             }
             switch m {
             case .disk, .network:
@@ -127,6 +236,38 @@ struct MenuBarWidgets: View {
         case .gpu: system.gpuPercent
         case .memory: system.memory.map { $0.usedFraction * 100 }
         case .disk, .network: nil
+        }
+    }
+}
+
+/// Two series around a middle line, newest on the right: `up` drawn upward, `down` downward, both scaled to the
+/// larger series' peak so their heights compare.
+struct MirrorGraph: View {
+    let up: [Double]
+    let down: [Double]
+    var upColor: Color = .accentColor
+    var downColor: Color = .orange
+    var capacity = AmbientMonitor.historyLength
+
+    var body: some View {
+        Canvas { ctx, size in
+            let peak = max(up.max() ?? 0, down.max() ?? 0, 1)
+            let mid = size.height / 2
+            let step = size.width / CGFloat(max(capacity - 1, 1))
+            func draw(_ values: [Double], _ color: Color, _ sign: CGFloat) {
+                guard values.count > 1 else { return }
+                let start = size.width - CGFloat(values.count - 1) * step
+                var area = Path()
+                area.move(to: CGPoint(x: start, y: mid))
+                for (i, v) in values.enumerated() {
+                    area.addLine(to: CGPoint(x: start + CGFloat(i) * step, y: mid - sign * CGFloat(min(v / peak, 1)) * mid))
+                }
+                area.addLine(to: CGPoint(x: size.width, y: mid))
+                area.closeSubpath()
+                ctx.fill(area, with: .color(color.opacity(0.85)))
+            }
+            draw(up, upColor, 1)
+            draw(down, downColor, -1)
         }
     }
 }
@@ -162,41 +303,7 @@ struct MiniGraph: View {
     }
 }
 
-// MARK: Popover
-
-struct MenuBarPopover: View {
-    @State private var monitor = AmbientMonitor.shared
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.openSettings) private var openSettings
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ScrollView {
-                TriageView(compact: true).padding(12)
-            }
-            .frame(maxHeight: 640)
-            Divider()
-            HStack(spacing: 10) {
-                Button { AppRouter.openMain(openWindow) } label: { Label("Open Proc X-Ray", systemImage: "macwindow") }
-                Button {
-                    WindowPicker.start { pid in
-                        guard let k = Native.process(pid) else { return }
-                        AppRouter.inspect(ProcessRef(pid: pid, start: k.start.timeIntervalSince1970), openWindow)
-                    }
-                } label: { Label("Pick Window", systemImage: "scope") }
-                .help("Click any window on screen to inspect the process that owns it")
-                Spacer()
-                Button { AppActivation.willShowWindow(); openSettings(); NSApp.activate(ignoringOtherApps: true) } label: { Image(systemName: "gearshape") }
-                    .help("Settings")
-                Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }
-                    .help("Quit Proc X-Ray")
-            }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 12).padding(.vertical, 8)
-        }
-        .frame(width: 400)
-    }
-}
+// MARK: Triage
 
 /// The triage dashboard: system figures, what needs attention, top consumers, and what started and ended
 /// lately. In the menu bar popover (compact) and the main window's Triage section.
@@ -210,10 +317,12 @@ struct TriageView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             tiles
-            section("Needs attention", count: monitor.alerts.count, symbol: "exclamationmark.triangle") {
+            systemLine
+            section("Needs attention", count: monitor.attentionCount, symbol: "exclamationmark.triangle") {
+                ForEach(monitor.conditions) { c in ConditionRow(condition: c) }
                 if !alertsOn {
                     empty("Alerts are off (Settings ▸ Alerts)")
-                } else if monitor.alerts.isEmpty {
+                } else if monitor.attentionCount == 0 {
                     empty("Nothing needs attention")
                 }
                 ForEach(monitor.alerts) { a in AlertRow(alert: a) }
@@ -255,14 +364,38 @@ struct TriageView: View {
         let mem = s.memory
         return HStack(spacing: 6) {
             tile(.cpu, Compact.percent(s.cpuPercent), h[.cpu] ?? [], max: 100,
-                 help: "Whole machine, all cores. Per core now: " + s.perCore.map { String(format: "%.0f", $0) }.joined(separator: " "))
-            tile(.gpu, Compact.percent(s.gpuPercent), h[.gpu] ?? [], max: 100, help: "GPU utilization (IOAccelerator).")
+                 help: (["Whole machine, all cores. Per core now: " + s.perCore.map { String(format: "%.0f", $0) }.joined(separator: " ")]
+                        + s.cpuClusterLines + [s.thermalText].compactMap { $0 }).joined(separator: "\n"))
+            tile(.gpu, Compact.percent(s.gpuPercent), h[.gpu] ?? [], max: 100,
+                 help: (["GPU utilization (IOAccelerator)."] + s.gpuDetailLines).joined(separator: "\n"))
             tile(.memory, mem.map { Fmt.bytes($0.used) } ?? "–", h[.memory] ?? [], max: 100,
-                 help: mem.map { "Used \(Fmt.bytes($0.used)) of \(Fmt.bytes($0.total)): app \(Fmt.bytes($0.app)), wired \(Fmt.bytes($0.wired)), compressed \(Fmt.bytes($0.compressed)); cached files \(Fmt.bytes($0.cached)). Pressure: \($0.pressure == 4 ? "critical" : $0.pressure == 2 ? "warning" : "normal")." } ?? "")
+                 help: mem.map { "Used \(Fmt.bytes($0.used)) of \(Fmt.bytes($0.total)): app \(Fmt.bytes($0.app)), wired \(Fmt.bytes($0.wired)), compressed \(Fmt.bytes($0.compressed)); cached files \(Fmt.bytes($0.cached)). Pressure: \($0.pressure == 4 ? "critical" : $0.pressure == 2 ? "warning" : "normal")" + ($0.level.map { ", \($0) % available" } ?? "") + "." + (s.swapText.map { "\nSwap: \($0)." } ?? "") } ?? "")
             tile(.disk, s.disk.map { Compact.bytes($0) + "/s" } ?? "–", h[.disk] ?? [], max: nil,
                  help: "Read \(Fmt.bytes(s.diskRead.map { UInt64($0) }))/s, written \(Fmt.bytes(s.diskWrite.map { UInt64($0) }))/s, every disk.")
             tile(.network, s.net.map { Compact.bytes($0) + "/s" } ?? "–", h[.network] ?? [], max: nil,
                  help: "Received \(Fmt.bytes(s.netIn.map { UInt64($0) }))/s, sent \(Fmt.bytes(s.netOut.map { UInt64($0) }))/s, every interface but loopback.")
+        }
+    }
+
+    /// Clocks, GPU power, swap and thermal pressure in one line under the tiles; parts with no reading are left out.
+    @ViewBuilder
+    private var systemLine: some View {
+        let s = monitor.system
+        let parts: [(String, String, Bool)] = (s.clusters?.cpu ?? []).map { ($0.title, SystemStats.Rates.cluster($0, short: true), false) }
+            + [s.clusters?.gpu.map { ("GPU", SystemStats.Rates.cluster($0, short: true) + (s.clusters?.gpuWatts.map { String(format: " · %.2f W", $0) } ?? ""), false) },
+               s.memory?.swapUsed.map { ("Swap", $0 == 0 ? "none" : Fmt.bytes($0), false) },
+               s.thermal.map { ("Thermal", SystemStats.thermalLevelName($0), $0 >= 1) }].compactMap { $0 }
+        if !parts.isEmpty {
+            HStack(spacing: 12) {
+                ForEach(parts, id: \.0) { p in
+                    HStack(spacing: 3) {
+                        Text(verbatim: p.0).foregroundStyle(.secondary)
+                        Text(verbatim: p.1).monospacedDigit().foregroundStyle(p.2 ? .orange : .primary)
+                    }
+                }
+            }
+            .font(.caption).lineLimit(1)
+            .help("CPU clusters and GPU: average clock while running, and the share of the time spent running, from IOReport. GPU power from IOReport's energy model. Swap from vm.swapusage. Thermal pressure from the kernel's notify(3) level.")
         }
     }
 
@@ -433,6 +566,27 @@ struct AlertRow: View {
     }
 }
 
+/// Thermal or memory pressure, at the top of Needs Attention.
+struct ConditionRow: View {
+    let condition: SystemCondition
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: condition.symbol).foregroundStyle(.orange).frame(width: 16)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(verbatim: condition.title).foregroundStyle(.orange)
+                Text(verbatim: "For \(duration(Date().timeIntervalSince(condition.since)))"
+                     + (condition.peak > condition.level ? " · peak \(condition.kind == .thermal ? SystemStats.thermalLevelName(condition.peak) : "critical")" : ""))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .font(.callout)
+        .padding(.vertical, 2).padding(.horizontal, 4)
+        .help(condition.explanation)
+    }
+}
+
 // MARK: Main window
 
 /// The sidebar's Triage section: the popover's dashboard at full size. Keeps the monitor sampling while
@@ -462,7 +616,7 @@ struct TriageSection: View {
 struct TriageBadge: View {
     @State private var monitor = AmbientMonitor.shared
     var body: some View {
-        let n = monitor.alerts.count
+        let n = monitor.attentionCount
         if n > 0 {
             Spacer()
             Text(verbatim: "\(n)").font(.caption).padding(.horizontal, 6).background(.orange.opacity(0.3), in: Capsule())

@@ -19,6 +19,7 @@ enum AmbientPrefs {
     static let showIn = "app.showIn"
     static let widgets = "menuBar.widgets"            // comma-separated AmbientMetric raw values
     static let widgetGraphs = "menuBar.graphs"
+    static let widgetColors = "menuBar.colors"
     static let interval = "ambient.interval"
     static let alertsOn = "alerts.enabled"
     static let cpu = "alerts.cpu"                     // percent of one core
@@ -27,14 +28,15 @@ enum AmbientPrefs {
     static let netMB = "alerts.netMB"                 // MB/s
     static let seconds = "alerts.seconds"
     static let unresponsive = "alerts.unresponsive"
+    static let system = "alerts.system"               // thermal and memory pressure
     static let ignore = "alerts.ignore"
     static let keepMinutes = "alerts.keepMinutes"
     static let thirdPartyOnly = "triage.thirdPartyOnly"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
-            showIn: ShowIn.both.rawValue, widgets: "cpu,memory", widgetGraphs: true, interval: 3.0,
-            alertsOn: true, cpu: 80.0, gpu: 60.0, diskMB: 50.0, netMB: 10.0, seconds: 30.0, unresponsive: true,
+            showIn: ShowIn.both.rawValue, widgets: "cpu,memory", widgetGraphs: true, widgetColors: true, interval: 3.0,
+            alertsOn: true, cpu: 80.0, gpu: 60.0, diskMB: 50.0, netMB: 10.0, seconds: 30.0, unresponsive: true, system: true,
             ignore: "", keepMinutes: 10.0, thirdPartyOnly: true,
         ])
     }
@@ -83,7 +85,7 @@ enum AmbientMetric: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .cpu: p.cpu
         case .gpu: p.gpu
-        case .memory: p.footprint.map(Double.init)
+        case .memory: p.footprint.map { Double($0) }   // not .map(Double.init): that picks init(bitPattern:) for UInt64
         case .disk: p.disk
         case .network: p.net
         }
@@ -98,6 +100,9 @@ enum AmbientMetric: String, CaseIterable, Identifiable, Sendable {
         }
     }
 }
+
+/// The two directions of disk and network traffic, each with its own history for the menu bar's in/out graphs.
+enum IOSeries: Sendable, Hashable { case diskRead, diskWrite, netIn, netOut }
 
 /// One process as the monitor last read it.
 struct AmbientProc: Identifiable, Hashable, Sendable {
@@ -117,6 +122,7 @@ struct AmbientProc: Identifiable, Hashable, Sendable {
     var notResponding = false
     var apple = false
     var isApp = false
+    var uid: uid_t = 0
     var ref: ProcessRef { ProcessRef(pid: pid, start: start.timeIntervalSince1970) }
 }
 
@@ -154,6 +160,40 @@ struct AmbientAlert: Identifiable, Hashable, Sendable {
     var peak: Double
 }
 
+/// A whole-machine condition that slows everything down: thermal pressure (the CPU is being throttled) or
+/// memory pressure (the kernel is compressing, swapping and asking apps to free memory). Live only: it shows
+/// while the condition holds.
+struct SystemCondition: Identifiable, Hashable, Sendable {
+    enum Kind: String, Sendable { case thermal, memory }
+    var id: Kind { kind }
+    var kind: Kind
+    /// The thermal level (1…4) or the memory pressure level (2 warning, 4 critical) now, and the highest since.
+    var level: Int32
+    var peak: Int32
+    var since: Date
+
+    var title: String {
+        switch kind {
+        case .thermal: "Thermal pressure: \(SystemStats.thermalLevelName(level))"
+        case .memory: "Memory pressure: \(level >= 4 ? "critical" : "warning")"
+        }
+    }
+    var symbol: String { kind == .thermal ? "thermometer.high" : "memorychip" }
+    var explanation: String {
+        switch kind {
+        case .thermal: "macOS is limiting CPU and GPU clocks to keep the Mac cool, so everything runs slower."
+        case .memory: "The kernel is compressing and swapping memory and asking apps to free some. Top memory lists who holds it."
+        }
+    }
+    /// Thermal levels from moderate, memory pressure from warning.
+    static func level(_ kind: Kind, in r: SystemStats.Rates) -> Int32? {
+        switch kind {
+        case .thermal: r.thermal.flatMap { $0 >= 1 ? $0 : nil }
+        case .memory: r.memory.flatMap { $0.pressure >= 2 ? $0.pressure : nil }
+        }
+    }
+}
+
 /// A process that started or exited while the monitor watched.
 struct AmbientEvent: Identifiable, Hashable, Sendable {
     var id: AmbientProc.Key { proc.key }
@@ -177,9 +217,16 @@ final class AmbientMonitor {
 
     private(set) var system = SystemStats.Rates()
     private(set) var systemHistory: [AmbientMetric: [Double]] = [:]
+    /// Bytes per second, read and written (disk) and received and sent (network), last `historyLength` readings.
+    private(set) var ioHistory: [IOSeries: [Double]] = [:]
     private(set) var procs: [AmbientProc] = []
+    /// The last readings of each running process (ProcHistory.length), for the popover's row graphs.
+    private(set) var procHistory: [AmbientProc.Key: ProcHistory] = [:]
     private(set) var top: [AmbientMetric: [AmbientProc]] = [:]
     private(set) var alerts: [AmbientAlert] = []
+    private(set) var conditions: [SystemCondition] = []
+    /// What the menu bar's warning sign and the Triage badge count.
+    var attentionCount: Int { alerts.count + conditions.count }
     private(set) var cleared: [AmbientAlert] = []
     private(set) var launched: [AmbientEvent] = []
     private(set) var ended: [AmbientEvent] = []
@@ -241,9 +288,12 @@ final class AmbientMonitor {
                 self.lastMillis = ms
                 self.system = out.system
                 self.systemHistory = done.systemHistory
+                self.ioHistory = done.ioHistory
                 self.procs = out.procs
+                self.procHistory = done.history
                 self.top = out.top
                 self.alerts = out.alerts
+                self.conditions = out.conditions
                 self.cleared = done.cleared
                 self.launched = done.launched
                 self.ended = done.ended
@@ -262,6 +312,7 @@ final class AmbientMonitor {
         var cpu = 80.0, gpu = 60.0, disk = 50e6, net = 10e6
         var seconds = 30.0
         var unresponsive = true
+        var system = true
         var ignore: Set<String> = []
         var keep = 600.0
         var thirdPartyOnly = true
@@ -272,6 +323,7 @@ final class AmbientMonitor {
                             cpu: d.double(forKey: AmbientPrefs.cpu), gpu: d.double(forKey: AmbientPrefs.gpu),
                             disk: d.double(forKey: AmbientPrefs.diskMB) * 1e6, net: d.double(forKey: AmbientPrefs.netMB) * 1e6,
                             seconds: d.double(forKey: AmbientPrefs.seconds), unresponsive: d.bool(forKey: AmbientPrefs.unresponsive),
+                            system: d.bool(forKey: AmbientPrefs.system),
                             ignore: Set((d.string(forKey: AmbientPrefs.ignore) ?? "").split(separator: ",")
                                 .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }),
                             keep: d.double(forKey: AmbientPrefs.keepMinutes) * 60,
@@ -300,6 +352,7 @@ final class AmbientMonitor {
         var procs: [AmbientProc]
         var top: [AmbientMetric: [AmbientProc]]
         var alerts: [AmbientAlert]
+        var conditions: [SystemCondition]
     }
 
     struct Streak: Sendable {
@@ -330,8 +383,11 @@ final class AmbientMonitor {
         var stable: [AmbientProc.Key: Stable] = [:]
         var lastSystem: SystemStats?
         var systemHistory: [AmbientMetric: [Double]] = [:]
+        var ioHistory: [IOSeries: [Double]] = [:]
         var lastProcs: [AmbientProc.Key: AmbientProc] = [:]
+        var history: [AmbientProc.Key: ProcHistory] = [:]
         var streaks: [AmbientAlert.ID: Streak] = [:]
+        var conditions: [SystemCondition.Kind: SystemCondition] = [:]
         var cleared: [AmbientAlert] = []
         var launched: [AmbientEvent] = []
         var ended: [AmbientEvent] = []
@@ -387,6 +443,7 @@ final class AmbientMonitor {
             }
             let app = input.apps[k.pid]
             var a = AmbientProc(key: key, pid: k.pid, start: k.start, name: app?.name ?? st.name, path: st.path)
+            a.uid = k.uid
             if let c {
                 samples[key] = c
                 if let b = tr.samples[key], c.at > b.at {
@@ -405,7 +462,7 @@ final class AmbientMonitor {
         }
 
         // System totals and their history.
-        var sysRates = SystemStats.Rates(gpuPercent: sys.gpuPercent, memory: sys.memory)
+        var sysRates = SystemStats.Rates(gpuPercent: sys.gpuPercent, gpu: sys.gpu, memory: sys.memory, thermal: sys.thermal)
         if let last = tr.lastSystem { sysRates = sys.rates(since: last) }
         tr.lastSystem = sys
         if tr.ticks > 0 {
@@ -419,6 +476,15 @@ final class AmbientMonitor {
             push(.cpu, sysRates.cpuPercent); push(.gpu, sysRates.gpuPercent)
             push(.memory, sysRates.memory.map { $0.usedFraction * 100 })
             push(.disk, sysRates.disk); push(.network, sysRates.net)
+            func push(_ k: IOSeries, _ v: Double?) {
+                guard let v else { return }
+                var h = tr.ioHistory[k] ?? []
+                h.append(v)
+                if h.count > historyLength { h.removeFirst(h.count - historyLength) }
+                tr.ioHistory[k] = h
+            }
+            push(.diskRead, sysRates.diskRead); push(.diskWrite, sysRates.diskWrite)
+            push(.netIn, sysRates.netIn); push(.netOut, sysRates.netOut)
         }
 
         // Top consumers per metric.
@@ -498,11 +564,30 @@ final class AmbientMonitor {
         tr.cleared = Array(tr.cleared.filter { ($0.until ?? date) > horizon }.prefix(50))
         live.sort { ($0.kind == .notResponding ? 0 : 1, $0.since) < ($1.kind == .notResponding ? 0 : 1, $1.since) }
 
+        // Thermal and memory pressure: shown from the first reading at that level until it drops back.
+        var conditions: [SystemCondition] = []
+        for kind in [SystemCondition.Kind.thermal, .memory] {
+            guard s.alertsOn, s.system, let level = SystemCondition.level(kind, in: sysRates) else { tr.conditions[kind] = nil; continue }
+            var c = tr.conditions[kind] ?? SystemCondition(kind: kind, level: level, peak: level, since: date)
+            c.level = level
+            c.peak = max(c.peak, level)
+            tr.conditions[kind] = c
+            conditions.append(c)
+        }
+
         tr.samples = samples
         tr.stable = stable
         tr.lastProcs = byKey
+        var hist: [AmbientProc.Key: ProcHistory] = [:]
+        hist.reserveCapacity(procs.count)
+        for p in procs {
+            var h = tr.history[p.key] ?? ProcHistory()
+            h.append(p)
+            hist[p.key] = h
+        }
+        tr.history = hist
         tr.ticks += 1
-        return Output(system: sysRates, procs: procs, top: top, alerts: live)
+        return Output(system: sysRates, procs: procs, top: top, alerts: live, conditions: conditions)
     }
 }
 
@@ -540,7 +625,17 @@ extension AmbientMonitor {
                          sys.memory.map { Fmt.bytes($0.used) } ?? "—", Fmt.bytes(sys.disk.map { UInt64($0) }),
                          Fmt.bytes(sys.net.map { UInt64($0) }),
                          out.procs.filter(\.notResponding).map(\.name).joined(separator: ", ")))
+            let mem = sys.memory, cl = sys.clusters
+            print("         swap " + Fmt.bytes(mem?.swapUsed) + " of " + Fmt.bytes(mem?.swapTotal) + ", available \(mem?.level.map { "\($0) %" } ?? "—")"
+                  + ", thermal " + (sys.thermal.map(SystemStats.thermalLevelName) ?? "—")
+                  + " | " + (cl?.cpu ?? []).map { "\($0.kind) \($0.mhz.map { String(format: "%.0f MHz", $0) } ?? "idle/—") \(String(format: "%.0f%%", $0.active * 100))" }.joined(separator: ", ")
+                  + " | GPU " + (cl?.gpu.map { "\($0.mhz.map { String(format: "%.0f MHz", $0) } ?? "idle/—") \(String(format: "%.0f%%", $0.active * 100))" } ?? "—")
+                  + (cl?.gpuWatts.map { String(format: " %.2f W", $0) } ?? "")
+                  + " renderer \(sys.gpu?.renderer.map { String(format: "%.0f%%", $0) } ?? "—") tiler \(sys.gpu?.tiler.map { String(format: "%.0f%%", $0) } ?? "—") mem " + Fmt.bytes(sys.gpu?.memoryInUse))
+            for c in out.conditions { print("         CONDITION \(c.title) since \(Int(Date().timeIntervalSince(c.since))) s") }
             if let t = out.top[.cpu]?.first { print("         top cpu: \(t.name) (\(t.pid)) \(AmbientMetric.cpu.format(t.cpu ?? 0))") }
+            if let t = out.top[.memory]?.first { print("         top memory: \(t.name) (\(t.pid)) \(AmbientMetric.memory.format(Double(t.footprint ?? 0)))") }
+            print("         footprints: \(out.procs.filter { ($0.footprint ?? 0) > 0 }.count) of \(out.procs.count) nonzero, \(out.procs.filter { $0.footprint == nil }.count) nil")
             for a in out.alerts { print("         ALERT \(a.kind.title): \(a.proc.name) (\(a.proc.pid)) now \(a.kind.metric?.format(a.current) ?? "") peak \(a.kind.metric?.format(a.peak) ?? "") for \(Int(Date().timeIntervalSince(a.since))) s") }
             Thread.sleep(forTimeInterval: interval)
         }
@@ -553,5 +648,32 @@ extension AmbientMonitor {
                          w.reduce(0, +) / Double(w.count), w.max()!, c.reduce(0, +) / Double(c.count),
                          c.reduce(0, +) / Double(c.count) / (interval * 1000) * 100, interval))
         }
+    }
+}
+
+/// A process's last readings, oldest first; Float to keep ~650 processes × 5 series small.
+struct ProcHistory: Sendable {
+    static let length = 30
+    var cpu: [Float] = [], gpu: [Float] = [], memory: [Float] = [], disk: [Float] = [], network: [Float] = []
+
+    mutating func append(_ p: AmbientProc) {
+        func push(_ a: inout [Float], _ v: Double?) {
+            a.append(Float(v ?? 0))
+            if a.count > Self.length { a.removeFirst(a.count - Self.length) }
+        }
+        push(&cpu, p.cpu); push(&gpu, p.gpu); push(&memory, p.footprint.map { Double($0) })
+        push(&disk, p.disk); push(&network, p.net)
+    }
+
+    func values(_ m: AmbientMetric) -> [Double] {
+        let a: [Float]
+        switch m {
+        case .cpu: a = cpu
+        case .gpu: a = gpu
+        case .memory: a = memory
+        case .disk: a = disk
+        case .network: a = network
+        }
+        return a.map { Double($0) }
     }
 }

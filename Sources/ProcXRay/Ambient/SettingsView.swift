@@ -78,7 +78,7 @@ private struct GeneralSettings: View {
                 ForEach([1.0, 2, 3, 5, 10], id: \.self) { Text("every \(Int($0)) s").tag($0) }
             }
             .onChange(of: interval) { _, _ in AmbientMonitor.shared.update() }
-            Text("How often the menu bar, its popover and the alerts read the system. Each reading costs ~8 ms of CPU (about 0.3 % of one core at every 3 s). The process window refreshes on its own schedule, and only while it's on screen.")
+            Text("How often the menu bar, its popover and the alerts read the system. Each reading costs ~9 ms of CPU (about 0.3 % of one core at every 3 s). The process window refreshes on its own schedule, and only while it's on screen.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
@@ -88,6 +88,7 @@ private struct GeneralSettings: View {
 private struct MenuBarSettings: View {
     @AppStorage(AmbientPrefs.widgets) private var widgets = "cpu,memory"
     @AppStorage(AmbientPrefs.widgetGraphs) private var graphs = true
+    @AppStorage(AmbientPrefs.widgetColors) private var colors = true
     @State private var monitor = AmbientMonitor.shared
 
     private func binding(_ m: AmbientMetric) -> Binding<Bool> {
@@ -102,7 +103,10 @@ private struct MenuBarSettings: View {
         Form {
             SwiftUI.Section("Widgets") {
                 ForEach(AmbientMetric.allCases) { m in Toggle(m.title, isOn: binding(m)) }
-                Toggle("Graphs next to CPU, GPU and memory", isOn: $graphs)
+                Toggle("Graphs", isOn: $graphs)
+                Toggle("Colored graphs", isOn: $colors).disabled(!graphs)
+                Text("CPU green, GPU purple, memory blue (orange under memory pressure, red when critical). Disk and network: read and received in blue above the middle, written and sent in red below. Off: one color, like the menu bar's icons.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             SwiftUI.Section("Preview") {
                 HStack {
@@ -111,8 +115,8 @@ private struct MenuBarSettings: View {
                     if list.isEmpty {
                         Image(systemName: "waveform.path.ecg")
                     } else {
-                        MenuBarWidgets(metrics: list, alert: !monitor.alerts.isEmpty, graphs: graphs, system: monitor.system,
-                                       history: monitor.systemHistory, ink: .primary)
+                        MenuBarWidgets(metrics: list, alert: monitor.attentionCount > 0, graphs: graphs, system: monitor.system,
+                                       history: monitor.systemHistory, io: monitor.ioHistory, ink: .primary, colored: colors && graphs)
                     }
                     Spacer()
                 }
@@ -133,6 +137,7 @@ private struct AlertSettings: View {
     @AppStorage(AmbientPrefs.netMB) private var net = 10.0
     @AppStorage(AmbientPrefs.seconds) private var seconds = 30.0
     @AppStorage(AmbientPrefs.unresponsive) private var unresponsive = true
+    @AppStorage(AmbientPrefs.system) private var system = true
     @AppStorage(AmbientPrefs.ignore) private var ignore = ""
     @AppStorage(AmbientPrefs.keepMinutes) private var keep = 10.0
     @AppStorage(AmbientPrefs.thirdPartyOnly) private var thirdPartyOnly = true
@@ -154,6 +159,9 @@ private struct AlertSettings: View {
                 }
                 Toggle("Apps that stop responding", isOn: $unresponsive)
                 Text("WindowServer decides when an app is hung (Activity Monitor's \"Not Responding\"), after about 15–20 s without handling events; the alert follows at once.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Thermal and memory pressure", isOn: $system)
+                Text("Shown while macOS throttles the CPU to keep cool (thermal pressure moderate or higher) or memory runs short (memory pressure warning or critical), with no wait.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .disabled(!on)

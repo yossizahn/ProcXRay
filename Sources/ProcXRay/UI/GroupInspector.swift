@@ -98,7 +98,7 @@ struct GroupInspectorView: View {
 
     /// Mach-voucher (BANK) accounting summed across the group; nil when every member's totals are zero.
     private func voucherRows(_ ms: [ProcInfo]) -> [(String, String, String)]? {
-        let secs: (UInt64?) -> Double? = { $0.map(Double.init) }
+        let secs: (UInt64?) -> Double? = { $0.map { Double($0) } }
         let sCpu = sum(ms) { secs($0.counters?.servicedCpuNanos) }, bCpu = sum(ms) { secs($0.counters?.billedCpuNanos) }
         let sNrg = sum(ms) { secs($0.counters?.servicedEnergyNJ) }, bNrg = sum(ms) { secs($0.counters?.billedEnergyNJ) }
         guard [sCpu, bCpu, sNrg, bNrg].contains(where: { ($0 ?? 0) > 0 }) else { return nil }
@@ -181,7 +181,7 @@ struct GroupInspectorView: View {
              bytes(sum(ms) { $0.counters?.logicalWrites.map { Double($0) } })),
         ])
         UsageTab.networkSection(summedHistory(ms, \.network), inRate: sum(ms) { $0.netIn }, outRate: sum(ms) { $0.netOut },
-                                inTotal: sum(ms) { $0.netInTotal.map(Double.init) }, outTotal: sum(ms) { $0.netOutTotal.map(Double.init) },
+                                inTotal: sum(ms) { $0.netInTotal.map { Double($0) } }, outTotal: sum(ms) { $0.netOutTotal.map { Double($0) } },
                                 start: ms.map(\.start).min())
         UsageTab.section("Energy and wakeups", "bolt", summedHistory(ms, \.power), format: wattsFormat, rows: [
             ("CPU energy", sum(ms) { $0.rates?.watts }.map(wattsFormat) ?? "—",

@@ -204,15 +204,11 @@ struct ProcXRayApp: App {
                 Button("Refresh Now") { store.refresh() }.keyboardShortcut("r")
                 Button(store.paused ? "Resume Updates" : "Pause Updates") { store.paused.toggle() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
+                Button("Pick Process by Window…") { WindowPicker.start { AppRouter.shared.show($0) } }
+                    .keyboardShortcut("p", modifiers: [.command, .option])
             }
         }
 
-        WindowGroup("Process", id: ProcessWindow.id, for: ProcessRef.self) { $ref in
-                Button("Pick Process by Window…") { WindowPicker.start { AppRouter.shared.show($0) } }
-                    .keyboardShortcut("p", modifiers: [.command, .option])
-            if $ref.wrappedValue != nil { ProcessWindow(ref: $ref).environment(store) }
-        }
-        .defaultSize(width: 900, height: 640)
         MenuBarExtra(isInserted: Binding(get: { showIn != .dock }, set: { if !$0 { showIn = .dock } })) {
             MenuBarPopover().environment(store)
         } label: {
@@ -224,6 +220,10 @@ struct ProcXRayApp: App {
             SettingsView()
         }
 
+        WindowGroup("Process", id: ProcessWindow.id, for: ProcessRef.self) { $ref in
+            if $ref.wrappedValue != nil { ProcessWindow(ref: $ref).environment(store) }
+        }
+        .defaultSize(width: 900, height: 640)
         .commandsRemoved()   // no "New Process Window": these only open from a process row
     }
 }
@@ -256,20 +256,20 @@ extension FocusedValues {
 }
 
 enum Section: String, CaseIterable, Identifiable {
+    case triage = "Triage"
     case processes = "Processes"
     case ghosts = "Left Behind"
     case apps = "LaunchServices Apps"
     case background = "Background Items"
-    case triage = "Triage"
     case launchd = "launchd Jobs"
     var id: String { rawValue }
     var icon: String {
         switch self {
+        case .triage: "stethoscope"
         case .processes: "cpu"
         case .ghosts: "figure.walk.departure"
         case .apps: "app.badge"
         case .background: "gearshape.2"
-        case .triage: "stethoscope"
         case .launchd: "bolt.horizontal"
         }
     }
@@ -293,11 +293,11 @@ struct ContentView: View {
                 HStack {
                     Label(s.rawValue, systemImage: s.icon)
                     Spacer()
+                    if s == .triage { TriageBadge() }
                     if s == .ghosts, store.ghostCount > 0 {
                         Text(verbatim: "\(store.ghostCount)").font(.caption).padding(.horizontal, 6)
                             .background(.orange.opacity(0.3), in: Capsule())
                     }
-                    if s == .triage { TriageBadge() }
                 }.tag(s)
             }
             .navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 300)
@@ -310,14 +310,14 @@ struct ContentView: View {
                 .font(.caption).foregroundStyle(.secondary).padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .onChange(of: AppRouter.shared.reveal) { _, r in if r != nil { savedSection = .processes } }
         } detail: {
             switch savedSection {
+            case .triage: TriageSection()
             case .processes: ProcessesView()
             case .ghosts: GhostsView()
-            .onChange(of: AppRouter.shared.reveal) { _, r in if r != nil { savedSection = .processes } }
             case .apps: AppsView()
             case .background: BackgroundItemsView()
-            case .triage: TriageSection()
             case .launchd: LaunchdView()
             }
         }
