@@ -19,6 +19,8 @@ struct LSApp: Identifiable, Hashable, Sendable {
     var relatedCoalitionIDs: [UInt64] = []
     var relatedCoalitionPIDs: [pid_t] = []   // e.g. helpers left over from a previous instance
     var parentASN: String?
+    /// The parent's ASN ("ASN:0x0-0x1001"), to find it among the apps.
+    var parentASNID: String?
     var stateTags: [String] = []      // e.g. "exited-with-subordinates", "!signalled"
     var raw: String
 
@@ -60,7 +62,11 @@ enum LSAppInfo {
                 c.relatedCoalitionIDs = numbers(in: rest, after: "relatedCoalitionIDs:")
                 c.relatedCoalitionPIDs = numbers(in: rest, after: "relatedCoalitionPIDs:")
             }
-            else if t.hasPrefix("parentASN=") { c.parentASN = quoted(t, "parentASN=") }
+            else if t.hasPrefix("parentASN=") {
+                c.parentASN = quoted(t, "parentASN=")
+                if let r = t.range(of: #"ASN:0x[0-9a-fA-F]+-0x[0-9a-fA-F]+"#, options: .regularExpression) { c.parentASNID = String(t[r]) }
+                if c.parentASN?.hasPrefix("ASN:") == true { c.parentASN = nil }   // a parent with no name
+            }
             else if t.hasPrefix("pid = ") {
                 let parts = t.split(separator: " ")
                 if parts.count > 2 { c.pid = pid_t(parts[2]) }
@@ -290,11 +296,13 @@ enum Launchd {
         return nil
     }
 
+    /// `launchctl print` for a label, trying the domains a job of yours or the system's can be in: gui (agents of
+    /// the login session), user (agents and XPC services outside it, e.g. CoreSimulator's), then system.
     static func printJob(_ label: String) -> String {
-        let domain = "gui/\(getuid())/\(label)"
-        let out = Shell.run("/bin/launchctl", ["print", domain], timeout: 10)
-        if out.contains("Could not find service") {
-            return Shell.run("/bin/launchctl", ["print", "system/\(label)"], timeout: 10)
+        var out = ""
+        for domain in ["gui/\(getuid())", "user/\(getuid())", "system"] {
+            out = Shell.run("/bin/launchctl", ["print", "\(domain)/\(label)"], timeout: 10)
+            if !out.contains("Could not find service") { return out }
         }
         return out
     }

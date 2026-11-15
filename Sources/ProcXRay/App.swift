@@ -119,6 +119,18 @@ struct ProcXRayApp: App {
             Bench.machFile(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--attribution") {
+            // --attribution <pid> [launchd label]: the Origin tab's Attribution lines for one process.
+            let a = Array(CommandLine.arguments[(i + 1)...])
+            guard let pid = a.first.flatMap({ pid_t($0) }) else { print("usage: --attribution <pid> [label]"); exit(2) }
+            LaunchMechanism.bench(pid: pid, label: a.count > 1 ? a[1] : nil)
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--launch-watch") {
+            // --launch-watch <seconds>: app launch attribution (LaunchWatcher) without the UI.
+            LaunchWatcher.bench(seconds: CommandLine.arguments.count > i + 1 ? Double(CommandLine.arguments[i + 1]) ?? 20 : 20)
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--helper-call") {
             Bench.helperCall(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
@@ -338,6 +350,26 @@ struct ContentView: View {
             case .background: BackgroundItemsView()
             case .launchd: LaunchdView()
             }
+        }
+        .modifier(InspectAtLaunch())
+    }
+}
+
+/// `PROCXRAY_INSPECT=<pid or name>` in the environment opens that process's inspector once it's in a snapshot
+/// (a name waits for a process of that name to start):
+/// for checking an inspector tab without clicking through the UI (the tab is the last one used, the
+/// `inspectorTab` default).
+private struct InspectAtLaunch: ViewModifier {
+    @Environment(Store.self) var store
+    @Environment(\.openWindow) private var openWindow
+    @State private var done = false
+
+    func body(content: Content) -> some View {
+        content.onChange(of: store.procs.count) { _, n in
+            guard !done, n > 0, let s = ProcessInfo.processInfo.environment["PROCXRAY_INSPECT"],
+                  let p = pid_t(s).flatMap({ store.procs[$0] }) ?? store.procs.values.first(where: { $0.name == s }) else { return }
+            done = true
+            AppRouter.inspect(ProcessRef(pid: p.pid, start: p.start.timeIntervalSince1970), openWindow)
         }
     }
 }

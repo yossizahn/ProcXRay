@@ -730,6 +730,9 @@ struct OriginTab: View {
     @State private var loadedKey: String?
     @State private var job: (title: String, text: String)?
     @State private var procinfo: (title: String, text: String)?
+    @State private var envAttr: EnvAttribution?
+    /// launchd's attribution record for the job: nil until looked up, then the result (or none).
+    @State private var launchdAttr: (key: String, result: LaunchdAttribution.Result?)?
 
     var body: some View {
         let p = proc
@@ -737,6 +740,16 @@ struct OriginTab: View {
             VStack(alignment: .leading, spacing: 12) {
                 installedBy(p)
                 launchedBy(p)
+                attribution(p)
+                    // launchd's attribution record costs ~2 s (see LaunchdAttribution): once per job shown, not per refresh.
+                    .task(id: "\(p.key)|\(p.launchdLabel ?? "")") {
+                        guard !exited, p.ppid == 1, let label = p.launchdLabel, !label.hasPrefix("application."),
+                              launchdAttr?.key != p.key + label else { return }
+                        let key = p.key + label
+                        let r = await Task.detached { LaunchdAttribution.lookup(label: label) }.value
+                        guard !Task.isCancelled else { return }
+                        launchdAttr = (key, r)
+                    }
                 Card(title: "Parent chain", systemImage: "arrow.up.to.line") {
                     let chain = ancestors(p)
                     if chain.isEmpty { Text("No running parent.").foregroundStyle(.secondary) } else { ChipFlow(procs: chain) }
@@ -753,17 +766,19 @@ struct OriginTab: View {
         // Reload when the process registers with LaunchServices or launchd, execs, or on a manual refresh.
         .task(id: "\(p.codeKey)|\(p.launchdLabel ?? "")|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
             guard !exited else { return }   // keep what was shown; the pid may be someone else's now
-            if loadedKey != p.key { job = nil; procinfo = nil }
-            let label = p.launchdLabel, pid = p.pid, key = p.key
+            if loadedKey != p.key { job = nil; procinfo = nil; envAttr = nil }
+            let label = p.launchdLabel, pid = p.pid, key = p.key, launchdChild = p.ppid == 1
             let helper = store.helperState.isRunning
-            let (j, pi) = await Task.detached { () -> ((String, String)?, (String, String)?) in
+            let (j, pi, ea) = await Task.detached { () -> ((String, String)?, (String, String)?, EnvAttribution?) in
                 let j = label.map { ("launchctl print \($0)", Launchd.printJob($0)) }
                 let pi = helper ? ("launchctl procinfo \(pid) (as root via helper)",
                                    HelperClient.shared.run(.launchctlProcinfo, pid: pid) ?? "helper did not answer") : nil
-                return (j, pi)
+                // Only for launchd's children: for any other process the parent chain already says who started it.
+                let ea = launchdChild ? EnvAttribution.read(pid) : nil
+                return (j, pi, ea)
             }.value
             guard !Task.isCancelled else { return }
-            job = j; procinfo = pi; loadedKey = key
+            job = j; procinfo = pi; envAttr = ea; loadedKey = key
         }
     }
 
@@ -870,6 +885,127 @@ struct OriginTab: View {
                     }
                 }
             }
+        }
+    }
+
+    // 3. Attribution: how it was launched and who asked, each with where that comes from.
+    @ViewBuilder private func attribution(_ p: ProcInfo) -> some View {
+        let record = LaunchWatcher.shared.record(pid: p.pid, start: p.start)
+        let ls = store.lsApps.first { $0.pid == p.pid }
+        let parentApp = ls?.parentASNID.flatMap { id in store.lsApps.first { $0.asn == id } }
+        let env = p.ppid == 1 ? envAttr : nil
+        let jobFacts = job.map { Dictionary(LaunchctlParser.parse($0.text).map { ($0.key, $0.value ?? "") }, uniquingKeysWith: { a, _ in a }) } ?? [:]
+        let mechanisms = LaunchMechanism.describe(ppid: p.ppid, parentName: store.procs[p.ppid]?.name, record: record,
+                                                  parentASN: ls?.parentASN ?? parentApp?.name, env: env, launchdLabel: p.launchdLabel,
+                                                  job: jobFacts)
+        Card(title: "Attribution", systemImage: "point.3.connected.trianglepath.dotted") {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(mechanisms, id: \.self) { m in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: m.how).fontWeight(.medium)
+                        if let d = m.detail { Text(verbatim: d).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+                        sourceLine(m.source, m.confidence)
+                    }
+                }
+                if let r = record, !r.launcher.isEmpty {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Requested by").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        FlowLayout(spacing: 4) {
+                            ForEach(Array(r.launcher.enumerated()), id: \.offset) { i, hop in
+                                if i > 0 { Text("←").foregroundStyle(.tertiary) }
+                                hopChip(hop)
+                            }
+                        }
+                        sourceLine("CoreServicesUIAgent's launch log at \(Fmt.date.string(from: r.at)): launcher pid \(r.launcher[0].pid)"
+                                   + (r.launcherVersion.map { ", pid version \($0)" } ?? "") + "; its parents read the moment the request came in",
+                                   .exact)
+                    }
+                }
+                if let parentApp, let pid = parentApp.pid, let host = store.procs[pid] {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) { Text("Parent app"); ProcessChip(proc: host) }
+                        sourceLine("LaunchServices parentASN \(parentApp.asn)", .exact)
+                    }
+                }
+                if p.ppid == 1, let label = p.launchdLabel, !label.hasPrefix("application.") { launchdAttribution(label, p) }
+                if let e = env, e.fromShell { envRows(e, p) }
+                if mechanisms.isEmpty && record == nil && env == nil {
+                    Text("Nothing records how this process was started.").foregroundStyle(.secondary)
+                }
+                if p.ppid == 1, record == nil {
+                    Text(LaunchWatcher.shared.since.map { "Launches are traced from \(Fmt.date.string(from: $0)) (when Proc X-Ray started); this one wasn't seen." }
+                         ?? "Launch tracing isn't running.")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+            }
+        }
+    }
+
+    /// The app launchd attributes the job to: whose coalition loaded it.
+    @ViewBuilder private func launchdAttribution(_ label: String, _ p: ProcInfo) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let a = launchdAttr, a.key == p.key + label {
+                if let r = a.result {
+                    HStack(spacing: 6) {
+                        Text("Loaded on behalf of")
+                        if let pid = r.leaderPid, let host = store.procs[pid] { ProcessChip(proc: host) }
+                        Text(verbatim: r.bundleID ?? r.name ?? "coalition \(r.coalition)").font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    sourceLine("launchd's attribution record for \(label) (the coalition that loaded it, \(r.coalition)), as launchd logs it when launchservicesd asks; the record itself needs a private entitlement", .exact)
+                } else {
+                    Text("launchd attributes this job to no app's coalition.").foregroundStyle(.secondary)
+                    sourceLine("launchd's attribution record, as launchd logs it when launchservicesd asks (looked up across all app coalitions)", .exact)
+                }
+            } else {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Looking up which app launchd attributes this job to…").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    /// The inherited environment: the Claude Code session, the terminal, the working directory.
+    @ViewBuilder private func envRows(_ e: EnvAttribution, _ p: ProcInfo) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Inherited environment").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if e.claudePid != nil || e.claudeSession != nil {
+                HStack(spacing: 6) {
+                    Text("Claude Code session")
+                    // The session's process, if it's still the same one (started before this process).
+                    if let cp = e.claudePid, let c = store.procs[cp], c.start <= p.start { ProcessChip(proc: c) }
+                    else if let cp = e.claudePid { Text(verbatim: "pid \(cp), no longer running").foregroundStyle(.secondary) }
+                    if let s = e.claudeSession { Text(verbatim: String(s.prefix(8))).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).help(s) }
+                }
+            }
+            if let t = e.terminalName {
+                Text(verbatim: "Terminal: \(t)" + (e.terminalSession.map { " (session \($0.prefix(18)))" } ?? "")).textSelection(.enabled)
+            }
+            if let w = e.pwd { Text(verbatim: "Working directory: \(w)").textSelection(.enabled) }
+            sourceLine("the environment it inherited from whoever asked for it (CLAUDE_PID, CLAUDE_CODE_SESSION_ID, TERM_PROGRAM, PWD); an app passes these on to what it launches in turn", .inferred)
+        }
+    }
+
+    @ViewBuilder private func hopChip(_ hop: LaunchWatcher.Hop) -> some View {
+        if let live = store.procs[hop.pid], live.start == hop.start {
+            ProcessChip(proc: live)
+        } else {
+            Text(verbatim: "\(hop.name) \(hop.pid)").font(.callout)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(.quaternary.opacity(0.5), in: Capsule())
+                .foregroundStyle(.secondary)
+                .help("\(hop.path ?? hop.name): exited")
+        }
+    }
+
+    private func sourceLine(_ s: String, _ c: LaunchMechanism.Confidence) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Text(c.rawValue.uppercased()).font(.system(size: 8, weight: .bold))
+                .padding(.horizontal, 4).padding(.vertical, 1)
+                .foregroundStyle(c == .exact ? Color.green : .orange)
+                .background((c == .exact ? Color.green : .orange).opacity(0.15), in: RoundedRectangle(cornerRadius: 3))
+            Text(verbatim: "Source: " + s).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
         }
     }
 

@@ -431,7 +431,7 @@ final class AmbientMonitor {
             if let known = tr.stable[key] { st = known } else {
                 let p = ProcInfo(pid: k.pid, ppid: k.ppid, pgid: k.pgid, uid: k.uid, user: "", comm: k.comm,
                                  path: Native.path(k.pid), start: k.start, stat: k.stat, pflags: k.flags)
-                st = Stable(path: p.path, name: p.path.map { ($0 as NSString).lastPathComponent } ?? k.comm, apple: SmartTree.isApple(p))
+                st = Stable(path: p.path, name: p.name, apple: SmartTree.isApple(p))
             }
             stable[key] = st
             // One rusage call; the helper's reading for processes of other users.

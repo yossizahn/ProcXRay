@@ -100,9 +100,19 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     /// Key for signing details: pid and start time survive exec, so the running code is part of it.
     /// Without it a process could show an Apple signature while running unsigned code it exec'd.
     var codeKey: String { "\(key):\(cdhash ?? path ?? comm)" }
-    var name: String {
-        if let p = path { return (p as NSString).lastPathComponent }
-        return comm
+    var name: String { ProcInfo.displayName(path: path, comm: comm) }
+
+    /// The executable's file name, or, when that file is named for a version, the folder it's installed in:
+    /// Claude Code runs as ~/.local/share/claude/versions/2.1.325 (the kernel's name for it is "2.1.325" too),
+    /// shown as "claude".
+    static func displayName(path: String?, comm: String) -> String {
+        guard let p = path else { return comm }
+        let base = (p as NSString).lastPathComponent
+        guard base.first?.isNumber == true, base.allSatisfy({ $0.isNumber || $0 == "." }) else { return base }
+        var dir = (p as NSString).deletingLastPathComponent
+        if (dir as NSString).lastPathComponent == "versions" { dir = (dir as NSString).deletingLastPathComponent }
+        let folder = (dir as NSString).lastPathComponent
+        return folder.isEmpty || folder == "/" ? base : folder
     }
     var isZombie: Bool { stat == 5 }
     var isTranslated: Bool { pflags & 0x20000 != 0 }   // P_TRANSLATED (Rosetta)
@@ -310,6 +320,8 @@ final class Store {
     init() {
         // From launch, so the network totals cover everything since the app started.
         NetSampler.shared.startAtLaunch()
+        // From launch, so app launches can be traced to whoever asked for them (`open`, a shell, an agent).
+        LaunchWatcher.shared.start()
         // A dropped helper connection (helper died, disabled, replaced): re-probe right away rather than
         // keep showing it as running until the next probe.
         HelperClient.shared.onConnectionLost = { [weak self] in
