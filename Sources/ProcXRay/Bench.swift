@@ -720,10 +720,24 @@ enum Bench {
             let out = Shell.exec("/usr/bin/codesign", ["-d", "--entitlements", "-", "--xml", path], mergeStderr: false).output
             return out.data(using: .utf8).flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }
         } ?? [:]
+        let proc = Native.process(pid).map { k in
+            ProcInfo(pid: k.pid, ppid: k.ppid, pgid: k.pgid, uid: k.uid, user: "", comm: k.comm,
+                     path: Native.path(k.pid), start: k.start, stat: k.stat, pflags: k.flags)
+        }
         MainActor.assumeIsolated {
+            if let p = proc {
+                let probe = TCCCard(proc: p, responsible: nil, entitlements: ent)
+                let tcc = TCCCard(proc: p, responsible: nil, entitlements: ent, preloaded: TCCGrants.read(clients: probe.clients))
+                    .frame(width: 560).padding(10).background(Color(nsColor: .windowBackgroundColor))
+                writePNG(tcc, dir: dir, name: "tcc-\(pid).png")
+            }
             let view = Card(title: "Sandbox", systemImage: "square.dashed") {
                 Text(SandboxCard.summary(true, entitlements: ent)).fixedSize(horizontal: false, vertical: true)
                 SandboxProbeTable(report: r, entitlements: ent, recheck: {})
+                if let p = proc {
+                    Divider()
+                    SandboxProfileSection(proc: p, preloaded: SandboxProfileInfo.read(pid: pid))
+                }
             }
             .frame(width: 560).padding(10).background(Color(nsColor: .windowBackgroundColor))
             let renderer = ImageRenderer(content: view)
@@ -736,6 +750,18 @@ enum Bench {
             try? png.write(to: url)
             print("  rendered \(url.path) \(Int(img.size.width))x\(Int(img.size.height)) pt")
         }
+    }
+
+    @MainActor private static func writePNG(_ v: some View, dir: String, name: String) {
+        let renderer = ImageRenderer(content: v)
+        renderer.scale = 2
+        guard let img = renderer.nsImage, let tiff = img.tiffRepresentation,
+              let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
+            print("  render failed"); return
+        }
+        let url = URL(fileURLWithPath: dir).appendingPathComponent(name)
+        try? png.write(to: url)
+        print("  rendered \(url.path) \(Int(img.size.width))x\(Int(img.size.height)) pt")
     }
 
     /// `ProcXRay --threads <pid>`: the Threads pane's data without the UI, read as the caller (no helper):

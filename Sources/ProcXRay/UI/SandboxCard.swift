@@ -20,6 +20,8 @@ struct SandboxCard: View {
                         Task { await recheck() }
                     }
                 }
+                Divider()
+                SandboxProfileSection(proc: proc)
             }
         }
         .task(id: proc.key) { await recheck() }
@@ -108,5 +110,116 @@ struct SandboxProbeTable: View {
         case .denied: Label("denied", systemImage: "xmark.circle.fill").foregroundStyle(.red)
         case .unknown: Text("—").foregroundStyle(.secondary).help("Couldn't be checked.")
         }
+    }
+}
+
+/// The profile it was compiled with: secinitd's cached copy and the inputs it was built from.
+struct SandboxProfileSection: View {
+    let proc: ProcInfo
+    @State private var result: Result<SandboxProfileInfo, SandboxProfileInfo.Failure>?
+
+    /// `preloaded`: the result already read, for rendering without running the task (Bench).
+    init(proc: ProcInfo, preloaded: Result<SandboxProfileInfo, SandboxProfileInfo.Failure>? = nil) {
+        self.proc = proc
+        _result = State(initialValue: preloaded)
+    }
+    @State private var shownSource: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Compiled profile").font(.subheadline.weight(.semibold))
+            switch result {
+            case nil: ProgressView().controlSize(.small)
+            case .failure(let f)?: Text(Self.text(f)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if case .needsFullDiskAccess = f {
+                    Button("Open Full Disk Access settings") { FullDiskAccess.openSettings() }.controlSize(.small)
+                }
+            case .success(let i)?: details(i)
+            }
+        }
+        .task(id: proc.key) {
+            guard result == nil else { return }
+            let pid = proc.pid
+            result = await Task.detached { SandboxProfileInfo.read(pid: pid) }.value
+        }
+    }
+
+    static func text(_ f: SandboxProfileInfo.Failure) -> String {
+        switch f {
+        case .notSandboxed: "Not sandboxed."
+        case .noContainer: "No container, so no cached profile: it runs under a named system profile, one inherited from its parent, or sandbox-exec. macOS doesn't let other processes read those."
+        case .needsFullDiskAccess: "Not readable without Full Disk Access for Proc X-Ray: macOS protects the cache it's kept in."
+        case .unreadable(let p): "The container's metadata couldn't be read (\(p))."
+        case .noCache(let p): "The container's metadata has no cached profile (\(p))."
+        }
+    }
+
+    @ViewBuilder private func details(_ i: SandboxProfileInfo) -> some View {
+        let changed = i.sources.filter(\.changed)
+        Text(summary(i, changed: changed.count)).fixedSize(horizontal: false, vertical: true)
+        if i.compiledByOtherBuild {
+            Label("Compiled by a different libsandbox (\(i.buildID ?? "?")) than this system's (\(i.currentBuildID ?? "?")): it will be rebuilt at next launch.", systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+        }
+        Text("Source files").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(i.sources) { s in
+                HStack(spacing: 6) {
+                    Button(shownSource == s.path ? "Hide" : "Show") { shownSource = shownSource == s.path ? nil : s.path }
+                        .controlSize(.mini)
+                    Text(verbatim: s.path).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                    if s.changed {
+                        Text(s.currentDate == nil ? "gone" : "changed since").font(.caption).foregroundStyle(.orange)
+                            .help("Modified \(s.currentDate?.formatted() ?? "—"); the profile was built from the version of \(s.compiledDate?.formatted() ?? "—").")
+                    }
+                }
+                if shownSource == s.path {
+                    MonoText(text: (try? String(contentsOfFile: s.path, encoding: .utf8)) ?? "Couldn't read \(s.path).")
+                        .frame(height: 260)
+                }
+            }
+        }
+        Text("Parameters").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 2) {
+            ForEach(i.parameters, id: \.0) { k, v in
+                GridRow {
+                    Text(verbatim: k).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                        .help(SandboxProfileInfo.describe(param: k) ?? "")
+                    Text(verbatim: v).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                }
+            }
+        }
+        if !i.redirectedPaths.isEmpty {
+            Text(verbatim: "Redirected into the container: " + i.redirectedPaths.joined(separator: ", "))
+                .font(.caption).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        }
+        if !i.systemImages.isEmpty {
+            DisclosureGroup("Frameworks that added their own rules (\(i.systemImages.count))") {
+                Text(verbatim: i.systemImages.joined(separator: "\n")).font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .font(.caption)
+        }
+        HStack {
+            Text("From secinitd's cache next to the container, written when the app last launched. Folders granted after launch are added on top and don't appear here; the checks above include them.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            Button("Reveal") { NSWorkspace.shared.selectFile(i.metadataPath, inFileViewerRootedAtPath: "") }
+                .controlSize(.small).help(i.metadataPath)
+        }
+    }
+
+    private func summary(_ i: SandboxProfileInfo, changed: Int) -> String {
+        var s = "Built from \(i.sources.count) source file\(i.sources.count == 1 ? "" : "s"), \(i.parameters.count) parameters and \(i.entitlementCount) entitlements"
+        if let n = i.compiledSize { s += "; \(ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file)) compiled" }
+        s += "."
+        if changed > 0 { s += " \(changed) source file\(changed == 1 ? " has" : "s have") changed since." }
+        return s
+    }
+}
+
+enum FullDiskAccess {
+    static func openSettings() {
+        if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") { NSWorkspace.shared.open(u) }
     }
 }
