@@ -39,8 +39,12 @@ struct SyscallRecord: Identifiable, Sendable, Hashable {
     var ret: UInt64 = 0
     var paths: [String] = []
     var state: State = .done
+    /// The user stack at the call (traces with stacks): innermost first, the syscall stub's pc, then its caller.
+    var stack: [UInt64] = []
 
     // Display text, built once (off the main thread) so the table only reads strings.
+    /// The first frame outside libsystem_kernel (the syscall stubs), symbolicated; empty without a stack.
+    var caller = ""
     var argsText = ""
     var resultText = ""
     var failed = false
@@ -69,6 +73,8 @@ struct KdebugEvent: Sendable {
     var fn: UInt32 { debugid & 3 }
 
     static let lostEvents: UInt32 = 0x0702_0008   // TRACE_LOST_EVENTS: the kernel lost events here
+    static let stackHeader: UInt32 = 0x2502_0018  // PERF_STK_UHdr: flags, frame count
+    static let stackData: UInt32 = 0x2502_0010    // PERF_STK_UData: four frames
 
     /// The helper's KdebugTrace.Record layout (the kernel's kd_buf, timestamp in ns since the trace started).
     /// Names come from trace.codes, as ktrace's do.
@@ -242,6 +248,13 @@ struct SyscallDecoder: Sendable {
     private var nextID = 0
     /// Places where the kernel lost events.
     private(set) var gaps = 0
+    /// Traces with stacks: a returned call waits here for its stack, which the kernel samples on the way back to
+    /// user space and so logs after the return, on the same thread.
+    private let stacks: Bool
+    private var held: [UInt64: SyscallRecord] = [:]
+    private var building: [UInt64: (count: Int, words: [UInt64])] = [:]
+
+    init(stacks: Bool = false) { self.stacks = stacks }
 
     /// Completed records, in the order they returned.
     mutating func feed(_ events: [KdebugEvent]) -> [SyscallRecord] {
@@ -251,6 +264,11 @@ struct SyscallDecoder: Sendable {
                 // A call open across the gap may have returned in it: pairing its entry with a later return of the
                 // same call would be wrong, so start over. Returns of calls entered before show as entryMissed.
                 open = [:]; lookups = [:]; gaps += 1
+                out += held.values; held = [:]; building = [:]
+                continue
+            }
+            if stacks && e.cls == 0x25 {
+                stackEvent(e, &out)
                 continue
             }
             if e.cls == 3 && e.subclass == 1 && e.code == 0x24 { lookup(e); continue }
@@ -259,6 +277,8 @@ struct SyscallDecoder: Sendable {
             let mach = e.cls == 1
             switch e.fn {
             case 1:
+                // A new call on the thread: the last one's stack isn't coming.
+                if let h = held.removeValue(forKey: e.thread) { out.append(h) }
                 var r = SyscallRecord(id: nextID, start: e.ts, end: nil, thread: e.thread, mach: mach,
                                       number: e.code, name: Self.name(e.eventname, mach: mach, code: e.code))
                 nextID += 1
@@ -286,12 +306,45 @@ struct SyscallDecoder: Sendable {
                     r.ret = a.count > 1 ? a[1] : 0
                 }
                 SyscallFormat.fill(&r)
-                out.append(r)
+                if stacks {
+                    if let h = held.updateValue(r, forKey: e.thread) { out.append(h) }
+                } else {
+                    out.append(r)
+                }
             default:
                 continue
             }
         }
         return out
+    }
+
+    /// Frames come as the pc, the frame-pointer chain (ending in 0), then the link register at the time, which
+    /// is the stub's caller: a syscall stub is a leaf without a frame of its own, so the chain starts one further
+    /// out. Checked on a test program: stat's pc, LR in leaf(), then middle(), main(), dyld's start.
+    private mutating func stackEvent(_ e: KdebugEvent, _ out: inout [SyscallRecord]) {
+        if e.debugid & ~3 == KdebugEvent.stackHeader {
+            let flags = e.arg.first ?? 0, n = e.arg.count > 1 ? Int(e.arg[1]) : 0
+            building[e.thread] = flags & 1 != 0 && n > 0 && n <= 1024 ? (n, []) : nil   // CALLSTACK_VALID
+            return
+        }
+        guard e.debugid & ~3 == KdebugEvent.stackData, var b = building[e.thread] else { return }
+        b.words += e.arg
+        guard b.words.count >= b.count else { building[e.thread] = b; return }
+        building[e.thread] = nil
+        let f = Array(b.words.prefix(b.count))
+        var frames = [f[0]]
+        if f.count > 1, let lr = f.last, lr != 0 { frames.append(lr) }
+        if f.count > 2 { frames += f[1..<(f.count - 1)].filter { $0 != 0 } }
+        guard var r = held.removeValue(forKey: e.thread) else { return }
+        r.stack = frames
+        out.append(r)
+    }
+
+    /// Calls that returned and were still waiting for a stack: due when the trace ends.
+    mutating func flush() -> [SyscallRecord] {
+        let r = Array(held.values)
+        held = [:]
+        return r
     }
 
     /// Calls still inside the kernel; shown when the trace stops.

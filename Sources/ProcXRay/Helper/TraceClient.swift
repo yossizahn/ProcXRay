@@ -18,8 +18,8 @@ final class HelperTraceSession: @unchecked Sendable {
     deinit { connection.invalidate() }
 
     /// The data format when the trace started, else why not.
-    func start(pid: Int32) -> Result<SyscallTraceConfig.Format, TraceStartError> {
-        guard let (err, f) = call(timeout: 10, { p, done in p.traceStart(pid: pid) { done(($0, $1)) } }) else {
+    func start(pid: Int32, stacks: Bool = false) -> Result<SyscallTraceConfig.Format, TraceStartError> {
+        guard let (err, f) = call(timeout: 10, { p, done in p.traceStart(pid: pid, stacks: stacks) { done(($0, $1)) } }) else {
             return .failure(TraceStartError(message: "The helper did not answer."))
         }
         if let err { return .failure(TraceStartError(message: err)) }
@@ -30,8 +30,11 @@ final class HelperTraceSession: @unchecked Sendable {
     }
 
     /// nil when the helper can't be reached any more.
-    func read() -> (Data, Bool, String)? {
-        call(timeout: 10) { p, done in p.traceRead { d, r, n in done((d, r, n)) } }
+    /// (records, still running, notes, regions behind new stack frames).
+    func read() -> (Data, Bool, String, [StackRegion])? {
+        call(timeout: 10) { p, done in
+            p.traceRead { d, r, n, g in done((d, r, n, g.isEmpty ? [] : (try? JSONDecoder().decode([StackRegion].self, from: g)) ?? [])) }
+        }
     }
 
     func stop() {

@@ -177,28 +177,55 @@ enum Bench {
             return
         }
         if what == "trace" {
-            // trace <pid> <seconds>: through the helper over XPC, as SyscallTracer does.
+            // trace <pid> <seconds> [stacks]: through the helper over XPC, as SyscallTracer does.
             let secs = args.dropFirst(2).first.flatMap { Double($0) } ?? 3
+            let stacks = args.contains("stacks")
             let s = HelperTraceSession()
             let t0 = Date()
             let format: SyscallTraceConfig.Format
-            switch s.start(pid: pid) {
+            switch s.start(pid: pid, stacks: stacks) {
             case .success(let f): format = f
             case .failure(let e): print("trace: \(e.message)"); return
             }
             print(String(format: "trace: format %@, started in %.0f ms", "\(format)", -t0.timeIntervalSinceNow * 1000))
-            var dec = SyscallDecoder(); var recs = 0, events = 0, stopped = false
+            var dec = SyscallDecoder(stacks: stacks); var recs = 0, events = 0, stopped = false
             var names: [String: Int] = [:]
-            while let (d, running, notes) = s.read() {
+            let symbols = StackSymbols()
+            var withStack = 0, callers: [String: Int] = [:], examples: [String: SyscallRecord] = [:]
+            func take(_ rs: [SyscallRecord]) {
+                for r in rs {
+                    recs += 1; names[r.name, default: 0] += 1
+                    guard !r.stack.isEmpty else { continue }
+                    withStack += 1
+                    let c = symbols.caller(r.stack)
+                    callers["\(r.name) ← \(c)", default: 0] += 1
+                    if examples[r.name] == nil || examples.count < 400 { examples["\(r.name)#\(examples.count)"] = r }
+                }
+            }
+            while let (d, running, notes, regions) = s.read() {
+                symbols.add(regions)
                 if !stopped && -t0.timeIntervalSinceNow > secs { s.stop(); stopped = true }
                 if !notes.isEmpty { print("note: " + notes.trimmingCharacters(in: .whitespacesAndNewlines)) }
                 let evs = format == .kdebug ? KdebugEvent.decodeRaw(d) : KdebugEvent.decode(d).events
                 events += evs.count
-                for r in dec.feed(evs) { recs += 1; names[r.name, default: 0] += 1 }
+                take(dec.feed(evs))
                 if !running { break }
                 if d.count < SyscallTraceConfig.maxRead / 2 { usleep(250_000) }
             }
+            take(dec.flush())
             print("trace: \(events) events, \(recs) records, \(dec.gaps) gaps; top: " + names.sorted { $0.value > $1.value }.prefix(6).map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+            if stacks {
+                print("stacks: \(withStack) of \(recs) records")
+                // Distinct frames, and how many got a name, by where they live.
+                var seen: [UInt64: StackSymbols.Frame] = [:]
+                for r in examples.values { for f in symbols.frames(r.stack) { seen[f.address] = f } }
+                print("  example frames: \(seen.count), named \(seen.values.filter { $0.symbol != nil }.count), image only \(seen.values.filter { $0.symbol == nil && !$0.image.isEmpty }.count), unknown \(seen.values.filter { $0.image.isEmpty }.map { "0x" + String($0.address, radix: 16) }.joined(separator: " "))")
+                for (k, n) in callers.sorted(by: { $0.value > $1.value }).prefix(8) { print("  \(n)  \(k)") }
+                for (name, r) in examples.sorted(by: { $0.key < $1.key }).prefix(4) {
+                    print("  \(name):")
+                    for f in symbols.frames(r.stack) { print("      " + f.text) }
+                }
+            }
             return
         }
         if what == "threads" {

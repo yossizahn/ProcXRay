@@ -144,7 +144,7 @@ enum HelperDaemon {
         private var trace: TraceSource?
         private var traceRunning: Bool { trace.map { $0.read(max: 0).1 } ?? false }
 
-        func traceStart(pid: Int32, reply: @escaping (String?, Int) -> Void) {
+        func traceStart(pid: Int32, stacks: Bool, reply: @escaping (String?, Int) -> Void) {
             guard let (path, args) = SyscallTraceConfig.argv(pid: pid) else { reply("helper: rejected pid \(pid)", 0); return }
             guard mayInspect(pid) else { reply("Only an admin user can trace another user's processes.", 0); return }
             traceLock.lock(); defer { traceLock.unlock() }
@@ -153,7 +153,7 @@ enum HelperDaemon {
             // for any reason but another tracer holding kdebug (which ktrace would hit too).
             var note = ""
             if NativeTools.enabled {
-                switch KdebugTrace.start(pid: pid, maxPending: SyscallTraceConfig.maxPending, maxSeconds: SyscallTraceConfig.maxSeconds) {
+                switch KdebugTrace.start(pid: pid, stacks: stacks, maxPending: SyscallTraceConfig.maxPending, maxSeconds: SyscallTraceConfig.maxSeconds) {
                 case .success(let t):
                     trace = t
                     reply(nil, SyscallTraceConfig.Format.kdebug.rawValue)
@@ -172,11 +172,12 @@ enum HelperDaemon {
             reply(nil, SyscallTraceConfig.Format.ndjson.rawValue)
         }
 
-        func traceRead(reply: @escaping (Data, Bool, String) -> Void) {
+        func traceRead(reply: @escaping (Data, Bool, String, Data) -> Void) {
             traceLock.lock(); let t = trace; traceLock.unlock()
-            guard let t else { reply(Data(), false, ""); return }
+            guard let t else { reply(Data(), false, "", Data()); return }
             let (d, running, notes) = t.read(max: SyscallTraceConfig.maxRead)
-            reply(d, running, notes)
+            // After the read: the regions for every frame in `d` were queued before its records were.
+            reply(d, running, notes, t.newRegions())
         }
 
         func traceStop(reply: @escaping () -> Void) {

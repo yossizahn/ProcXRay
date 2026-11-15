@@ -16,20 +16,26 @@ final class SyscallTracer {
     /// Bumped on every change to `records`, so views can key recomputation on one number.
     private(set) var revision = 0
     private var stopFlag: Shell.Cancel?
+    /// Whether the current trace asked for stacks, and the names for their frames.
+    private(set) var withStacks = false
+    private(set) var symbols = StackSymbols()
 
     static let cap = 200_000
 
     var isActive: Bool { phase == .starting || phase == .running || phase == .stopping }
 
-    func start(pid: Int32, start: Date) {
+    func start(pid: Int32, start: Date, stacks: Bool) {
         guard !isActive else { return }
         records = []; pending = []; notes = []; events = 0; dropped = 0; revision += 1
+        withStacks = stacks
+        symbols = StackSymbols()
+        let symbols = symbols
         phase = .starting
         let flag = Shell.Cancel()
         stopFlag = flag
         // Holds the tracer until the trace ends; the view stops it when it goes away (onDisappear).
         Task.detached(priority: .userInitiated) { [self] in
-            await Self.run(pid: pid, start: start, flag: flag, tracer: self)
+            await Self.run(pid: pid, start: start, stacks: stacks, symbols: symbols, flag: flag, tracer: self)
         }
     }
 
@@ -45,18 +51,18 @@ final class SyscallTracer {
         phase = .idle
     }
 
-    private nonisolated static func run(pid: Int32, start: Date, flag: Shell.Cancel, tracer: SyscallTracer) async {
+    private nonisolated static func run(pid: Int32, start: Date, stacks: Bool, symbols: StackSymbols, flag: Shell.Cancel, tracer: SyscallTracer) async {
         let s = HelperTraceSession()
         defer { s.close() }
         let format: SyscallTraceConfig.Format
-        switch s.start(pid: pid) {
+        switch s.start(pid: pid, stacks: stacks) {
         case .success(let f): format = f
         case .failure(let e):
             await tracer.finish([], note: e.message)
             return
         }
         await tracer.setPhase(.running)
-        var dec = SyscallDecoder()
+        var dec = SyscallDecoder(stacks: stacks && format == .kdebug)
         var stopSent = false
         var endNote: String?
         let deadlineAfterStop: TimeInterval = 6
@@ -73,12 +79,14 @@ final class SyscallTracer {
                     if !why.isEmpty { endNote = why }
                 }
             }
-            guard let (data, running, notes) = s.read() else {
+            guard let (data, running, notes, regions) = s.read() else {
                 endNote = "Lost the connection to the helper."
                 break
             }
             let (evs, bad) = format == .kdebug ? (KdebugEvent.decodeRaw(data), 0) : KdebugEvent.decode(data)
-            let recs = dec.feed(evs)
+            symbols.add(regions)
+            var recs = dec.feed(evs)
+            for i in recs.indices where !recs[i].stack.isEmpty { recs[i].caller = symbols.caller(recs[i].stack) }
             var n = notes.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
             if bad > 0 { n.append("\(bad) unreadable trace lines skipped.") }
             if !recs.isEmpty || !n.isEmpty || !evs.isEmpty {
@@ -89,6 +97,9 @@ final class SyscallTracer {
             // A full read means more is waiting: read again right away.
             if data.count < SyscallTraceConfig.maxRead / 2 { try? await Task.sleep(for: .milliseconds(250)) }
         }
+        var last = dec.flush()
+        for i in last.indices where !last[i].stack.isEmpty { last[i].caller = symbols.caller(last[i].stack) }
+        if !last.isEmpty { await tracer.append(last, events: 0, notes: []) }
         await tracer.finish(dec.pending(), note: endNote)
     }
 
@@ -128,6 +139,7 @@ struct SyscallTraceView: View {
     let exited: Bool
     @State private var tracer = SyscallTracer()
     @AppStorage("syscallTrace.mode") private var mode = "Calls"
+    @AppStorage("syscallTrace.stacks") private var stacks = false
     @State private var filter = ""
     @State private var errorsOnly = false
     @State private var sort = [KeyPathComparator(\SyscallRecord.time, order: .reverse)]
@@ -164,6 +176,7 @@ struct SyscallTraceView: View {
                 summaryTable
             } else {
                 callsTable
+                if let r = selectedStackRecord { Divider(); stackPane(r) }
             }
         }
         .task(id: key) { await recompute() }
@@ -176,11 +189,13 @@ struct SyscallTraceView: View {
                 Button { tracer.stop() } label: { Label("Stop", systemImage: "stop.fill") }
                     .disabled(tracer.phase == .stopping)
             } else {
-                Button { tracer.start(pid: proc.pid, start: proc.start) } label: {
+                Button { tracer.start(pid: proc.pid, start: proc.start, stacks: stacks) } label: {
                     Label(tracer.phase == .idle ? "Trace" : "Trace again", systemImage: "record.circle")
                 }
                 .disabled(disabledReason != nil)
                 .help(disabledReason ?? "Trace this process's BSD syscalls and Mach traps (kdebug, as root via the helper)")
+                Toggle("Stacks", isOn: $stacks).toggleStyle(.checkbox).font(.caption)
+                    .help("Record the user stack of every call (kperf), to see which code made it. The traced process runs up to a third slower.")
             }
             if tracer.phase == .starting || tracer.phase == .stopping { ProgressView().controlSize(.small) }
             Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationHelp(status)
@@ -246,6 +261,8 @@ struct SyscallTraceView: View {
                 Text(r.duration.map(Self.duration) ?? "—").monospacedDigit()
             }
             .width(min: 60, ideal: 76, max: 110)
+            TableColumn("Caller") { r in Text(r.caller).foregroundStyle(.secondary).truncationHelp(r.caller) }
+                .width(min: tracer.withStacks ? 80 : 0, ideal: tracer.withStacks ? 220 : 0, max: tracer.withStacks ? .infinity : 0)
             TableColumn("Path") { r in
                 HStack(spacing: 4) {
                     Text(r.pathText).truncationHelp(r.pathText)
@@ -290,13 +307,45 @@ struct SyscallTraceView: View {
             let rows = all.filter { r in
                 (!errorsOnly || r.failed) &&
                 (filter.isEmpty || r.name.localizedCaseInsensitiveContains(filter) || r.pathText.localizedCaseInsensitiveContains(filter)
-                 || r.resultText.localizedCaseInsensitiveContains(filter) || r.argsText.localizedCaseInsensitiveContains(filter))
+                 || r.resultText.localizedCaseInsensitiveContains(filter) || r.argsText.localizedCaseInsensitiveContains(filter)
+                 || r.caller.localizedCaseInsensitiveContains(filter))
             }
             if summaryMode { return ([], SyscallSummaryRow.build(rows).sorted(using: summarySort)) }
             return (rows.sorted(using: sort), [])
         }.value
         guard !Task.isCancelled else { return }
         if summaryMode { summary = result.1 } else { shown = result.0 }
+    }
+
+    /// The one selected call, when it has a stack.
+    private var selectedStackRecord: SyscallRecord? {
+        guard selection.count == 1, let id = selection.first, let r = shown.first(where: { $0.id == id }), !r.stack.isEmpty else { return nil }
+        return r
+    }
+
+    private func stackPane(_ r: SyscallRecord) -> some View {
+        let frames = tracer.symbols.frames(r.stack)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(Array(frames.enumerated()), id: \.offset) { i, f in
+                    HStack(spacing: 8) {
+                        Text("\(i)").foregroundStyle(.tertiary).frame(width: 22, alignment: .trailing)
+                        Text(f.symbol ?? (f.image.isEmpty ? "???" : "\(f.image) + 0x\(String(f.offset, radix: 16))"))
+                            .foregroundStyle(f.image == "libsystem_kernel.dylib" ? .secondary : .primary)
+                        // String(): Text's own interpolation would localize the number ("6,652").
+                        if f.symbol != nil { Text("+ " + String(f.offset)).foregroundStyle(.secondary) }
+                        if !f.image.isEmpty && f.symbol != nil { Text("(\(f.image))").foregroundStyle(.secondary) }
+                        Spacer(minLength: 0)
+                        Text("0x" + String(f.address, radix: 16)).foregroundStyle(.tertiary)
+                    }
+                    .lineLimit(1)
+                }
+            }
+            .padding(6)
+            .textSelection(.enabled)
+        }
+        .font(.system(size: 11, design: .monospaced))
+        .frame(height: min(CGFloat(frames.count) * 16 + 14, 200))
     }
 
     private func copy(_ ids: Set<SyscallRecord.ID>) {
@@ -310,7 +359,8 @@ struct SyscallTraceView: View {
             let t = r.start.map(Self.seconds) ?? "before"
             let d = r.duration.map { " <\(Self.duration($0))>" } ?? ""
             let p = r.paths.isEmpty ? "" : "  \(r.pathText)"
-            return "\(t) [\(r.thread)] \(r.name)(\(r.argsText)) = \(r.resultText)\(d)\(p)"
+            let stack = tracer.symbols.frames(r.stack).map { "\n    " + $0.text }.joined()
+            return "\(t) [\(r.thread)] \(r.name)(\(r.argsText)) = \(r.resultText)\(d)\(p)\(stack)"
         }.joined(separator: "\n")
     }
 

@@ -65,11 +65,13 @@ enum HelperConfig {
 
     /// Syscall trace of one process (kdebug, read by the helper itself or through `ktrace trace`), at most one
     /// per connection. The trace stops when the connection ends, so the app gives each trace a connection of its own.
-    /// Reply: (nil, SyscallTraceConfig.Format raw value) when started, else (why not, 0).
-    func traceStart(pid: Int32, reply: @escaping (String?, Int) -> Void)
+    /// `stacks`: a user stack per call (kperf; kdebug format only). Reply: (nil, SyscallTraceConfig.Format raw
+    /// value) when started, else (why not, 0).
+    func traceStart(pid: Int32, stacks: Bool, reply: @escaping (String?, Int) -> Void)
     /// Data written since the last read (up to `SyscallTraceConfig.maxRead`, whole records or lines), whether
-    /// the trace is still running, and anything ktrace wrote to stderr or the helper has to say (drops, exit).
-    func traceRead(reply: @escaping (Data, Bool, String) -> Void)
+    /// the trace is still running, anything ktrace wrote to stderr or the helper has to say (drops, exit), and
+    /// the images behind stack frames found since the last read (JSON [StackRegion], empty Data when none).
+    func traceRead(reply: @escaping (Data, Bool, String, Data) -> Void)
     func traceStop(reply: @escaping () -> Void)
 }
 

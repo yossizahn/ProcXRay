@@ -7,6 +7,20 @@ protocol TraceSource: AnyObject, Sendable {
     /// notes since the last call.
     func read(max: Int) -> (Data, Bool, String)
     func stop()
+    /// Images behind stack frames found since the last call (StackRegion JSON); empty without stacks.
+    func newRegions() -> Data
+}
+
+extension TraceSource {
+    func newRegions() -> Data { Data() }
+}
+
+/// A mapped file in the traced process, for symbolicating stack frames: [start, size, path]. `path` is empty
+/// for memory with no file behind it (JIT code, a region the kernel wouldn't describe).
+struct StackRegion: Codable, Sendable {
+    var start: UInt64
+    var size: UInt64
+    var path: String
 }
 
 /// Syscall trace read straight from the kernel's kdebug buffer (sysctl CTL_KERN/KERN_KDEBUG), the facility
@@ -20,6 +34,14 @@ protocol TraceSource: AnyObject, Sendable {
 /// Output is `Record`s, 64 bytes each: the kernel's kd_buf with the timestamp rewritten to nanoseconds since
 /// the trace started. The kernel marks a gap (its buffer wrapped before we read it) with a TRACE_LOST_EVENTS
 /// record where the gap was; those are passed on and counted in a note.
+///
+/// Stacks (opt-in): kperf, the kernel sampler behind Instruments, samples the user stack at each BSD syscall and
+/// Mach trap entry (a kdebug trigger). The stack is taken on the way back to user space, so its PERF_STK events
+/// follow the call's return on the same thread. kperf only samples threads that pass the kdebug pid filter: a
+/// busy untraced process ran at the same rate with and without it. Measured: ~7 events per call instead of ~3;
+/// the traced process ran 12% slower at 270k syscalls/s, 36% at 1.5M. Works with SIP on (checked on the host).
+/// kperf has to be reset on the way out, or the kernel keeps the session in the foreground under a dead owner
+/// and background tracing (tailspind) can't take it back.
 ///
 /// One trace system-wide: while another tool holds kdebug (ktrace, Instruments, fs_usage) setup fails with
 /// EBUSY. Background tracing (tailspind) gives way and takes it back after `cleanUp`. If the helper dies
@@ -44,6 +66,8 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
     }
     static let recordSize = 64
     static let lostEvents: UInt32 = 0x0702_0008   // TRACE_LOST_EVENTS in /usr/share/misc/trace.codes
+    /// PERF_STK_UData: four frames of a user stack.
+    static let stackData: UInt32 = 0x2502_0010
 
     // <sys/kdebug_private.h>; not in the SDK.
     private static let KERN_KDENABLE: Int32 = 3, KERN_KDSETBUF: Int32 = 4, KERN_KDSETUP: Int32 = 6,
@@ -77,8 +101,16 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
     private let deadline: UInt64
     private let start: UInt64
     private let numer: UInt64, denom: UInt64
+    private let pid: Int32
+    private let stacks: Bool
+    /// Regions looked up so far (sorted by start), and the ones the app hasn't been sent yet.
+    private var regions: [StackRegion] = []
+    private var unsent: [StackRegion] = []
+    private let cache = SharedCache.range
 
-    private init(maxPending: Int, start: UInt64, maxSeconds: Int) {
+    private init(pid: Int32, stacks: Bool, maxPending: Int, start: UInt64, maxSeconds: Int) {
+        self.pid = pid
+        self.stacks = stacks
         self.maxPending = maxPending
         self.start = start
         var tb = mach_timebase_info_data_t()
@@ -88,10 +120,11 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
     }
 
     /// Configures kdebug for `pid` and starts reading. Needs root.
-    static func start(pid: Int32, maxPending: Int, maxSeconds: Int) -> Result<KdebugTrace, StartError> {
+    static func start(pid: Int32, stacks: Bool = false, maxPending: Int, maxSeconds: Int) -> Result<KdebugTrace, StartError> {
         guard pid > 0 else { return .failure(.failed("bad pid \(pid)")) }
-        // Only clears a session we may configure: someone else's gives EBUSY here and is left alone.
-        _ = op(KERN_KDREMOVE)
+        // Only clears a session we may configure: someone else's gives EBUSY here and is left alone. A kperf
+        // configuration left behind (a tracer that died) goes with it.
+        if op(KERN_KDREMOVE) == nil { Kperf.reset() }
         if let e = op(KERN_KDSETBUF, Int32(kernelEvents)) { return .failure(e == EBUSY ? .refused(busyText()) : .failed("KDSETBUF: \(errText(e))")) }
         func fail(_ what: String, _ e: Int32) -> Result<KdebugTrace, StartError> {
             _ = op(KERN_KDREMOVE)
@@ -102,14 +135,20 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         if let e = op(KERN_KDSETUP) { return fail("KDSETUP", e) }
         // One bit per class<<8|subclass.
         var filter = [UInt8](repeating: 0, count: 8192)
-        for cs in SyscallTraceConfig.classSubclasses { filter[Int(cs) / 8] |= 1 << (cs % 8) }
+        for cs in SyscallTraceConfig.classSubclasses + (stacks ? [Kperf.stackSubclass] : []) { filter[Int(cs) / 8] |= 1 << (cs % 8) }
         if let e = filter.withUnsafeMutableBytes({ input(KERN_KDSET_TYPEFILTER, $0.baseAddress!, $0.count) }) { return fail("typefilter", e) }
         var reg = RegType(type: KDBG_TYPENONE, value1: UInt32(bitPattern: pid), value2: 1, value3: 0, value4: 0)
         if let e = withUnsafeMutableBytes(of: &reg, { input(KERN_KDPIDTR, $0.baseAddress!, $0.count) }) {
             return fail(e == ESRCH ? "\(pid)" : "pid filter", e)
         }
-        let t = KdebugTrace(maxPending: maxPending, start: mach_absolute_time(), maxSeconds: maxSeconds)
-        if let e = op(KERN_KDENABLE, KDEBUG_ENABLE_TRACE) { return fail("KDENABLE", e) }
+        var stackNote: String?
+        if stacks, let why = Kperf.configure() {
+            Kperf.reset()
+            stackNote = "No stacks: kperf refused (\(why)).\n"
+        }
+        let t = KdebugTrace(pid: pid, stacks: stacks && stackNote == nil, maxPending: maxPending, start: mach_absolute_time(), maxSeconds: maxSeconds)
+        if let stackNote { t.notes = stackNote }
+        if let e = op(KERN_KDENABLE, KDEBUG_ENABLE_TRACE) { Kperf.reset(); return fail("KDENABLE", e) }
         Thread.detachNewThread { t.pump() }
         return .success(t)
     }
@@ -132,6 +171,11 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
 
     func stop() {
         lock.lock(); stopRequested = true; lock.unlock()
+    }
+
+    func newRegions() -> Data {
+        lock.lock(); let r = unsent; unsent = []; lock.unlock()
+        return r.isEmpty ? Data() : ((try? JSONEncoder().encode(r)) ?? Data())
     }
 
     private func pump() {
@@ -175,6 +219,9 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
             let ts = recs[i].timestamp
             recs[i].timestamp = ts > start ? (ts - start) * numer / denom : 0
             if recs[i].debugid == Self.lostEvents { lost += 1 }
+            if stacks && recs[i].debugid & ~3 == Self.stackData {
+                for a in [recs[i].arg1, recs[i].arg2, recs[i].arg3, recs[i].arg4] { noteFrame(a) }
+            }
         }
         let bytes = n * Self.recordSize
         lock.lock()
@@ -198,7 +245,29 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Looks up the image behind a frame outside the shared cache (which the app resolves in its own process)
+    /// the first time an address in it turns up. Only the pump thread touches `regions` writes.
+    private func noteFrame(_ a: UInt64) {
+        guard a >= 0x1000, !cache.contains(a) else { return }
+        var lo = 0, hi = regions.count
+        while lo < hi { let m = (lo + hi) / 2; if regions[m].start + regions[m].size <= a { lo = m + 1 } else { hi = m } }
+        if lo < regions.count, regions[lo].start <= a { return }
+        var info = proc_regionwithpathinfo()
+        let r: StackRegion
+        if proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, a, &info, Int32(MemoryLayout.size(ofValue: info))) == Int32(MemoryLayout.size(ofValue: info)),
+           info.prp_prinfo.pri_address <= a, a < info.prp_prinfo.pri_address + info.prp_prinfo.pri_size {
+            let path = withUnsafeBytes(of: info.prp_vip.vip_path) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            r = StackRegion(start: info.prp_prinfo.pri_address, size: info.prp_prinfo.pri_size, path: path)
+        } else {
+            // Not described (the process may be gone): one page, so the address isn't looked up again.
+            r = StackRegion(start: a & ~0x3fff, size: 0x4000, path: "")
+        }
+        regions.insert(r, at: lo)
+        lock.lock(); unsent.append(r); lock.unlock()
+    }
+
     private static func cleanUp() {
+        Kperf.reset()
         _ = op(KERN_KDENABLE, 0)
         _ = op(KERN_KDREMOVE)
     }
@@ -230,4 +299,53 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         var m = mib
         return sysctl(&m, u_int(m.count), old, &len, nil, 0) == 0 ? nil : errno
     }
+}
+
+/// kperf's sysctls (xnu bsd/kern/kern_kpc.c, osfmk/kperf/kperfbsd.c; not in the SDK). Unlike kdebug's, they take
+/// their input through newp.
+enum Kperf {
+    /// PERF_STK: the stack samples' kdebug events.
+    static let stackSubclass: UInt16 = 0x2502
+    private static let samplerUserStack: UInt64 = 1 << 3
+
+    /// One action sampling the user stack, fired by every BSD syscall and Mach trap entry. nil = done, else why not.
+    static func configure() -> String? {
+        var count: UInt32 = 1
+        if let e = set("kperf.action.count", &count) { return e }
+        var samplers: (UInt64, UInt64) = (1, samplerUserStack)   // action 1
+        if let e = set("kperf.action.samplers", &samplers) { return e }
+        var action: Int32 = 1
+        if let e = set("kperf.kdebug.action", &action) { return e }
+        // Filter types, a nibble each from the low end: 3 = class, subclass and function. Function 1 = entry.
+        var filter: (UInt64, UInt64, UInt32, UInt32) = (0x33, 0, 0x040c_0001, 0x010c_0001)
+        if let e = set("kperf.kdebug.filter", &filter) { return e }
+        var on: Int32 = 1
+        return set("kperf.sampling", &on)
+    }
+
+    /// Sampling off and every action and trigger cleared.
+    static func reset() {
+        var off: Int32 = 0
+        _ = set("kperf.sampling", &off)
+        var one: Int32 = 1
+        _ = set("kperf.reset", &one)
+    }
+
+    private static func set<T: BitwiseCopyable>(_ name: String, _ v: inout T) -> String? {
+        let r = withUnsafeMutableBytes(of: &v) { sysctlbyname(name, nil, nil, $0.baseAddress, $0.count) }
+        return r == 0 ? nil : "\(name): \(String(cString: strerror(errno)))"
+    }
+}
+
+/// The dyld shared cache's range in this process. Every process maps the same cache at the same address (checked:
+/// dladdr here named another process's stack frames correctly), so frames inside it are resolved locally.
+enum SharedCache {
+    static let range: Range<UInt64> = {
+        typealias Fn = @convention(c) (UnsafeMutablePointer<Int>) -> UnsafeRawPointer?
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_dyld_get_shared_cache_range") else { return 0..<0 }
+        var len = 0
+        guard let p = unsafeBitCast(sym, to: Fn.self)(&len) else { return 0..<0 }
+        let start = UInt64(UInt(bitPattern: p))
+        return start..<start + UInt64(len)
+    }()
 }
