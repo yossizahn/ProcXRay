@@ -70,12 +70,12 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
     static let stackData: UInt32 = 0x2502_0010
 
     // <sys/kdebug_private.h>; not in the SDK.
-    private static let KERN_KDENABLE: Int32 = 3, KERN_KDSETBUF: Int32 = 4, KERN_KDSETUP: Int32 = 6,
+    static let KERN_KDENABLE: Int32 = 3, KERN_KDSETBUF: Int32 = 4, KERN_KDSETUP: Int32 = 6,
                        KERN_KDREMOVE: Int32 = 7, KERN_KDREADTR: Int32 = 10, KERN_KDPIDTR: Int32 = 11,
                        KERN_KDSET_TYPEFILTER: Int32 = 22, KERN_KDBUFWAIT: Int32 = 23
-    private static let KDBG_TYPENONE: UInt32 = 0x80
-    private static let KDEBUG_ENABLE_TRACE: Int32 = 1
-    private struct RegType { var type: UInt32; var value1: UInt32; var value2: UInt32; var value3: UInt32; var value4: UInt32 }
+    static let KDBG_TYPENONE: UInt32 = 0x80
+    static let KDEBUG_ENABLE_TRACE: Int32 = 1
+    struct RegType { var type: UInt32; var value1: UInt32; var value2: UInt32; var value3: UInt32; var value4: UInt32 }
 
     /// Kernel buffer, in events (64 bytes each: 16 MB). The reader is woken at half full, not on a timer.
     /// Measured: no kernel loss at 2.4M syscalls/s in the 4-CPU VM, and up to 1.1M (not at 1.7M) on the SIP-on
@@ -273,7 +273,7 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
     }
 
     /// "in use by ktrace[61040]", from the kernel's own record of the owner.
-    private static func busyText() -> String {
+    static func busyText() -> String {
         func int(_ n: String) -> Int32? { var v: Int32 = 0; var l = 4; return sysctlbyname(n, &v, &l, nil, 0) == 0 ? v : nil }
         var name = [CChar](repeating: 0, count: 64); var l = name.count
         let who = sysctlbyname("ktrace.configured_by", &name, &l, nil, 0) == 0 ? String(cString: name) : "another tool"
@@ -281,21 +281,21 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         return "The kernel trace facility is in use by \(who)\(pid). It allows one trace at a time: stop the other one (another trace here, Instruments or fs_usage) and trace again."
     }
 
-    private static func errText(_ e: Int32) -> String { String(cString: strerror(e)) }
+    static func errText(_ e: Int32) -> String { String(cString: strerror(e)) }
 
     /// An operation with an optional value in the name (KDSETBUF's size, KDENABLE's mode). nil = success, else errno.
-    private static func op(_ o: Int32, _ value: Int32? = nil) -> Int32? {
+    static func op(_ o: Int32, _ value: Int32? = nil) -> Int32? {
         var z = 0
         return call([CTL_KERN, KERN_KDEBUG, o] + (value.map { [$0] } ?? []), nil, &z)
     }
 
     /// kdebug takes its input through oldp (sysctl's newp is refused with EPERM).
-    private static func input(_ o: Int32, _ p: UnsafeMutableRawPointer, _ size: Int) -> Int32? {
+    static func input(_ o: Int32, _ p: UnsafeMutableRawPointer, _ size: Int) -> Int32? {
         var l = size
         return call([CTL_KERN, KERN_KDEBUG, o], p, &l)
     }
 
-    private static func call(_ mib: [Int32], _ old: UnsafeMutableRawPointer?, _ len: inout Int) -> Int32? {
+    static func call(_ mib: [Int32], _ old: UnsafeMutableRawPointer?, _ len: inout Int) -> Int32? {
         var m = mib
         return sysctl(&m, u_int(m.count), old, &len, nil, 0) == 0 ? nil : errno
     }

@@ -133,6 +133,28 @@ final class HelperClient: @unchecked Sendable {
         return .failure(.init(message: out.1 ?? "unreadable reply from the helper"))
     }
 
+    /// Voucher settlements per pair of processes over `seconds` (HelperProtocol.bankLedger), on a connection of
+    /// its own so a cancelled caller (Shell.Cancel.current) stops the recording in the helper.
+    func bankLedger(seconds: Int) -> Swift.Result<BankLedger.Recording, MachLoader.Failure> {
+        let cancel = Shell.Cancel.current
+        let c = makeConnection()
+        defer { c.invalidate() }
+        let lock = NSLock()
+        var out: (Data?, String?) = (nil, "the helper did not answer")
+        let sem = DispatchSemaphore(value: 0)
+        guard let p = c.remoteObjectProxyWithErrorHandler({ e in
+            lock.lock(); out = (nil, "helper: \(e.localizedDescription)"); lock.unlock(); sem.signal()
+        }) as? HelperProtocol else { return .failure(.init(message: "no helper connection")) }
+        p.bankLedger(seconds: seconds) { d, e in lock.lock(); out = (d, e); lock.unlock(); sem.signal() }
+        let deadline = DispatchTime.now() + .seconds(seconds + 15)
+        while sem.wait(timeout: .now() + 0.1) == .timedOut {
+            if cancel?.isCancelled == true || DispatchTime.now() >= deadline { break }
+        }
+        lock.lock(); defer { lock.unlock() }
+        if let d = out.0, let r = try? JSONDecoder().decode(BankLedger.Recording.self, from: d) { return .success(r) }
+        return .failure(.init(message: out.1 ?? "unreadable reply from the helper"))
+    }
+
     // MARK: plumbing
 
     private func call<T>(_ body: (HelperProtocol, @escaping (T) -> Void) -> Void, timeout: Double = 15) -> T? {

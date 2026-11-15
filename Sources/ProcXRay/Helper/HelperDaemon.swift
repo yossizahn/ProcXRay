@@ -138,6 +138,18 @@ enum HelperDaemon {
             }
         }
 
+        func bankLedger(seconds: Int, reply: @escaping (Data?, String?) -> Void) {
+            guard callerIsAdmin else { reply(nil, "Recording who works for whom covers every process: only an admin user can."); return }
+            guard seconds > 0 else { reply(nil, "helper: rejected duration \(seconds)"); return }
+            let cancel = self.cancel
+            DispatchQueue.global(qos: .userInitiated).async {
+                switch BankLedger.record(seconds: Double(min(seconds, BankLedger.maxSeconds)), cancel: cancel) {
+                case .success(let r): reply(try? JSONEncoder().encode(r), nil)
+                case .failure(.refused(let why)), .failure(.failed(let why)): reply(nil, why)
+                }
+            }
+        }
+
         // MARK: syscall trace
 
         private let traceLock = NSLock()

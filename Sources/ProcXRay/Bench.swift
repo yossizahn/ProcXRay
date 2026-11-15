@@ -182,6 +182,19 @@ enum Bench {
             }
             return
         }
+        if what == "bank" {
+            // bank <seconds>: voucher settlements per pair through the helper.
+            switch c.bankLedger(seconds: Int(pid > 0 ? pid : 10)) {
+            case .success(let r):
+                print(String(format: "bank: %.1f s, %d pairs, %d lost marks", r.seconds, r.flows.count, r.lost))
+                for f in r.flows.prefix(20) {
+                    print(String(format: "  %@(%d) for %@(%d): %.3f ms, %.3f mJ, %d", f.merchantName, f.merchant, f.holderName, f.holder,
+                                 Double(f.cpuNanos) / 1e6, Double(f.energyNJ) / 1e6, f.count))
+                }
+            case .failure(let e): print("bank: \(e.message)")
+            }
+            return
+        }
         if what == "survey" {
             // survey <seconds> <processes>: traces the busiest processes one after another (one trace at a time) and
             // lists the calls still shown as raw numbers, by count: no argument table, no argument names, or a result
@@ -775,5 +788,61 @@ enum Bench {
         let ids = s.entries.map(\.id)
         print("entry ids strictly increasing: \(zip(ids, ids.dropFirst()).allSatisfy { $0 < $1 })")
         FileManager.default.createFile(atPath: out, contents: s.rawLines.joined(separator: "\n").data(using: .utf8))
+    }
+}
+
+extension Bench {
+    /// As root: --bank <seconds>. Records BANK settlements (BankLedger) and checks them against the rusage totals
+    /// they should add up to: per merchant against the change in ri_serviced_*, per holder against ri_billed_*.
+    static func bank(seconds: Double) {
+        func totals() -> [Int32: (serviced: UInt64, billed: UInt64, sNJ: UInt64, bNJ: UInt64)] {
+            var out: [Int32: (UInt64, UInt64, UInt64, UInt64)] = [:]
+            for k in Native.allProcesses() where k.pid > 0 {
+                if let r = Native.rusage(k.pid) {
+                    out[k.pid] = (Native.machToNanos(r.ri_serviced_system_time), Native.machToNanos(r.ri_billed_system_time),
+                                  r.ri_serviced_energy, r.ri_billed_energy)
+                }
+            }
+            return out
+        }
+        let before = totals()
+        let rec: BankLedger.Recording
+        switch BankLedger.record(seconds: seconds) {
+        case .success(let r): rec = r
+        case .failure(.refused(let why)), .failure(.failed(let why)): print("bank: \(why)"); return
+        }
+        let after = totals()
+        let cpu = rec.flows.reduce(0) { $0 + $1.cpuNanos }, nrg = rec.flows.reduce(0) { $0 + $1.energyNJ }
+        print(String(format: "%.1f s: %d pairs, %d settlements, %.3f s CPU, %.3f J, %d lost marks", rec.seconds, rec.flows.count,
+                     rec.flows.reduce(0) { $0 + $1.count }, Double(cpu) / 1e9, Double(nrg) / 1e9, rec.lost))
+        for f in rec.flows.prefix(15) {
+            print(String(format: "  %@(%d) for %@(%d): %.3f ms, %.3f mJ, %d", f.merchantName, f.merchant, f.holderName, f.holder,
+                         Double(f.cpuNanos) / 1e6, Double(f.energyNJ) / 1e6, f.count))
+        }
+        func check(_ label: String, _ key: (BankLedger.Flow) -> Int32, _ delta: (Int32) -> Int64?) {
+            var byPid: [Int32: UInt64] = [:]
+            for f in rec.flows { byPid[key(f), default: 0] += f.cpuNanos }
+            var exact = 0, off = 0, gone = 0
+            var worst: [(Int32, Int64, UInt64)] = []
+            for (pid, sum) in byPid {
+                guard let d = delta(pid) else { gone += 1; continue }
+                // Allow 1 µs of rounding from summing ticks then converting, against converting each total.
+                if abs(d - Int64(sum)) <= 1_000 { exact += 1 } else { off += 1; worst.append((pid, d, sum)) }
+            }
+            print("\(label): \(exact) match, \(off) differ, \(gone) exited")
+            for (pid, d, s) in worst.sorted(by: { abs($0.1 - Int64($0.2)) > abs($1.1 - Int64($1.2)) }).prefix(6) {
+                print(String(format: "    pid %d: rusage delta %.3f ms, events %.3f ms", pid, Double(d) / 1e6, Double(s) / 1e6))
+            }
+        }
+        check("merchants vs serviced", \.merchant) { p in before[p].flatMap { b in after[p].map { Int64($0.serviced) - Int64(b.serviced) } } }
+        check("holders vs billed", \.holder) { p in before[p].flatMap { b in after[p].map { Int64($0.billed) - Int64(b.billed) } } }
+        // Processes whose totals moved with no settlement seen.
+        var unseen = 0
+        let merchants = Set(rec.flows.map(\.merchant))
+        for (p, a) in after { if let b = before[p], a.serviced > b.serviced, !merchants.contains(p) { unseen += 1 } }
+        print("serviced totals that moved with no event: \(unseen); settlements with a debit: \(rec.debits)")
+        var dS: Int64 = 0, dB: Int64 = 0
+        for (p, a) in after { if let b = before[p] { dS += Int64(a.serviced) - Int64(b.serviced); dB += Int64(a.billed) - Int64(b.billed) } }
+        print(String(format: "all processes: serviced +%.3f s, billed +%.3f s, events %.3f s", Double(dS) / 1e9, Double(dB) / 1e9, Double(cpu) / 1e9))
     }
 }

@@ -92,6 +92,11 @@ struct ProcXRayApp: App {
             Bench.helperCall(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--bank") {
+            // As root: --bank <seconds>. Voucher (BANK) settlements per pair, checked against rusage.
+            Bench.bank(seconds: CommandLine.arguments.count > i + 1 ? Double(CommandLine.arguments[i + 1]) ?? 10 : 10)
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--trace") {
             // As root: --trace <pid> <seconds> [--ktrace] [out.tsv]. One syscall trace in-process, through the kdebug
             // reader (or ktrace) and the app's decoder; records written as tab-separated text for diffing the two.

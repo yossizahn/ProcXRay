@@ -198,6 +198,7 @@ struct GroupInspectorView: View {
         if let vr = voucherRows(ms) {
             UsageTab.section("On behalf of other processes", "arrow.left.arrow.right.square", nil, format: { _ in "" }, rows: vr)
                 .help("Work attributed through Mach vouchers (the BANK attribute), summed across the group. \"For others\" is CPU and energy these processes spent servicing other processes' requests; \"by others\" is what other processes spent servicing these. Most of it flows automatically over XPC.")
+            VoucherFlowsView(pids: Set(ms.map(\.pid)), subject: "these processes")
         }
         Text("Resident and virtual size aren't summed: shared pages would be counted once per process.")
             .font(.caption).foregroundStyle(.secondary)

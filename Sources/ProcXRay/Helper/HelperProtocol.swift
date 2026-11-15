@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 10  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool
+    static let protocolVersion = 12  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 12: bankLedger
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -76,6 +76,11 @@ enum HelperConfig {
     /// What some descriptors of the traced process are now (JSON [Int32] in, JSON [String: String] by fd out):
     /// for labelling fd arguments. Empty when no trace runs on this connection.
     func traceDescribeFds(_ fds: Data, reply: @escaping (Data) -> Void)
+
+    /// Records every process's voucher (BANK) settlements for `seconds` (at most BankLedger.maxSeconds) and
+    /// replies with the per-pair sums: who did work for whom. Uses kdebug, so not while a trace runs. Stops
+    /// early when the connection ends. Admin callers only. (JSON BankLedger.Recording, nil) or (nil, why not).
+    func bankLedger(seconds: Int, reply: @escaping (Data?, String?) -> Void)
 }
 
 /// What the helper traces, and the one ktrace command line it runs when it doesn't read kdebug itself.

@@ -546,6 +546,7 @@ struct UsageTab: View {
                 ("Energy by others", "", joules(c?.billedEnergyNJ)),
             ])
             .help("Work attributed through Mach vouchers (the BANK attribute). \"For others\" is CPU and energy this process spent servicing other processes' requests; \"by others\" is what other processes spent servicing this one. Most of it flows automatically over XPC, where a service adopts its caller's voucher. Totals since the process started.")
+            VoucherFlowsView(pids: [p.pid], subject: "this process").id(p.key)
         }
     }
 
