@@ -130,6 +130,7 @@ enum HelperDaemon {
             }
             let cancel = self.cancel
             DispatchQueue.global(qos: .userInitiated).async {
+                if let text = NativeTools.run(t, pid: pid) { reply(text); return }
                 let r = Shell.Cancel.$current.withValue(cancel) {
                     Shell.exec(path, args, timeout: t.timeout, maxBytes: HelperTool.maxOutput)
                 }
@@ -182,6 +183,11 @@ enum MachPortCache {
     static func last() -> (at: Date, ports: [PortPair: [MachPortDetail]])? { lock.lock(); defer { lock.unlock() }; return cached }
 
     static func run(cancel: Shell.Cancel?) -> Swift.Result<MachSnapshot, MachLoader.Failure> {
+        if NativeTools.enabled, let procs = NativeMach.processes() {
+            let parsed = MachSnapshot.parseWithPorts(processes: procs)
+            lock.lock(); cached = (parsed.snapshot.at, parsed.ports); lock.unlock()
+            return .success(parsed.snapshot)
+        }
         // lsmp writes its JSON to a path. A directory of root's own (umask 077), so no other user can
         // read the port map or plant a file there.
         var template = Array((NSTemporaryDirectory() + "procxray-lsmp.XXXXXX").utf8CString)

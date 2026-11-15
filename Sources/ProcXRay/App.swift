@@ -88,6 +88,57 @@ struct ProcXRayApp: App {
             Bench.helperCall(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
         }
+        if CommandLine.arguments.contains("--security") {
+            print(SystemSecurity.current.summary)
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--native-vm-regions") {
+            guard i + 2 < CommandLine.arguments.count, let pid = pid_t(CommandLine.arguments[i + 1]) else { print("usage: --native-vm-regions <pid> <out.json>"); exit(2) }
+            // As root: the raw region walk and image segments, for joining against `vmmap -v`.
+            guard let task = NativeVMMap.controlPort(pid) else { print("no task port for \(pid)"); exit(1) }
+            let t0 = Date()
+            let leaves = NativeVMMap.leaves(task, pid: pid), segs = NativeVMMap.segments(task)
+            print(String(format: "%d regions, %d segments in %.0f ms", leaves.count, segs.count, -t0.timeIntervalSinceNow * 1000))
+            struct Dump: Codable { var leaves: [NativeVMMap.Leaf]; var segments: [NativeVMMap.Segment] }
+            FileManager.default.createFile(atPath: CommandLine.arguments[i + 2], contents: try? JSONEncoder().encode(Dump(leaves: leaves, segments: segs)))
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--native-stacks") {
+            guard i + 1 < CommandLine.arguments.count, let pid = pid_t(CommandLine.arguments[i + 1]) else { print("usage: --native-stacks <pid>"); exit(2) }
+            print(NativeSample.text(pid) ?? "no task port for \(pid)")
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--native-lsof") {
+            // --native-lsof <pid> for the table, --native-lsof all for -F fields of every process.
+            guard i + 1 < CommandLine.arguments.count else { print("usage: --native-lsof <pid> | all"); exit(2) }
+            let a = CommandLine.arguments[i + 1]
+            print((a == "all" ? NativeLsof.fields() : pid_t(a).flatMap { NativeLsof.table($0) }) ?? "needs root")
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--native-taskinfo") {
+            guard i + 1 < CommandLine.arguments.count else { print("usage: --native-taskinfo <pid>..."); exit(2) }
+            for a in CommandLine.arguments[(i + 1)...] {
+                guard let pid = pid_t(a) else { continue }
+                print(NativeTaskinfo.text(pid) ?? "no task port for \(pid)")
+            }
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--native-vmmap") {
+            guard i + 1 < CommandLine.arguments.count, let pid = pid_t(CommandLine.arguments[i + 1]) else { print("usage: --native-vmmap <pid>"); exit(2) }
+            print(NativeVMMap.summary(pid, zones: !CommandLine.arguments.contains("--no-zones")) ?? "no task port for \(pid)")
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--native-mach") {
+            // As root: the native port walk, timed, written in lsmp's JSON shape for diffing against `lsmp -a -j`.
+            let t0 = Date()
+            guard let procs = NativeMach.processes() else { print("no task ports (needs root and SIP's task_for_pid relaxed)"); exit(1) }
+            print(String(format: "native: %d processes in %.0f ms", procs.count, -t0.timeIntervalSinceNow * 1000))
+            if i + 1 < CommandLine.arguments.count,
+               let d = try? JSONSerialization.data(withJSONObject: ["processes": procs]) {
+                FileManager.default.createFile(atPath: CommandLine.arguments[i + 1], contents: d)
+            }
+            exit(0)
+        }
         if CommandLine.arguments.contains("--dump") {
             SelfTest.run()
             exit(0)
@@ -193,6 +244,7 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 300)
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 2) {
+                    SecurityBadge()
                     HelperBadge()
                     RefreshStats()
                 }
@@ -219,6 +271,22 @@ struct RefreshStats: View {
         Text(verbatim: "snapshot \(store.refreshMillis) ms")
         if let e = store.refreshError {
             Text(verbatim: "\(e) — showing the last good list").foregroundStyle(.red).lineLimit(3).help("\(e) — showing the last good list")
+        }
+    }
+}
+
+/// Shown only when SIP or AMFI is relaxed, since that is when the extra features apply.
+struct SecurityBadge: View {
+    private let sec = SystemSecurity.current
+    var body: some View {
+        if sec.sipRelaxed || sec.amfiDisabled {
+            let text = [sec.sipRelaxed ? "SIP disabled" : nil, sec.amfiDisabled ? "AMFI off" : nil].compactMap { $0 }.joined(separator: " · ")
+            HStack(spacing: 4) {
+                Image(systemName: "shield.slash").foregroundStyle(.orange)
+                Text(verbatim: text)
+            }
+            .help(sec.summary)
+            .padding(.bottom, 4)
         }
     }
 }

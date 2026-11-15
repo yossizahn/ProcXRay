@@ -187,6 +187,11 @@ struct MachSnapshot: Codable, Sendable {
     static func parseWithPorts(_ data: Data) -> (snapshot: MachSnapshot, ports: [PortPair: [MachPortDetail]])? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let procs = root["processes"] as? [[String: Any]] else { return nil }
+        return parseWithPorts(processes: procs)
+    }
+
+    /// The same from lsmp's per-process records, already decoded (or built by NativeMach when SIP allows task ports).
+    static func parseWithPorts(processes procs: [[String: Any]]) -> (snapshot: MachSnapshot, ports: [PortPair: [MachPortDetail]]) {
         var recv: [String: (pid: Int32, queued: Int, full: Bool, boosts: Int, noSenders: Bool)] = [:]
         var sends: [(pid: Int32, obj: String, once: Bool)] = []
         // For MachPortDetail: the receive entry, and each send entry's name and references.
