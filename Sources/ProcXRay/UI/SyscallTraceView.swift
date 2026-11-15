@@ -252,7 +252,11 @@ struct SyscallTraceView: View {
             TableColumn("Thread", value: \.thread) { r in Text(String(r.thread)).monospacedDigit().foregroundStyle(.secondary) }
                 .width(min: 50, ideal: 70, max: 100)
             TableColumn("Syscall", value: \.name) { r in
-                Text(r.name).foregroundStyle(r.mach ? Color.purple : Color.primary).truncationHelp(r.name)
+                HStack(spacing: 4) {
+                    Text(r.name).foregroundStyle(r.mach ? Color.purple : Color.primary).truncationHelp(r.name)
+                    Spacer(minLength: 0)
+                    ManPageButton(name: r.name)
+                }
             }
             .width(min: 90, ideal: 150)
             TableColumn("Arguments") { r in
@@ -284,6 +288,10 @@ struct SyscallTraceView: View {
         .font(.system(size: 11, design: .monospaced))
         .contextMenu(forSelectionType: SyscallRecord.ID.self) { ids in
             Button("Copy") { copy(ids) }
+            let pages = Set(shown.filter { ids.contains($0.id) }.compactMap { ManPage.page(for: $0.name) })
+            if pages.count == 1, let page = pages.first {
+                Button("\(page)(2) Man Page") { ManPage.open(page) }
+            }
         }
         .onCopyCommand { [ids = selection] in
             [NSItemProvider(object: text(for: ids) as NSString)]
@@ -292,7 +300,14 @@ struct SyscallTraceView: View {
 
     private var summaryTable: some View {
         Table(summary, sortOrder: $summarySort) {
-            TableColumn("Syscall", value: \.name) { s in Text(s.name).truncationHelp(s.name) }.width(min: 120, ideal: 200)
+            TableColumn("Syscall", value: \.name) { s in
+                HStack(spacing: 4) {
+                    Text(s.name).truncationHelp(s.name)
+                    Spacer(minLength: 0)
+                    ManPageButton(name: s.name)
+                }
+            }
+            .width(min: 120, ideal: 200)
             TableColumn("Calls", value: \.calls) { s in Text(s.calls.formatted()).monospacedDigit() }.width(min: 50, ideal: 70)
             TableColumn("Errors", value: \.errors) { s in
                 Text(s.errors == 0 ? "" : s.errors.formatted()).monospacedDigit().foregroundStyle(.red)
