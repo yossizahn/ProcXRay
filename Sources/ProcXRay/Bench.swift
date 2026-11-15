@@ -731,4 +731,26 @@ enum Bench {
         for (n, v) in q where v > 0 { print(String(format: "  %@ %.1f %%", n as NSString, v / 1e9 / secs * 100)) }
         print("totals: cpu \(Native.machToNanos(b.ri_user_time &+ b.ri_system_time) / 1_000_000) ms, qos sum \(qb.reduce(0) { $0 + $1.1 } / 1_000_000) ms")
     }
+
+    @MainActor static func logLive(pid: Int32, seconds: Double, out: String) {
+        guard let start = Native.process(pid)?.start else { print("no process \(pid)"); return }
+        let s = LogSession()
+        let t0 = Date()
+        s.startLive(pid: pid, start: start)
+        var histAt: Date?
+        while Date().timeIntervalSince(t0) < seconds {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            if histAt == nil, !s.loadingHistory { histAt = Date() }
+        }
+        let stopAt = Date()
+        s.stop()
+        while s.isActive { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let stopped = Date().timeIntervalSince(stopAt)
+        print(String(format: "history in %.2f s; stopped %.2f s after Stop; %d entries, %d raw lines, revisions %d, notes %@",
+                     histAt.map { $0.timeIntervalSince(t0) } ?? -1, stopped, s.entries.count, s.rawLines.count, s.revision,
+                     s.notes.description))
+        let ids = s.entries.map(\.id)
+        print("entry ids strictly increasing: \(zip(ids, ids.dropFirst()).allSatisfy { $0 < $1 })")
+        FileManager.default.createFile(atPath: out, contents: s.rawLines.joined(separator: "\n").data(using: .utf8))
+    }
 }

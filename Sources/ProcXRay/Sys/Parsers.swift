@@ -391,35 +391,61 @@ enum LogParser {
     /// line, 6 s for a 100,000-event result. Same grammar as that regex:
     /// `^(date)\s+(\S+)\s+(.+?)\[(\d+):([0-9a-f]+)\]\s+(?:\[([^\]]*)\]\s+)?(.*)$`, each field trimmed.
     static func parse(_ text: String) -> [LogEntry] {
-        var out: [LogEntry] = []
-        var minute: (key: Substring, date: Date?)?
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            if var e = scan(line) {
-                // A log spans a few minutes: resolve each "yyyy-MM-dd HH:mm" once, then add the seconds.
-                let key = line.prefix(16)
-                if minute?.key != key { minute = (key, minuteFormatter.date(from: String(key))) }
-                e.date = minute!.date.map { $0.addingTimeInterval(e.secondsInMinute) }
-                out.append(LogEntry(id: out.count, date: e.date, time: e.time, level: .init(code: e.level),
-                                    process: e.process, pid: e.pid, thread: e.thread,
-                                    subsystem: e.subsystem, message: e.message))
-            } else if !out.isEmpty, !line.hasPrefix("Timestamp"), !line.isEmpty {
-                out[out.count - 1].message += "\n" + line   // multi-line message continuation
-            }
-        }
-        return out
+        var p = Incremental()
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) { p.feed(line) }
+        return p.drain()
     }
 
-    private static let minuteFormatter: DateFormatter = {
+    /// Line-at-a-time parsing, for `log stream`. `drain` hands over what was parsed since the last call,
+    /// the newest entry included, although a continuation line may still extend its message: it then
+    /// comes again in the next drain with the same id, and replaces the copy handed over before.
+    struct Incremental {
+        private var done: [LogEntry] = []
+        /// The newest entry: continuation lines go to it.
+        private var current: LogEntry?
+        /// `current` changed since the last drain.
+        private var currentDirty = false
+        private var nextID = 0
+        private var minute: (key: String, date: Date?)?
+
+        mutating func feed(_ line: Substring) {
+            if var e = LogParser.scan(line) {
+                // A log spans a few minutes: resolve each "yyyy-MM-dd HH:mm" once, then add the seconds.
+                let key = String(line.prefix(16))   // 16 bytes: a small string, no allocation
+                if minute?.key != key { minute = (key, LogParser.minuteFormatter.date(from: key)) }
+                e.date = minute!.date.map { $0.addingTimeInterval(e.secondsInMinute) }
+                if let c = current, currentDirty { done.append(c) }
+                current = LogEntry(id: nextID, date: e.date, time: e.time, level: .init(code: e.level),
+                                   process: e.process, pid: e.pid, thread: e.thread,
+                                   subsystem: e.subsystem, message: e.message)
+                currentDirty = true
+                nextID += 1
+            } else if current != nil, !line.hasPrefix("Timestamp"), !line.isEmpty {
+                current!.message += "\n" + line   // multi-line message continuation
+                currentDirty = true
+            }
+        }
+
+        mutating func drain() -> [LogEntry] {
+            var out = done
+            done = []
+            if let c = current, currentDirty { out.append(c) }
+            currentDirty = false
+            return out
+        }
+    }
+
+    fileprivate static let minuteFormatter: DateFormatter = {
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd HH:mm"; return f
     }()
 
-    private struct Fields {
+    fileprivate struct Fields {
         var date: Date?
         var secondsInMinute: Double
         var time, level, process, pid, thread, subsystem, message: String
     }
 
-    private static func scan(_ line: Substring) -> Fields? {
+    fileprivate static func scan(_ line: Substring) -> Fields? {
         let r: Fields?? = line.utf8.withContiguousStorageIfAvailable { b -> Fields? in
             let n = b.count
             func digit(_ i: Int) -> Bool { i < n && b[i] >= 0x30 && b[i] <= 0x39 }

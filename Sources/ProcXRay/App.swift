@@ -96,6 +96,14 @@ struct ProcXRayApp: App {
             Bench.trace(pid: pid, seconds: secs, ktrace: CommandLine.arguments.contains("--ktrace"), out: a.count > 2 ? a[2] : nil)
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--log-live") {
+            // --log-live <pid> <seconds> <out.txt>: the Logs pane's Live session without the UI; writes the
+            // lines it kept (history, then streamed), for checking the join against a later `log show`.
+            let a = Array(CommandLine.arguments[(i + 1)...])
+            guard a.count >= 3, let pid = Int32(a[0]), let secs = Double(a[1]) else { print("usage: --log-live <pid> <seconds> <out.txt>"); exit(2) }
+            Bench.logLive(pid: pid, seconds: secs, out: a[2])
+            exit(0)
+        }
         if CommandLine.arguments.contains("--security") {
             print(SystemSecurity.current.summary)
             exit(0)

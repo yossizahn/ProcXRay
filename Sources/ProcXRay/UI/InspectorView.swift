@@ -57,7 +57,8 @@ struct InspectorView: View {
                             // A new process gets a new tracer (and the old one's trace stops).
                             SyscallTraceView(proc: proc, exited: exited).id(proc.key)
                         } else {
-                            logs
+                            // A new process gets a new session (and the old one's stream stops).
+                            LogsPane(proc: proc, exited: exited).id(proc.key)
                         }
                     }
                 }
@@ -66,19 +67,6 @@ struct InspectorView: View {
         }
         // Pin a new window to the tab in use when it opened; from then on other windows don't move it.
         .onAppear { if windowTab == nil { windowTab = lastTab.rawValue } }
-    }
-
-    private var logs: some View {
-        let pid = proc.pid
-        // `log show` reads history, not the process, so it still works after an exit.
-        return CommandTab(key: "log\(proc.key)", auto: false,
-                          title: "/usr/bin/log show --last 10m — events from pid \(pid) or mentioning it",
-                          command: {
-                              // Full path on purpose: zsh has a `log` builtin that silently shadows /usr/bin/log.
-                              Shell.run("/usr/bin/log", ["show", "--last", "10m", "--style", "compact", "--info",
-                                  "--predicate", "processID == \(pid) OR eventMessage CONTAINS \"\(pid)\""], timeout: 120)
-                          },
-                          parse: { LogParser.parse($0) }, isEmpty: \.isEmpty) { LogView(entries: $0, filter: $1) }
     }
 
     /// lsof / vmmap / sample need root (or task_for_pid rights) for most processes: route them through

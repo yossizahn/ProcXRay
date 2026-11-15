@@ -338,40 +338,12 @@ enum Shell {
     /// /usr/bin/true), posix_spawn 2–4 ms, which matters for tools run once per process (launchctl print pid/…).
     static func exec(_ path: String, _ args: [String], mergeStderr: Bool = true,
                      timeout: Double = 60, maxBytes: Int = 64 << 20, discardStdout: Bool = false) -> Result {
-        var fds: [Int32] = [-1, -1]
-        guard pipe(&fds) == 0 else { return Result(output: "failed to run \(path): no pipe", status: -1) }
-        var actions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&actions)
-        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
-        if discardStdout {
-            posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
-            posix_spawn_file_actions_adddup2(&actions, fds[1], 2)
-        } else {
-            posix_spawn_file_actions_adddup2(&actions, fds[1], 1)
+        let child: Child, fd: Int32
+        switch spawn(path, args, mergeStderr: mergeStderr, discardStdout: discardStdout) {
+        case .success(let r): (child, fd) = r
+        case .failure(let e): return Result(output: e.message, status: -1)
         }
-        if discardStdout {
-        } else if mergeStderr {
-            posix_spawn_file_actions_adddup2(&actions, fds[1], 2)
-        } else {
-            posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
-        }
-        var attr: posix_spawnattr_t?
-        posix_spawnattr_init(&attr)
-        // Only stdin, stdout and stderr reach the tool: none of the app's other descriptors.
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
-        var pid: pid_t = 0
-        let argv: [UnsafeMutablePointer<CChar>?] = ([path] + args).map { strdup($0) } + [nil]
-        let rc = posix_spawn(&pid, path, &actions, &attr, argv, environ)
-        argv.forEach { free($0) }
-        posix_spawn_file_actions_destroy(&actions)
-        posix_spawnattr_destroy(&attr)
-        close(fds[1])
-        guard rc == 0 else {
-            close(fds[0])
-            return Result(output: "failed to run \(path): \(String(cString: strerror(rc)))", status: -1)
-        }
-        let child = Child(pid)
-        defer { close(fds[0]) }
+        defer { close(fd) }
         func stop() {
             child.signal(SIGTERM)
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) { child.signal(SIGKILL) }
@@ -379,7 +351,6 @@ enum Shell {
 
         let cancel = Cancel.current
         var cancelled = false
-        let fd = fds[0]
         let start = DispatchTime.now()
         var exitedAt: DispatchTime?
         var data = Data()
@@ -427,6 +398,95 @@ enum Shell {
         if truncated, let nl = data.lastIndex(of: 0x0A) { data = data[..<nl] }
         return Result(output: String(decoding: data, as: UTF8.self), status: status,
                       timedOut: timedOut, truncated: truncated)
+    }
+
+    struct SpawnError: Error { var message: String }
+
+    /// Starts the tool with stdin on /dev/null and its output on a pipe; returns the child and the pipe's
+    /// read end, which the caller closes.
+    private static func spawn(_ path: String, _ args: [String], mergeStderr: Bool,
+                              discardStdout: Bool) -> Swift.Result<(Child, Int32), SpawnError> {
+        var fds: [Int32] = [-1, -1]
+        guard pipe(&fds) == 0 else { return .failure(SpawnError(message: "failed to run \(path): no pipe")) }
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        if discardStdout {
+            posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
+            posix_spawn_file_actions_adddup2(&actions, fds[1], 2)
+        } else {
+            posix_spawn_file_actions_adddup2(&actions, fds[1], 1)
+        }
+        if discardStdout {
+        } else if mergeStderr {
+            posix_spawn_file_actions_adddup2(&actions, fds[1], 2)
+        } else {
+            posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
+        }
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        // Only stdin, stdout and stderr reach the tool: none of the app's other descriptors.
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
+        var pid: pid_t = 0
+        let argv: [UnsafeMutablePointer<CChar>?] = ([path] + args).map { strdup($0) } + [nil]
+        let rc = posix_spawn(&pid, path, &actions, &attr, argv, environ)
+        argv.forEach { free($0) }
+        posix_spawn_file_actions_destroy(&actions)
+        posix_spawnattr_destroy(&attr)
+        close(fds[1])
+        guard rc == 0 else {
+            close(fds[0])
+            return .failure(SpawnError(message: "failed to run \(path): \(String(cString: strerror(rc)))"))
+        }
+        return .success((Child(pid), fds[0]))
+    }
+
+    /// Runs a tool that writes lines until it is stopped (`log stream`), handing over each read's complete
+    /// lines as they arrive. Returns when the tool exits, or once `Cancel.current` is cancelled and the
+    /// tool has been stopped: its exit status, or -1 with the reason if it couldn't be started.
+    static func stream(_ path: String, _ args: [String], onLines: ([Substring]) -> Void) -> (status: Int32, error: String?) {
+        let child: Child, fd: Int32
+        switch spawn(path, args, mergeStderr: true, discardStdout: false) {
+        case .success(let r): (child, fd) = r
+        case .failure(let e): return (-1, e.message)
+        }
+        defer { close(fd) }
+        let cancel = Cancel.current
+        var stoppedAt: DispatchTime?
+        var partial = Data()
+        var buf = [UInt8](repeating: 0, count: 64 << 10)
+        func deliver(_ d: Data) {
+            let text = String(decoding: d, as: UTF8.self)
+            onLines(text.split(separator: "\n", omittingEmptySubsequences: false))
+        }
+        while true {
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&pfd, 1, 100)
+            if ready > 0 {
+                let n = read(fd, &buf, buf.count)
+                if n == 0 { break }   // EOF: the tool closed its output (it exited)
+                if n < 0 { if errno == EINTR { continue } else { break } }
+                partial.append(contentsOf: buf.prefix(n))
+                // Only whole lines: a read can end mid-line, or mid-character.
+                if let nl = partial.lastIndex(of: 0x0A) {
+                    deliver(partial[partial.startIndex..<nl])
+                    partial = Data(partial[(nl + 1)...])
+                }
+            } else if ready < 0 && errno != EINTR {
+                break
+            }
+            if stoppedAt == nil, cancel?.isCancelled == true {
+                stoppedAt = .now()
+                child.signal(SIGTERM)
+            }
+            // A tool that ignores SIGTERM, or a child of it holding the pipe open: don't wait forever.
+            if let t = stoppedAt, DispatchTime.now().uptimeNanoseconds - t.uptimeNanoseconds > 2_000_000_000 {
+                child.signal(SIGKILL)
+                break
+            }
+        }
+        if !partial.isEmpty { deliver(partial) }
+        return (child.wait(), nil)
     }
 
     /// A spawned tool. Reaping and signalling share a lock, so a late SIGKILL can never reach a pid that

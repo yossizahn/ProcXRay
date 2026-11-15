@@ -1126,7 +1126,15 @@ extension LogEntry.Level {
 struct LogView: View {
     let entries: [LogEntry]
     let filter: String
+    /// Bumped by a live stream each time `entries` grows.
+    var revision = 0
+    /// Keep the newest row in view as rows arrive.
+    var follow = false
+    /// Oldest events a live stream let go.
+    var dropped = 0
     @State private var levels: Set<LogEntry.Level> = []
+    /// The filter the newest recompute is for (see the task below).
+    @State private var wanted = ""
     /// Filtered rows, level counts and histogram, computed off the main thread once per filter/level
     /// change. Recomputing them in `body` cost ~150 ms per render for 100,000 events: every keystroke,
     /// resize or parent update blocked the UI.
@@ -1134,6 +1142,9 @@ struct LogView: View {
 
     struct Filtered: Sendable {
         var key: String
+        var revision: Int
+        /// Id of the newest entry filtered, or -1.
+        var scanned: Int
         var rows: [LogEntry]
         var counts: [LogEntry.Level: Int]
         var hist: Histogram?
@@ -1145,7 +1156,7 @@ struct LogView: View {
         var bins: [[LogEntry.Level: Int]]
     }
 
-    private var key: String { "\(filter)\u{0}\(levels.map(\.rawValue).sorted())" }
+    private var filterKey: String { "\(filter)\u{0}\(levels.map(\.rawValue).sorted())" }
 
     var body: some View {
         Group {
@@ -1155,24 +1166,47 @@ struct LogView: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task(id: key) {
-            let key = key, entries = entries, filter = filter, levels = levels
-            // Typing: wait for a pause before filtering 100,000 rows (the first pass runs right away).
-            if view != nil { try? await Task.sleep(for: .milliseconds(150)) }
+        .task(id: "\(filterKey)\u{0}\(revision)") {
+            let key = filterKey, revision = revision, entries = entries, filter = filter, levels = levels
+            wanted = key
+            // Typing: wait for a pause before filtering 100,000 rows (the first pass, and new rows from a
+            // live stream, run right away).
+            if let v = view, v.key != key { try? await Task.sleep(for: .milliseconds(150)) }
             guard !Task.isCancelled else { return }
-            let v = await Task.detached(priority: .userInitiated) { Self.compute(key, entries, filter, levels) }.value
-            guard !Task.isCancelled else { return }
+            let prev = view?.key == key ? view : nil
+            let v = await Task.detached(priority: .userInitiated) { Self.compute(key, revision, entries, filter, levels, prev: prev) }.value
+            // Cancelled by newer rows rather than a new filter: still show it, or a stream that adds rows
+            // faster than they're filtered would never show any.
+            guard v.key == wanted, v.revision >= view?.revision ?? .min || v.key != view?.key else { return }
             view = v
         }
     }
 
-    nonisolated static func compute(_ key: String, _ entries: [LogEntry], _ filter: String,
-                                    _ levels: Set<LogEntry.Level>) -> Filtered {
+    /// `prev`: an earlier result for the same filter. A live stream only adds entries at the end (the newest
+    /// one possibly extended by a continuation line) and drops the oldest, so only entries from the last
+    /// one `prev` saw are filtered again: with a text filter, a full pass over 100,000 entries took 326 ms.
+    nonisolated static func compute(_ key: String, _ revision: Int, _ entries: [LogEntry], _ filter: String,
+                                    _ levels: Set<LogEntry.Level>, prev: Filtered? = nil) -> Filtered {
         var counts: [LogEntry.Level: Int] = [:]
         for e in entries { counts[e.level, default: 0] += 1 }
-        let rows = filter.isEmpty && levels.isEmpty ? entries : entries.filter {
-            (levels.isEmpty || levels.contains($0.level)) &&
-            (filter.isEmpty || $0.message.localizedCaseInsensitiveContains(filter) || $0.subsystem.localizedCaseInsensitiveContains(filter))
+        func keep(_ e: LogEntry) -> Bool {
+            (levels.isEmpty || levels.contains(e.level)) &&
+            (filter.isEmpty || e.message.localizedCaseInsensitiveContains(filter) || e.subsystem.localizedCaseInsensitiveContains(filter))
+        }
+        var rows: [LogEntry]
+        if filter.isEmpty && levels.isEmpty {
+            rows = entries
+        } else if let prev, let first = entries.first, prev.scanned >= first.id {
+            rows = prev.rows
+            let gone = rows.firstIndex { $0.id >= first.id } ?? rows.count
+            rows.removeFirst(gone)
+            while let l = rows.last, l.id >= prev.scanned { rows.removeLast() }
+            // Entry ids increase along the array: binary-search where prev stopped.
+            var lo = 0, hi = entries.count
+            while lo < hi { let m = (lo + hi) / 2; if entries[m].id < prev.scanned { lo = m + 1 } else { hi = m } }
+            rows += entries[lo...].filter(keep)
+        } else {
+            rows = entries.filter(keep)
         }
         var lo = Date.distantFuture, hi = Date.distantPast
         for e in rows { if let d = e.date { if d < lo { lo = d }; if d > hi { hi = d } } }
@@ -1186,7 +1220,7 @@ struct LogView: View {
             let peak = max(bins.map { $0.values.reduce(0, +) }.max() ?? 1, 1)
             hist = Histogram(lo: lo, hi: hi, step: step, peak: peak, bins: bins)
         }
-        return Filtered(key: key, rows: rows, counts: counts, hist: hist)
+        return Filtered(key: key, revision: revision, scanned: entries.last?.id ?? -1, rows: rows, counts: counts, hist: hist)
     }
 
     private func content(_ v: Filtered) -> some View {
@@ -1205,11 +1239,22 @@ struct LogView: View {
                     .accessibilityAddTraits(on ? .isSelected : [])
                 }
                 Spacer()
-                if v.key != key { ProgressView().controlSize(.small) }   // a newer filter is being applied
-                Text(verbatim: "\(rows.count) of \(entries.count) events").font(.caption).foregroundStyle(.secondary)
+                if v.key != filterKey { ProgressView().controlSize(.small) }   // a newer filter is being applied
+                Text(verbatim: "\(rows.count) of \(entries.count) events" + (dropped > 0 ? " (\(dropped) oldest dropped)" : ""))
+                    .font(.caption).foregroundStyle(.secondary)
             }
             .padding(8)
             histogram(v.hist).frame(height: 70).padding(.horizontal, 8).padding(.bottom, 6)
+            ScrollViewReader { proxy in
+                table(rows)
+                    .onChange(of: rows.last?.id) { _, id in if follow, let id { proxy.scrollTo(id, anchor: .bottom) } }
+                    .onChange(of: follow) { _, on in if on, let id = rows.last?.id { proxy.scrollTo(id, anchor: .bottom) } }
+                    .onAppear { if follow, let id = rows.last?.id { proxy.scrollTo(id, anchor: .bottom) } }
+            }
+        }
+    }
+
+    private func table(_ rows: [LogEntry]) -> some View {
             Table(rows) {
                 TableColumn("Time") { e in Text(e.time).monospacedDigit().foregroundStyle(.secondary) }.width(min: 80, ideal: 90, max: 110)
                 TableColumn("Level") { e in Pill(text: e.level.rawValue, color: e.level.color) }.width(min: 54, ideal: 60, max: 70)
@@ -1225,7 +1270,6 @@ struct LogView: View {
                 }.width(min: 110, ideal: 170, max: 260)
                 TableColumn("Message") { e in Text(e.message).lineLimit(2).help(e.message) }
             }
-        }
     }
 
     private static let timeFormatter: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f }()
