@@ -116,8 +116,8 @@ struct VoucherFlowsView: View {
         let forOthers = lines(r, forOthers: true), byOthers = lines(r, forOthers: false)
         let energy = (forOthers + byOthers).contains { $0.energy > 0 }
         HStack(alignment: .top, spacing: 24) {
-            list("Worked for", forOthers, energy: energy, empty: "No settlements of work \(subject) did for others.")
-            list("Worked for \(pids.count == 1 ? "it" : "them") by", byOthers, energy: energy, empty: "No settlements of work others did for \(subject).")
+            list("Did work for", forOthers, energy: energy, empty: "No settlements of work \(subject) did for others.")
+            list("Had work done by", byOthers, energy: energy, empty: "No settlements of work others did for \(subject).")
         }
         let total = { (ls: [Line]) in ls.reduce(UInt64(0)) { $0 + $1.cpu } }
         Text(caption(r, at: at, grew: grew, settled: (total(forOthers), total(byOthers))))
