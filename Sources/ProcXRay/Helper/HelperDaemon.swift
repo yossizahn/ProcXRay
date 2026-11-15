@@ -141,17 +141,35 @@ enum HelperDaemon {
         // MARK: syscall trace
 
         private let traceLock = NSLock()
-        private var trace: TraceProcess?
+        private var trace: TraceSource?
+        private var traceRunning: Bool { trace.map { $0.read(max: 0).1 } ?? false }
 
-        func traceStart(pid: Int32, reply: @escaping (String?) -> Void) {
-            guard let (path, args) = SyscallTraceConfig.argv(pid: pid) else { reply("helper: rejected pid \(pid)"); return }
-            guard mayInspect(pid) else { reply("Only an admin user can trace another user's processes."); return }
+        func traceStart(pid: Int32, reply: @escaping (String?, Int) -> Void) {
+            guard let (path, args) = SyscallTraceConfig.argv(pid: pid) else { reply("helper: rejected pid \(pid)", 0); return }
+            guard mayInspect(pid) else { reply("Only an admin user can trace another user's processes.", 0); return }
             traceLock.lock(); defer { traceLock.unlock() }
-            if let t = trace, t.read(max: 0).1 { reply("A trace is already running on this connection."); return }
-            let t = TraceProcess(maxPending: SyscallTraceConfig.maxPending)
-            if let err = t.start(path, args) { reply(err); return }
+            if traceRunning { reply("A trace is already running on this connection.", 0); return }
+            // The helper's own kdebug reader unless told to use Apple's tools; ktrace when the reader can't set up
+            // for any reason but another tracer holding kdebug (which ktrace would hit too).
+            var note = ""
+            if NativeTools.enabled {
+                switch KdebugTrace.start(pid: pid, maxPending: SyscallTraceConfig.maxPending, maxSeconds: SyscallTraceConfig.maxSeconds) {
+                case .success(let t):
+                    trace = t
+                    reply(nil, SyscallTraceConfig.Format.kdebug.rawValue)
+                    return
+                case .failure(.refused(let why)):
+                    reply(why, 0)
+                    return
+                case .failure(.failed(let why)):
+                    NSLog("ProcXRay helper: kdebug reader failed (%@), using ktrace", why)
+                    note = "The helper could not read the kernel trace itself (\(why)): using ktrace, which loses events above ~80k calls/s without saying so.\n"
+                }
+            }
+            let t = TraceProcess(maxPending: SyscallTraceConfig.maxPending, note: note)
+            if let err = t.start(path, args) { reply(err, 0); return }
             trace = t
-            reply(nil)
+            reply(nil, SyscallTraceConfig.Format.ndjson.rawValue)
         }
 
         func traceRead(reply: @escaping (Data, Bool, String) -> Void) {

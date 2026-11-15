@@ -1,8 +1,8 @@
 import Darwin
 import Foundation
 
-// Syscall trace: kdebug events from `ktrace trace --ndjson` (run by the helper, see SyscallTraceConfig),
-// paired into strace-style records.
+// Syscall trace: kdebug events, read by the helper (KdebugTrace, raw records) or from `ktrace trace --ndjson`
+// (see SyscallTraceConfig), paired into strace-style records.
 //
 // What the events carry (checked against a real trace of Finder):
 //   debugid: class << 24 | subclass << 16 | code << 2 | func. Syscalls are class 4 / subclass 0x0c (BSD) and
@@ -55,7 +55,7 @@ struct SyscallRecord: Identifiable, Sendable, Hashable {
     var pathText: String { paths.joined(separator: "  ") }
 }
 
-/// The `ktrace --ndjson` event fields this needs. In the JSON, numbers that can exceed 2^53 are strings.
+/// One kdebug event: the fields this needs, from the helper's raw records or `ktrace --ndjson`.
 struct KdebugEvent: Sendable {
     var ts: UInt64 = 0
     var eventname: String?
@@ -67,6 +67,33 @@ struct KdebugEvent: Sendable {
     var subclass: UInt32 { (debugid >> 16) & 0xff }
     var code: Int { Int((debugid >> 2) & 0x3fff) }
     var fn: UInt32 { debugid & 3 }
+
+    static let lostEvents: UInt32 = 0x0702_0008   // TRACE_LOST_EVENTS: the kernel lost events here
+
+    /// The helper's KdebugTrace.Record layout (the kernel's kd_buf, timestamp in ns since the trace started).
+    /// Names come from trace.codes, as ktrace's do.
+    static func decodeRaw(_ chunk: Data) -> [KdebugEvent] {
+        let size = 64
+        let names = KdebugNames.table
+        var out: [KdebugEvent] = []
+        out.reserveCapacity(chunk.count / size)
+        chunk.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var o = 0
+            while o + size <= raw.count {
+                let debugid = raw.loadUnaligned(fromByteOffset: o + 48, as: UInt32.self)
+                out.append(KdebugEvent(ts: raw.loadUnaligned(fromByteOffset: o, as: UInt64.self),
+                                       eventname: names[debugid & ~3],
+                                       debugid: debugid,
+                                       arg: [raw.loadUnaligned(fromByteOffset: o + 8, as: UInt64.self),
+                                             raw.loadUnaligned(fromByteOffset: o + 16, as: UInt64.self),
+                                             raw.loadUnaligned(fromByteOffset: o + 24, as: UInt64.self),
+                                             raw.loadUnaligned(fromByteOffset: o + 32, as: UInt64.self)],
+                                       thread: raw.loadUnaligned(fromByteOffset: o + 40, as: UInt64.self)))
+                o += size
+            }
+        }
+        return out
+    }
 
     private struct JSON: Decodable {
         let timestampns: String
@@ -187,6 +214,23 @@ struct KdebugEvent: Sendable {
     }
 }
 
+/// Event names by debugid (function bits clear), from /usr/share/misc/trace.codes: the file ktrace names
+/// events from. Lines are "0x40c0548\tBSC_stat64".
+enum KdebugNames {
+    static let table: [UInt32: String] = load("/usr/share/misc/trace.codes")
+
+    static func load(_ path: String) -> [UInt32: String] {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [:] }
+        var t: [UInt32: String] = [:]
+        for line in text.split(separator: "\n") {
+            let f = line.split(whereSeparator: { $0 == "\t" || $0 == " " })
+            guard f.count >= 2, f[0].hasPrefix("0x"), let id = UInt32(f[0].dropFirst(2), radix: 16) else { continue }
+            t[id] = String(f[1])
+        }
+        return t
+    }
+}
+
 /// Pairs entries with returns, per thread, and hangs path lookups on the call making them.
 struct SyscallDecoder: Sendable {
     private struct Open: Sendable {
@@ -196,11 +240,19 @@ struct SyscallDecoder: Sendable {
     private var open: [UInt64: [Open]] = [:]
     private var lookups: [UInt64: Data] = [:]
     private var nextID = 0
+    /// Places where the kernel lost events.
+    private(set) var gaps = 0
 
     /// Completed records, in the order they returned.
     mutating func feed(_ events: [KdebugEvent]) -> [SyscallRecord] {
         var out: [SyscallRecord] = []
         for e in events {
+            if e.debugid == KdebugEvent.lostEvents {
+                // A call open across the gap may have returned in it: pairing its entry with a later return of the
+                // same call would be wrong, so start over. Returns of calls entered before show as entryMissed.
+                open = [:]; lookups = [:]; gaps += 1
+                continue
+            }
             if e.cls == 3 && e.subclass == 1 && e.code == 0x24 { lookup(e); continue }
             guard e.subclass == 0x0c, e.cls == 4 || e.cls == 1 else { continue }
             let base = e.debugid & ~3
@@ -284,7 +336,7 @@ enum SyscallFormat {
         set(["read", "write"], [.fd, .ptr, .size])
         set(["pread", "pwrite"], [.fd, .ptr, .size, .int])
         set(["readv", "writev", "preadv", "pwritev"], [.fd, .ptr, .int])
-        set(["close", "fsync", "fchdir", "dup"], [.fd])
+        set(["close", "sys_close", "fsync", "fchdir", "dup"], [.fd])   // trace.codes names close BSC_sys_close
         set(["dup2"], [.fd, .fd])
         set(["open"], [.ptr, .oflags, .mode])
         set(["openat"], [.dirfd, .ptr, .oflags, .mode])

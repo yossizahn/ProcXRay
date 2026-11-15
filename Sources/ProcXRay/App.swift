@@ -88,6 +88,14 @@ struct ProcXRayApp: App {
             Bench.helperCall(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--trace") {
+            // As root: --trace <pid> <seconds> [--ktrace] [out.tsv]. One syscall trace in-process, through the kdebug
+            // reader (or ktrace) and the app's decoder; records written as tab-separated text for diffing the two.
+            let a = Array(CommandLine.arguments[(i + 1)...]).filter { $0 != "--ktrace" }
+            guard a.count >= 2, let pid = Int32(a[0]), let secs = Double(a[1]) else { print("usage: --trace <pid> <seconds> [--ktrace] [out.tsv]"); exit(2) }
+            Bench.trace(pid: pid, seconds: secs, ktrace: CommandLine.arguments.contains("--ktrace"), out: a.count > 2 ? a[2] : nil)
+            exit(0)
+        }
         if CommandLine.arguments.contains("--security") {
             print(SystemSecurity.current.summary)
             exit(0)

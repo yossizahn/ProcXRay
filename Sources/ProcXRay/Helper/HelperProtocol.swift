@@ -63,20 +63,28 @@ enum HelperConfig {
     /// run (or a new one if it has none). Admin callers only. (JSON MachPortDetailReply, nil) or (nil, why not).
     func machPortDetail(pid: Int32, peer: Int32, reply: @escaping (Data?, String?) -> Void)
 
-    /// Syscall trace of one process (kdebug through `ktrace trace`), at most one per connection. The trace
-    /// stops when the connection ends, so the app gives each trace a connection of its own.
-    /// Reply: nil when started, else why not.
-    func traceStart(pid: Int32, reply: @escaping (String?) -> Void)
-    /// Complete ndjson lines written since the last read (up to `SyscallTraceConfig.maxRead`), whether
-    /// ktrace is still running, and anything it wrote to stderr or the helper has to say (drops, exit).
+    /// Syscall trace of one process (kdebug, read by the helper itself or through `ktrace trace`), at most one
+    /// per connection. The trace stops when the connection ends, so the app gives each trace a connection of its own.
+    /// Reply: (nil, SyscallTraceConfig.Format raw value) when started, else (why not, 0).
+    func traceStart(pid: Int32, reply: @escaping (String?, Int) -> Void)
+    /// Data written since the last read (up to `SyscallTraceConfig.maxRead`, whole records or lines), whether
+    /// the trace is still running, and anything ktrace wrote to stderr or the helper has to say (drops, exit).
     func traceRead(reply: @escaping (Data, Bool, String) -> Void)
     func traceStop(reply: @escaping () -> Void)
 }
 
-/// The one ktrace command line the helper runs for a trace.
+/// What the helper traces, and the one ktrace command line it runs when it doesn't read kdebug itself.
 enum SyscallTraceConfig {
+    /// How `traceRead`'s data is laid out.
+    enum Format: Int {
+        /// `ktrace trace --ndjson` lines.
+        case ndjson = 1
+        /// KdebugTrace.Record, 64 bytes each.
+        case kdebug = 2
+    }
     /// BSD syscalls (class 4, subclass 0x0c), Mach traps (1/0x0c) and VFS path lookups (3/0x01).
-    static let filter = "S0x040c,S0x010c,S0x0301"
+    static let classSubclasses: [UInt16] = [0x040c, 0x010c, 0x0301]
+    static let filter = classSubclasses.map { "S0x" + String(format: "%04x", $0) }.joined(separator: ",")
     /// A forgotten trace ends on its own.
     static let maxSeconds = 15 * 60
     static func argv(pid: Int32) -> (String, [String])? {

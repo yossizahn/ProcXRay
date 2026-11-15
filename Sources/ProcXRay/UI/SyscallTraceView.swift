@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Drives one syscall trace: the helper runs ktrace, a background loop reads and pairs its events.
+/// Drives one syscall trace: the helper reads kdebug (or runs ktrace), a background loop reads and pairs its events.
 @MainActor @Observable
 final class SyscallTracer {
     enum Phase: Equatable { case idle, starting, running, stopping, stopped }
@@ -48,8 +48,11 @@ final class SyscallTracer {
     private nonisolated static func run(pid: Int32, start: Date, flag: Shell.Cancel, tracer: SyscallTracer) async {
         let s = HelperTraceSession()
         defer { s.close() }
-        if let err = s.start(pid: pid) {
-            await tracer.finish([], note: err)
+        let format: SyscallTraceConfig.Format
+        switch s.start(pid: pid) {
+        case .success(let f): format = f
+        case .failure(let e):
+            await tracer.finish([], note: e.message)
             return
         }
         await tracer.setPhase(.running)
@@ -74,7 +77,7 @@ final class SyscallTracer {
                 endNote = "Lost the connection to the helper."
                 break
             }
-            let (evs, bad) = KdebugEvent.decode(data)
+            let (evs, bad) = format == .kdebug ? (KdebugEvent.decodeRaw(data), 0) : KdebugEvent.decode(data)
             let recs = dec.feed(evs)
             var n = notes.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
             if bad > 0 { n.append("\(bad) unreadable trace lines skipped.") }
@@ -82,7 +85,7 @@ final class SyscallTracer {
                 await tracer.append(recs, events: evs.count, notes: n)
             }
             if !running { break }
-            if let t = stopTime, Date().timeIntervalSince(t) > deadlineAfterStop { endNote = endNote ?? "ktrace did not stop in time."; break }
+            if let t = stopTime, Date().timeIntervalSince(t) > deadlineAfterStop { endNote = endNote ?? "The trace did not stop in time."; break }
             // A full read means more is waiting: read again right away.
             if data.count < SyscallTraceConfig.maxRead / 2 { try? await Task.sleep(for: .milliseconds(250)) }
         }
@@ -177,7 +180,7 @@ struct SyscallTraceView: View {
                     Label(tracer.phase == .idle ? "Trace" : "Trace again", systemImage: "record.circle")
                 }
                 .disabled(disabledReason != nil)
-                .help(disabledReason ?? "Trace this process's BSD syscalls and Mach traps (ktrace, as root via the helper)")
+                .help(disabledReason ?? "Trace this process's BSD syscalls and Mach traps (kdebug, as root via the helper)")
             }
             if tracer.phase == .starting || tracer.phase == .stopping { ProgressView().controlSize(.small) }
             Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationHelp(status)
@@ -200,8 +203,8 @@ struct SyscallTraceView: View {
         let dropped = tracer.dropped > 0 ? " · oldest \(tracer.dropped.formatted()) let go" : ""
         let showing = shown.count != tracer.records.count + tracer.pending.count && mode == "Calls" ? " · \(shown.count.formatted()) shown" : ""
         switch tracer.phase {
-        case .idle: return "ktrace trace -p \(proc.pid) -f \(SyscallTraceConfig.filter)"
-        case .starting: return "Starting ktrace…"
+        case .idle: return "kdebug \(SyscallTraceConfig.filter) for pid \(proc.pid)"
+        case .starting: return "Starting the trace…"
         case .running: return "Tracing · \(calls)\(showing)\(dropped)"
         case .stopping: return "Stopping · \(calls)"
         case .stopped: return "Stopped · \(calls)\(showing)\(dropped)"

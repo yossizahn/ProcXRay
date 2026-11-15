@@ -103,6 +103,53 @@ enum Bench {
 
     /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|stacks|powermetrics> [pid] [--full]`:
     /// one helper call from the shell, for testing the helper without the UI. Only this exact binary is accepted by the helper.
+    /// The helper's trace path without XPC: start, read every 250 ms as the app does, decode, pair.
+    static func trace(pid: Int32, seconds: Double, ktrace: Bool, out: String?) {
+        let t0 = Date()
+        let source: TraceSource
+        if ktrace {
+            let t = TraceProcess(maxPending: SyscallTraceConfig.maxPending)
+            guard let (path, args) = SyscallTraceConfig.argv(pid: pid) else { print("bad pid"); return }
+            if let err = t.start(path, args) { print(err); return }
+            source = t
+        } else {
+            switch KdebugTrace.start(pid: pid, maxPending: SyscallTraceConfig.maxPending, maxSeconds: SyscallTraceConfig.maxSeconds) {
+            case .success(let t): source = t
+            case .failure(.refused(let s)), .failure(.failed(let s)): print(s); return
+            }
+        }
+        let started = -t0.timeIntervalSinceNow
+        var dec = SyscallDecoder()
+        var recs: [SyscallRecord] = []
+        var events = 0, bytes = 0, bad = 0
+        var decodeTime = 0.0
+        var stopped = false
+        while true {
+            if !stopped && -t0.timeIntervalSinceNow > seconds { source.stop(); stopped = true }
+            let (d, running, notes) = source.read(max: SyscallTraceConfig.maxRead)
+            if !notes.isEmpty { print("note: " + notes.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let d0 = Date()
+            let (evs, b) = ktrace ? KdebugEvent.decode(d) : (KdebugEvent.decodeRaw(d), 0)
+            recs += dec.feed(evs)
+            decodeTime += -d0.timeIntervalSinceNow
+            events += evs.count; bytes += d.count; bad += b
+            if !running { break }
+            if d.count < SyscallTraceConfig.maxRead / 2 { usleep(250_000) }
+        }
+        let inFlight = dec.pending()
+        var ru = rusage(), rc = rusage(); getrusage(RUSAGE_SELF, &ru); getrusage(RUSAGE_CHILDREN, &rc)
+        func secs(_ t: timeval) -> Double { Double(t.tv_sec) + Double(t.tv_usec) / 1e6 }
+        print(String(format: "%@: started in %.0f ms; %d events, %d bytes, %d bad, %d gaps; %d records + %d in flight; decode+pair %.3f s; CPU %.3f s here + %.3f s ktrace",
+                     ktrace ? "ktrace" : "kdebug", started * 1000, events, bytes, bad, dec.gaps, recs.count, inFlight.count, decodeTime,
+                     secs(ru.ru_utime) + secs(ru.ru_stime), secs(rc.ru_utime) + secs(rc.ru_stime)))
+        guard let out else { return }
+        var text = ""
+        for r in recs + inFlight {
+            text += "\(r.name)\t\(r.argsText)\t\(r.resultText)\t\(r.pathText)\t\(r.state)\n"
+        }
+        FileManager.default.createFile(atPath: out, contents: Data(text.utf8))
+    }
+
     static func helperCall(_ args: [String]) {
         let c = HelperClient.shared
         print(c.probe().label)
@@ -127,6 +174,31 @@ enum Bench {
                 for d in r.ports.prefix(12) { print("  \(d)") }
             case .failure(let e): print("machports: \(e.message)")
             }
+            return
+        }
+        if what == "trace" {
+            // trace <pid> <seconds>: through the helper over XPC, as SyscallTracer does.
+            let secs = args.dropFirst(2).first.flatMap { Double($0) } ?? 3
+            let s = HelperTraceSession()
+            let t0 = Date()
+            let format: SyscallTraceConfig.Format
+            switch s.start(pid: pid) {
+            case .success(let f): format = f
+            case .failure(let e): print("trace: \(e.message)"); return
+            }
+            print(String(format: "trace: format %@, started in %.0f ms", "\(format)", -t0.timeIntervalSinceNow * 1000))
+            var dec = SyscallDecoder(); var recs = 0, events = 0, stopped = false
+            var names: [String: Int] = [:]
+            while let (d, running, notes) = s.read() {
+                if !stopped && -t0.timeIntervalSinceNow > secs { s.stop(); stopped = true }
+                if !notes.isEmpty { print("note: " + notes.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                let evs = format == .kdebug ? KdebugEvent.decodeRaw(d) : KdebugEvent.decode(d).events
+                events += evs.count
+                for r in dec.feed(evs) { recs += 1; names[r.name, default: 0] += 1 }
+                if !running { break }
+                if d.count < SyscallTraceConfig.maxRead / 2 { usleep(250_000) }
+            }
+            print("trace: \(events) events, \(recs) records, \(dec.gaps) gaps; top: " + names.sorted { $0.value > $1.value }.prefix(6).map { "\($0.key) \($0.value)" }.joined(separator: ", "))
             return
         }
         if what == "threads" {

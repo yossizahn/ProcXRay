@@ -3,7 +3,7 @@ import Foundation
 /// A long-running tool whose output is read while it runs (Shell.exec only returns once the tool exits).
 /// Used by the helper for `ktrace trace`: stdout is buffered until the app reads it, stderr is kept apart
 /// so ktrace's own messages (busy, lost events) reach the app as notes, not as broken JSON lines.
-final class TraceProcess: @unchecked Sendable {
+final class TraceProcess: TraceSource, @unchecked Sendable {
     private let lock = NSLock()
     private var pid: pid_t = 0
     private var exited = false
@@ -14,7 +14,7 @@ final class TraceProcess: @unchecked Sendable {
     private var droppedBytes = 0
     private let maxPending: Int
 
-    init(maxPending: Int) { self.maxPending = maxPending }
+    init(maxPending: Int, note: String = "") { self.maxPending = maxPending; notes = note }
 
     /// nil when started, else why not.
     func start(_ path: String, _ args: [String]) -> String? {
@@ -58,12 +58,8 @@ final class TraceProcess: @unchecked Sendable {
         } else if exited {
             chunk = pending; pending = Data()   // a last line without a newline
         }
-        var n = notes
+        let n = notes
         notes = ""
-        if droppedBytes > 0 {
-            n += "Dropped \(droppedBytes) bytes of trace output: the app fell behind.\n"
-            droppedBytes = 0
-        }
         return (chunk, !exited || !pending.isEmpty, n)
     }
 
@@ -99,7 +95,11 @@ final class TraceProcess: @unchecked Sendable {
                 guard n > 0 else { continue }
                 lock.lock()
                 if i == 0 {
-                    if pending.count + n > maxPending { droppedBytes += n } else { pending.append(contentsOf: buf[0..<n]) }
+                    if pending.count + n > maxPending {
+                        // Said once here (notes are shown deduplicated), with the total when ktrace ends.
+                        if droppedBytes == 0 { notes += "The app fell behind the trace: output is being dropped.\n" }
+                        droppedBytes += n
+                    } else { pending.append(contentsOf: buf[0..<n]) }
                 } else if notes.utf8.count < 64 << 10 {
                     notes += String(decoding: buf[0..<n], as: UTF8.self)
                 }
@@ -118,6 +118,7 @@ final class TraceProcess: @unchecked Sendable {
         let low = st & 0x7f
         exitStatus = low == 0 ? (st >> 8) & 0xff : low
         if !stopRequested && exitStatus != 0 { notes += "ktrace exited with status \(exitStatus).\n" }
+        if droppedBytes > 0 { notes += "\(droppedBytes) bytes of trace output were dropped in all because the app fell behind.\n" }
         lock.unlock()
     }
 }

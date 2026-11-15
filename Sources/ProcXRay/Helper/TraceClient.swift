@@ -2,6 +2,8 @@ import Foundation
 
 /// One syscall trace in the helper, on a connection of its own: when this object goes away (or `close()`
 /// is called) the connection ends and the helper stops ktrace, whatever state the app is in.
+struct TraceStartError: Error { let message: String }
+
 final class HelperTraceSession: @unchecked Sendable {
     private let connection: NSXPCConnection
 
@@ -15,10 +17,16 @@ final class HelperTraceSession: @unchecked Sendable {
 
     deinit { connection.invalidate() }
 
-    /// nil when the trace started, else why not.
-    func start(pid: Int32) -> String? {
-        let r: String?? = call(timeout: 10) { p, done in p.traceStart(pid: pid) { done($0) } }
-        return r ?? "The helper did not answer."
+    /// The data format when the trace started, else why not.
+    func start(pid: Int32) -> Result<SyscallTraceConfig.Format, TraceStartError> {
+        guard let (err, f) = call(timeout: 10, { p, done in p.traceStart(pid: pid) { done(($0, $1)) } }) else {
+            return .failure(TraceStartError(message: "The helper did not answer."))
+        }
+        if let err { return .failure(TraceStartError(message: err)) }
+        guard let format = SyscallTraceConfig.Format(rawValue: f) else {
+            return .failure(TraceStartError(message: "The helper sent trace format \(f), which this app doesn't read: quit and reopen the app."))
+        }
+        return .success(format)
     }
 
     /// nil when the helper can't be reached any more.
