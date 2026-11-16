@@ -73,7 +73,7 @@ struct ColumnManager: View {
                     let cols = Column.all.filter { $0.section == section && !shownSet.contains($0.id) && matches($0) }
                     if !cols.isEmpty {
                         SwiftUI.Section {
-                            ForEach(cols) { c in Text(c.title).help(c.tooltip).tag(c.id) }
+                            ForEach(cols) { c in Text(c.fullTitle).help(c.tooltip).tag(c.id) }
                         } header: {
                             Text(section.title)
                         }
@@ -92,7 +92,7 @@ struct ColumnManager: View {
             List(selection: $shownSelection) {
                 ForEach(shown, id: \.self) { id in
                     if let c = Column.byID[id] {
-                        Text(c.title).help(c.tooltip).tag(id)
+                        Text(c.fullTitle).help(c.tooltip).tag(id)
                     }
                 }
                 .onMove { from, to in
@@ -152,7 +152,7 @@ struct ColumnManager: View {
 
     private func matches(_ c: Column) -> Bool {
         let q = search.trimmingCharacters(in: .whitespaces)
-        return q.isEmpty || c.title.localizedCaseInsensitiveContains(q) || c.section.title.localizedCaseInsensitiveContains(q)
+        return q.isEmpty || c.fullTitle.localizedCaseInsensitiveContains(q) || c.section.title.localizedCaseInsensitiveContains(q)
     }
 
     /// Adds after the last selected shown column, or at the end.

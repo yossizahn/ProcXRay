@@ -56,19 +56,22 @@ struct ColumnSort: Hashable, Sendable {
 
 struct Column: Identifiable {
     enum Section: Int, CaseIterable {
-        case identity, ownership, cpu, memory, disk, network, mach, energy, security, time
+        // The one list of sections (docs/ui-regrouping-plan.md, Part 1): menus, the column manager,
+        // the filter's field list and the inspector's cards all follow it.
+        case identity, execution, lineage, cpu, gpu, memory, disk, network, ipc, energy, security
         var title: String {
             switch self {
             case .identity: "Identity"
-            case .ownership: "Ownership"
+            case .execution: "Execution"
+            case .lineage: "Lineage"
             case .cpu: "CPU"
+            case .gpu: "GPU"
             case .memory: "Memory"
             case .disk: "Disk"
             case .network: "Network"
-            case .mach: "Mach ports"
-            case .energy: "Energy and activity"
+            case .ipc: "IPC"
+            case .energy: "Energy"
             case .security: "Security"
-            case .time: "Time"
             }
         }
     }
@@ -92,6 +95,9 @@ struct Column: Identifiable {
     let title: String
     let tooltip: String
     let section: Section
+    /// The system's own name for a cryptic quantity, when the title is a plain phrase ("resource coalition"
+    /// for "Accounting group"). Leads the tooltip; menus and the column manager show "Title (term)".
+    var term: String? = nil
     var minWidth: CGFloat = 50
     var width: CGFloat = 80
     var numeric = false
@@ -107,11 +113,11 @@ struct Column: Identifiable {
     let value: @MainActor (ProcInfo, Store) -> CellValue
 
     /// A column of numbers that add up: the value is `amount`, formatted.
-    static func amount(id: String, title: String, tooltip: String, section: Section, minWidth: CGFloat = 50,
+    static func amount(id: String, title: String, tooltip: String, section: Section, term: String? = nil, minWidth: CGFloat = 50,
                        width: CGFloat = 76, rule: GroupRule = .sum, reads: ExtraReads = [],
                        format: @escaping (Double) -> String,
                        _ amount: @escaping @MainActor (ProcInfo) -> Double?) -> Column {
-        Column(id: id, title: title, tooltip: tooltip, section: section, minWidth: minWidth, width: width, numeric: true,
+        Column(id: id, title: title, tooltip: tooltip, section: section, term: term, minWidth: minWidth, width: width, numeric: true,
                rule: rule, format: format, amount: amount, reads: reads) { p, _ in amount(p).map { .number($0, format($0)) } ?? .unknown }
     }
 
@@ -164,6 +170,9 @@ struct Column: Identifiable {
             return f(members, store)
         }
     }
+
+    /// "Accounting group (resource coalition)": the title with its system term, where there is room.
+    var fullTitle: String { term.map { "\(title) (\($0))" } ?? title }
 
     // MARK: Lookup
 
@@ -244,16 +253,14 @@ private let catalogue: [Column] = [
            section: .identity, minWidth: 180, width: 280, rule: .blank) { p, _ in .text(p.name) },
     Column(id: "pid", title: "PID", tooltip: "Process ID. App rows: the app's own process.",
            section: .identity, minWidth: 44, width: 56, numeric: true, rule: .blank) { p, _ in .number(Double(p.pid), String(p.pid)) },
-    Column(id: "user", title: "User", tooltip: "User the process runs as.",
-           section: .identity, width: 70, rule: .same(noun: "user")) { p, _ in .text(p.user) },
     Column(id: "kind", title: "Kind",
            tooltip: "Where the Smart tree puts it: category, then the role inside its app (\"App · XPC service\", \"Extension · Widgets\").",
            section: .identity, width: 150, rule: .same(noun: "kind")) { p, s in text(s.kind(of: p)) },
+    Column(id: "path", title: "Path", tooltip: "Executable path. App rows: the app's.",
+           section: .identity, width: 260, truncateMiddle: true, rule: .blank) { p, _ in text(p.path) },
     Column(id: "bundleID", title: "Bundle ID",
            tooltip: "Bundle identifier of the app or extension bundle that holds the executable. App rows: the app's.",
            section: .identity, width: 180, rule: .blank) { p, s in text(s.bundleID(of: p)) },
-    Column(id: "path", title: "Path", tooltip: "Executable path. App rows: the app's.",
-           section: .identity, width: 260, truncateMiddle: true, rule: .blank) { p, _ in text(p.path) },
     Column(id: "commandLine", title: "Command line",
            tooltip: "The arguments the process was started with (argv), read once per process. Other users' processes need the helper; \"—\" means they couldn't be read. App rows: the app's.",
            section: .identity, minWidth: 120, width: 360, rule: .blank) { p, _ in
@@ -268,17 +275,37 @@ private let catalogue: [Column] = [
         .text("x86_64")
         #endif
     },
+
+    // Execution
+    Column(id: "user", title: "User", tooltip: "User the process runs as.",
+           section: .execution, width: 70, rule: .same(noun: "user")) { p, _ in .text(p.user) },
     Column(id: "state", title: "State",
            tooltip: "Not responding (WindowServer reports the app hung, as in Activity Monitor), stopped (by a signal such as SIGSTOP), zombie (exited, waiting for its parent) or starting, from the kernel's process state. Empty for a normal live process. Group rows: how many are stopped, zombie or starting.",
-           section: .identity, width: 76,
+           section: .execution, width: 76,
            rule: .custom { ms, _ in
                let n = ms.filter { state($0).hasValue }.count
                return n == 0 ? .empty : .number(Double(n), "\(n) stopped, zombie or hung", .warning)
            }) { p, _ in state(p) },
+    Column(id: "started", title: "Started", tooltip: "Time since the process started. Group rows: the oldest.",
+           section: .execution, minWidth: 50, width: 70, numeric: false, rule: .oldest) { p, _ in .date(p.start, Fmt.age(p.start)) },
+    Column(id: "startTime", title: "Start time", tooltip: "When the process started. Group rows: the oldest.",
+           section: .execution, width: 120, rule: .oldest) { p, _ in .date(p.start, Fmt.date.string(from: Fmt.shownStart(p.start))) },
+    Column(id: "tty", title: "TTY", tooltip: "Controlling terminal.",
+           section: .execution, width: 70, rule: .same(noun: "terminal")) { p, _ in text(p.tty.map(SmartTree.ttyName)) },
+    Column(id: "pgid", title: "Process group", tooltip: "Process group id: a shell job, such as a pipeline, shares one.",
+           section: .execution, width: 90, numeric: true, rule: .same(noun: "group")) { p, _ in
+        .number(Double(p.pgid), String(p.pgid))
+    },
+    Column(id: "idleExit", title: "Idle exit",
+           tooltip: "Dirty tracking (proc_get_dirty): \"can exit\" when launchd or the app lets the system stop it while idle; \"busy\" (dirty) while it has work and is kept. Empty: not tracked.",
+           section: .execution, term: "dirty tracking", width: 100, rule: .same(noun: "state"), reads: .idleExit) { p, _ in
+        guard let s = p.idleExit else { return .unknown }
+        return .text(s.short, s.contains(.dirty) || !s.contains(.allowsIdleExit) ? .secondary : .normal)
+    },
 
-    // Ownership
+    // Lineage
     Column(id: "parent", title: "Parent", tooltip: "Parent process (ppid). App rows: the app's parent.",
-           section: .ownership, width: 130, rule: .blank) { p, s in
+           section: .lineage, width: 130, rule: .blank) { p, s in
         guard p.ppid != p.pid else { return .empty }
         // A "parent" started after its child is a later process that reused the pid.
         guard let par = s.procs[p.ppid], par.start <= p.start else { return .text("gone (\(p.ppid))", .secondary) }
@@ -286,7 +313,7 @@ private let catalogue: [Column] = [
     },
     Column(id: "responsible", title: "Responsible",
            tooltip: "The process macOS holds responsible for this one (for privacy prompts and energy). † marks one that has exited.",
-           section: .ownership, minWidth: 80, width: 130, rule: .blank) { p, s in
+           section: .lineage, minWidth: 80, width: 130, rule: .blank) { p, s in
         if let t = p.leftBehindText { return .text("† \(t)", .warning) }
         guard let r = p.responsible else { return .empty }
         if r == p.pid { return .text("self", .secondary) }
@@ -294,34 +321,28 @@ private let catalogue: [Column] = [
         return .text("† gone (\(r))", .warning)
     },
     Column(id: "label", title: "launchd label", tooltip: "Label of the launchd job this process is the main process of.",
-           section: .ownership, width: 200, rule: .blank) { p, _ in text(p.launchdLabel) },
+           section: .lineage, width: 200, rule: .blank) { p, _ in text(p.launchdLabel) },
     Column(id: "domain", title: "Domain", tooltip: "launchd domain of that job: system, gui or user.",
-           section: .ownership, width: 64, rule: .same(noun: "domain")) { p, _ in text(p.launchdDomain) },
+           section: .lineage, width: 64, rule: .same(noun: "domain")) { p, _ in text(p.launchdDomain) },
     Column(id: "extPoint", title: "Extension point", tooltip: "For an app extension: what it extends.",
-           section: .ownership, width: 130, rule: .same(noun: "extension point")) { p, _ in
+           section: .lineage, width: 130, rule: .same(noun: "extension point")) { p, _ in
         text(p.extensionPoint.map(ExtensionInfo.title))
     },
     Column(id: "containedIn", title: "Contained in", tooltip: "For an app extension: the app whose bundle holds it.",
-           section: .ownership, width: 120, rule: .same(noun: "app")) { p, _ in text(p.containingAppName) },
-    Column(id: "coalition", title: "Res. coalition",
+           section: .lineage, width: 120, rule: .same(noun: "app")) { p, _ in text(p.containingAppName) },
+    Column(id: "coalition", title: "Accounting group",
            tooltip: "Resource coalition id: processes macOS accounts for together, usually an app and its helpers.",
-           section: .ownership, width: 100, numeric: true, rule: .same(noun: "coalition")) { p, _ in
+           section: .lineage, term: "resource coalition", width: 100, numeric: true, rule: .same(noun: "coalition")) { p, _ in
         p.coalition.map { .number(Double($0), String($0)) } ?? .empty
     },
-    Column(id: "jetsam", title: "Jetsam coalition",
+    Column(id: "jetsam", title: "Memory-kill group",
            tooltip: "Jetsam coalition id: processes macOS frees memory from together, such as a host app and its extensions.",
-           section: .ownership, width: 100, numeric: true, rule: .same(noun: "coalition")) { p, _ in
+           section: .lineage, term: "jetsam coalition", width: 100, numeric: true, rule: .same(noun: "coalition")) { p, _ in
         p.jetsamCoalition.map { .number(Double($0), String($0)) } ?? .empty
-    },
-    Column(id: "tty", title: "TTY", tooltip: "Controlling terminal.",
-           section: .ownership, width: 70, rule: .same(noun: "terminal")) { p, _ in text(p.tty.map(SmartTree.ttyName)) },
-    Column(id: "pgid", title: "Process group", tooltip: "Process group id: a shell job, such as a pipeline, shares one.",
-           section: .ownership, width: 90, numeric: true, rule: .same(noun: "group")) { p, _ in
-        .number(Double(p.pgid), String(p.pgid))
     },
     Column(id: "context", title: "Context",
            tooltip: "launchd label, LaunchServices name, extension point, terminal, or the path. Group rows: process counts.",
-           section: .ownership, minWidth: 120, width: 300, rule: .blank) { _, _ in .empty },   // drawn by the cell
+           section: .lineage, minWidth: 120, width: 300, rule: .blank) { _, _ in .empty },   // drawn by the cell
 
     // CPU
     .amount(id: "cpu", title: "CPU %",
@@ -329,13 +350,13 @@ private let catalogue: [Column] = [
             section: .cpu, minWidth: 44, width: 52, format: { Fmt.pct($0) }) { $0.cpuPercent },
     .amount(id: "cpuTime", title: "CPU time", tooltip: "User plus system CPU time since the process started. Group rows: the sum.",
             section: .cpu, width: 80, format: secsFormat) { $0.cpuNanos.map { Double($0) } },
-    .amount(id: "waiting", title: "Waiting for CPU",
-            tooltip: "Time the process's threads were ready to run but no core was free, as a percentage of one core." + rateNote,
+    .amount(id: "threads", title: "Threads", tooltip: "Number of threads. Group rows: the sum.",
+            section: .cpu, minWidth: 44, width: 56, format: countFormat) { $0.threads.map { Double($0) } },
+    .amount(id: "waiting", title: "Runnable wait",
+            tooltip: "Runnable but waiting: time the process's threads were ready to run but no core was free, as a percentage of one core." + rateNote,
             section: .cpu, width: 70, rule: .blank, format: { String(format: "%.1f", $0) }) { $0.rates?.waitingPercent },
     .amount(id: "cswRate", title: "Context switches/s", tooltip: "Context switches per second. Group rows: the sum." + rateNote,
             section: .cpu, width: 90, format: perSecFormat) { $0.rates?.contextSwitches },
-    .amount(id: "threads", title: "Threads", tooltip: "Number of threads. Group rows: the sum.",
-            section: .cpu, minWidth: 44, width: 56, format: countFormat) { $0.threads.map { Double($0) } },
     Column(id: "priority", title: "Priority",
            tooltip: "Scheduling priority of the process's main thread (proc_taskinfo; 31 is the default, higher runs first).",
            section: .cpu, width: 56, numeric: true, rule: .same(noun: "priority")) { p, _ in
@@ -360,7 +381,7 @@ private let catalogue: [Column] = [
         let v = Double(pc) / Double(c) * 100
         return .number(v, String(format: "%.0f %%", v))
     },
-    Column(id: "ipc", title: "Instr. per cycle", tooltip: "Instructions retired per CPU cycle, since the process started.",
+    Column(id: "ipc", title: "Instr/cycle", tooltip: "Instructions retired per CPU cycle, since the process started.",
            section: .cpu, width: 70, numeric: true, rule: .blank) { p, _ in
         guard let i = p.counters?.instructions, let c = p.counters?.cycles, c > 0 else { return .unknown }
         let v = Double(i) / Double(c)
@@ -378,6 +399,14 @@ private let catalogue: [Column] = [
             tooltip: "Instructions retired per second. Group rows: the sum." + rateNote,
             section: .cpu, width: 76, format: { siFormat($0) + "/s" }) { $0.rates?.instructions },
 
+    // GPU
+    .amount(id: "gpu", title: "% GPU",
+            tooltip: "GPU time over the last refresh, as a percentage of the interval (IORegistry accelerator clients). Group rows: the sum." + rateNote,
+            section: .gpu, width: 56, reads: .gpu, format: { $0 < 0.05 ? "0" : String(format: "%.1f", $0) }) { $0.rates?.gpuPercent },
+    .amount(id: "gpuTime", title: "GPU time",
+            tooltip: "GPU time since the process started (IORegistry accelerator clients); 0 for a process that never used the GPU. Group rows: the sum.",
+            section: .gpu, width: 76, reads: .gpu, format: secsFormat) { $0.gpuNanos.map { Double($0) } },
+
     // Memory
     .amount(id: "mem", title: "Memory",
             tooltip: "Physical footprint: the memory macOS charges to the process, as in Activity Monitor. Group rows: the sum.",
@@ -389,14 +418,14 @@ private let catalogue: [Column] = [
             section: .memory, width: 76, rule: .blank, format: bytesFormat) { $0.rss.map { Double($0) } },
     .amount(id: "virtual", title: "Virtual", tooltip: "Virtual address space size.",
             section: .memory, width: 80, rule: .blank, format: bytesFormat) { $0.virt.map { Double($0) } },
-    .amount(id: "neural", title: "Neural Engine", tooltip: "Memory charged to the process for the Neural Engine. Group rows: the sum.",
-            section: .memory, width: 76, format: bytesFormat) { $0.counters?.neuralFootprint.map { Double($0) } },
     .amount(id: "compressed", title: "Compressed",
             tooltip: "Memory the system has compressed for this process (TASK_VM_INFO). Your own processes; other users' need the helper. Group rows: the sum.",
             section: .memory, width: 80, reads: .compressed, format: bytesFormat) { $0.compressed.map { Double($0) } },
-    Column(id: "jetsamBand", title: "Jetsam band",
-           tooltip: "Where the kernel's memory killer (jetsam) puts the process: when memory runs short, lower bands are killed first; 0 is the idle band. Read as root, so it needs the helper.",
-           section: .memory, width: 64, numeric: true, rule: .same(noun: "band"), reads: .jetsam) { p, _ in
+    .amount(id: "neural", title: "Neural Engine", tooltip: "Memory charged to the process for the Neural Engine. Group rows: the sum.",
+            section: .memory, width: 76, format: bytesFormat) { $0.counters?.neuralFootprint.map { Double($0) } },
+    Column(id: "jetsamBand", title: "Memory-kill band",
+           tooltip: "Jetsam band: where the kernel's memory killer (jetsam) puts the process: when memory runs short, lower bands are killed first; 0 is the idle band. Read as root, so it needs the helper.",
+           section: .memory, term: "jetsam", width: 64, numeric: true, rule: .same(noun: "band"), reads: .jetsam) { p, _ in
         p.jetsam.map { .number(Double($0.band), String($0.band), $0.band == 0 ? .secondary : .normal) } ?? .unknown
     },
     Column(id: "memLimit", title: "Memory limit",
@@ -414,7 +443,6 @@ private let catalogue: [Column] = [
         let v = Double(f) / Double(b) * 100
         return .number(v, String(format: "%.0f %%", v), v >= 90 ? .danger : v >= 75 ? .warning : .normal)
     },
-
     .amount(id: "faultRate", title: "Page faults/s", tooltip: "Page faults per second. Group rows: the sum." + rateNote,
             section: .memory, width: 80, format: perSecFormat) { $0.rates?.faults },
     .amount(id: "pageinRate", title: "Page-ins/s", tooltip: "Pages read in from disk per second. Group rows: the sum." + rateNote,
@@ -438,9 +466,6 @@ private let catalogue: [Column] = [
     .amount(id: "logicalWrites", title: "Logical writes",
             tooltip: "Bytes the process asked to write, before caching and compression. Group rows: the sum.",
             section: .disk, width: 80, format: bytesFormat) { $0.counters?.logicalWrites.map { Double($0) } },
-    .amount(id: "openFiles", title: "Open files",
-            tooltip: "Open file descriptors: files, sockets, pipes (PROC_PIDLISTFDS). Other users' processes need the helper. Group rows: the sum.",
-            section: .disk, width: 66, reads: .openFiles, format: countFormat) { $0.openFiles.map { Double($0) } },
 
     // Network
     .amount(id: "netIn", title: "Received/s",
@@ -450,39 +475,36 @@ private let catalogue: [Column] = [
             tooltip: "Network bytes sent per second over the last 2 s, from the kernel's per-socket counts (the ones nettop shows), read every 2 s since the app started. Includes connections that closed in that time, and loopback traffic. Group rows: the sum.",
             section: .network, width: 80, reads: .network, format: bytesPerSecFormat) { $0.netOut },
 
-    // Mach ports
+    // IPC
+    .amount(id: "syscallRate", title: "System calls/s", tooltip: "BSD plus Mach system calls per second. Group rows: the sum." + rateNote,
+            section: .ipc, width: 90, format: perSecFormat) { $0.rates?.syscalls },
+    .amount(id: "machMsgRate", title: "Mach messages/s", tooltip: "Mach messages sent plus received per second. Group rows: the sum." + rateNote,
+            section: .ipc, width: 90, format: perSecFormat) { $0.rates?.machMsgs },
     .amount(id: "machPorts", title: "Ports",
             tooltip: "Mach port names in the process's port space: send, receive and send-once rights, port sets and dead names (lsmp's total; Activity Monitor's Ports)." + machNote,
-            section: .mach, width: 62, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.total) } },
+            section: .ipc, width: 62, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.total) } },
     .amount(id: "machDeadNames", title: "Dead names",
             tooltip: "Rights the process still holds to ports whose receiver has died. Thousands that keep growing are a leak: the process never deallocates them." + machNote,
-            section: .mach, width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.deadNames) } },
+            section: .ipc, width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.deadNames) } },
     .amount(id: "machRepliesOwed", title: "Replies owed",
-            tooltip: "Send-once rights the process holds: mostly replies it owes to processes that sent it a request. Thousands that keep growing are requests it never answers." + machNote,
-            section: .mach, width: 76, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.sendOnce) } },
+            tooltip: "Send-once rights: the ones the process holds: mostly replies it owes to processes that sent it a request. Thousands that keep growing are requests it never answers." + machNote,
+            section: .ipc, term: "send-once", width: 76, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.sendOnce) } },
     .amount(id: "machFullQueues", title: "Full queues",
             tooltip: "Ports the process receives on whose message queue is full (messages waiting ≥ queue limit): senders block or time out until it receives." + machNote,
-            section: .mach, width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.fullQueues) } },
+            section: .ipc, width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.fullQueues) } },
+    .amount(id: "openFiles", title: "Open files",
+            tooltip: "Open file descriptors: files, sockets, pipes (PROC_PIDLISTFDS). Other users' processes need the helper. Group rows: the sum.",
+            section: .ipc, width: 66, reads: .openFiles, format: countFormat) { $0.openFiles.map { Double($0) } },
 
     // Energy
     .amount(id: "power", title: "Power",
             tooltip: "Energy the process's threads used on the CPU, per second, in watts (rusage ri_energy_nj). Group rows: the sum." + rateNote,
             section: .energy, width: 70, format: wattsFormat) { $0.rates?.watts },
-    .amount(id: "wakeupRate", title: "Wakeups/s",
-            tooltip: "Package idle plus interrupt wakeups per second (rusage ri_pkg_idle_wkups + ri_interrupt_wkups). Group rows: the sum." + rateNote,
-            section: .energy, width: 80, format: perSecFormat) { $0.rates?.wakeups },
-    .amount(id: "syscallRate", title: "System calls/s", tooltip: "BSD plus Mach system calls per second. Group rows: the sum." + rateNote,
-            section: .energy, width: 90, format: perSecFormat) { $0.rates?.syscalls },
-    .amount(id: "machMsgRate", title: "Mach messages/s", tooltip: "Mach messages sent plus received per second. Group rows: the sum." + rateNote,
-            section: .energy, width: 90, format: perSecFormat) { $0.rates?.machMsgs },
     .amount(id: "energy", title: "Energy", tooltip: "Energy the process's threads used on the CPU since it started, in joules (rusage ri_energy_nj). Group rows: the sum.",
             section: .energy, width: 80, format: { String(format: "%.1f J", $0) }) { $0.energyNJ.map { Double($0) / 1e9 } },
-    .amount(id: "gpu", title: "% GPU",
-            tooltip: "GPU time over the last refresh, as a percentage of the interval (IORegistry accelerator clients). Group rows: the sum." + rateNote,
-            section: .energy, width: 56, reads: .gpu, format: { $0 < 0.05 ? "0" : String(format: "%.1f", $0) }) { $0.rates?.gpuPercent },
-    .amount(id: "gpuTime", title: "GPU time",
-            tooltip: "GPU time since the process started (IORegistry accelerator clients); 0 for a process that never used the GPU. Group rows: the sum.",
-            section: .energy, width: 76, reads: .gpu, format: secsFormat) { $0.gpuNanos.map { Double($0) } },
+    .amount(id: "wakeupRate", title: "Wakeups/s",
+            tooltip: "Wakeups per second: package idle plus interrupt wakeups (rusage ri_pkg_idle_wkups + ri_interrupt_wkups). Group rows: the sum." + rateNote,
+            section: .energy, width: 80, format: perSecFormat) { $0.rates?.wakeups },
     Column(id: "preventingSleep", title: "Preventing sleep",
            tooltip: "Power assertions that keep the Mac (system) or the display awake (IOPMCopyAssertionsByProcess). Group rows: how many processes hold one.",
            section: .energy, width: 90, rule: .custom { ms, _ in
@@ -491,12 +513,6 @@ private let catalogue: [Column] = [
            }, reads: .assertions) { p, _ in
         guard let a = p.assertions else { return .unknown }
         return ExtraRead.preventing(a).map { .text($0, .warning) } ?? .empty
-    },
-    Column(id: "idleExit", title: "Idle exit",
-           tooltip: "Dirty tracking (proc_get_dirty): \"can exit\" when launchd or the app lets the system stop it while idle; \"busy\" (dirty) while it has work and is kept. Empty: not tracked.",
-           section: .energy, width: 100, rule: .same(noun: "state"), reads: .idleExit) { p, _ in
-        guard let s = p.idleExit else { return .unknown }
-        return .text(s.short, s.contains(.dirty) || !s.contains(.allowsIdleExit) ? .secondary : .normal)
     },
 
     // Security
@@ -518,12 +534,6 @@ private let catalogue: [Column] = [
         if s.signInfo(for: p)?.isPlatform == true { return .text("platform", .secondary) }
         return yesNo(hardened(p, s))
     },
-
-    // Time
-    Column(id: "started", title: "Started", tooltip: "Time since the process started. Group rows: the oldest.",
-           section: .time, minWidth: 50, width: 70, numeric: false, rule: .oldest) { p, _ in .date(p.start, Fmt.age(p.start)) },
-    Column(id: "startTime", title: "Start time", tooltip: "When the process started. Group rows: the oldest.",
-           section: .time, width: 120, rule: .oldest) { p, _ in .date(p.start, Fmt.date.string(from: Fmt.shownStart(p.start))) },
 ]
 
 // MARK: - Store lookups for columns
@@ -681,7 +691,7 @@ struct ColumnsCommands: Commands {
                     Menu(section.title) {
                         ForEach(Column.all.filter { $0.section == section && $0.id != "name" }) { c in
                             // Set, don't flip: a repeated or stale call must not undo the choice.
-                            Toggle(c.title, isOn: Binding(get: { shown.contains(c.id) },
+                            Toggle(c.fullTitle, isOn: Binding(get: { shown.contains(c.id) },
                                                           set: { ColumnPrefs.set(c.id, shown: $0) }))
                         }
                     }

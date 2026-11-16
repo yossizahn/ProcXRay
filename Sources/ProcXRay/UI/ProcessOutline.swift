@@ -299,7 +299,7 @@ struct ProcessOutline: NSViewRepresentable {
             for section in Column.Section.allCases {
                 let sub = NSMenu(title: section.title)
                 for c in Column.all where c.section == section && c.id != "name" {
-                    toggle(c.title, on: shown.contains(c.id), in: sub) { [weak self] in
+                    toggle(c.fullTitle, on: shown.contains(c.id), in: sub) { [weak self] in
                         self?.showNextTo = anchor
                         ColumnPrefs.toggle(c.id)
                     }

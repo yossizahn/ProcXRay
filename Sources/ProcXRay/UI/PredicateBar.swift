@@ -184,7 +184,7 @@ struct PredicateHelp: View {
                 }
                 ForEach(Column.Section.allCases, id: \.self) { section in
                     let cols = Column.all.filter { $0.section == section && $0.id != "context" }
-                    if !cols.isEmpty { group(section.title, cols.map { ($0.id, $0.title, $0.tooltip) }) }
+                    if !cols.isEmpty { group(section.title, cols.map { ($0.id, $0.fullTitle, $0.tooltip) }) }
                 }
                 group("Other", PredicateFields.extras.map { ($0.name, $0.help, $0.help) })
             }
