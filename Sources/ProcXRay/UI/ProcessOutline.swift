@@ -616,9 +616,9 @@ struct ProcessOutline: NSViewRepresentable {
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
             if menu === headerMenu { buildHeaderMenu(menu); return }
-            // Process rows only: group rows, an app's unit row included, have no menu.
+            // Process rows, and an app's unit row acting on the app's own process; other group rows have none.
             guard let o = outline, o.clickedRow >= 0, let n = (o.item(atRow: o.clickedRow) as? Item)?.node,
-                  let p = n.proc else { return }
+                  let p = process(n) else { return }
             let parent = self.parent!
             func add(_ title: String, _ action: @escaping () -> Void) {
                 let mi = NSMenuItem(title: title, action: #selector(MenuAction.fire), keyEquivalent: "")
@@ -654,18 +654,24 @@ struct ProcessOutline: NSViewRepresentable {
             if p.ppid > 1 { jump("Select Parent (\(p.ppid))", to: p.ppid) }
         }
 
-        /// The info bubble for a process row: the executable's full path and its command line. Group rows,
-        /// an app's unit row included, have none.
+        /// The process a row stands for: its own, or for an app's unit row the app's root process.
+        private func process(_ n: ProcNode) -> ProcInfo? {
+            n.proc ?? (n.kind == .unit ? n.rootPid.flatMap { procs[$0] } : nil)
+        }
+
+        /// The info bubble for a process row (or an app row, for the app's process): the executable's full
+        /// path and its command line. Other group rows have none.
         func bubble(for item: Any) -> [InfoBubble.Section]? {
-            guard let p = (item as? Item)?.node.proc else { return nil }
+            guard let n = (item as? Item)?.node, let p = process(n) else { return nil }
             var s: [InfoBubble.Section] = []
             if let path = p.path { s.append(.init(title: "Executable", value: path, reveal: path)) }
             if let c = p.commandLine, !c.isEmpty, c != p.path { s.append(.init(title: "Command line", value: c, mono: true)) }
             return s
         }
 
-        /// The executable a row's Path column shows (a process row's own; group rows show none).
-        func path(for item: Any) -> String? { (item as? Item)?.node.proc?.path }
+        /// The executable a row's Path column shows (a process row's own, an app row's root's; other group
+        /// rows show none).
+        func path(for item: Any) -> String? { ((item as? Item)?.node).flatMap(process)?.path }
 
         static func copy(_ s: String) {
             NSPasteboard.general.clearContents()

@@ -112,6 +112,8 @@ struct Column: Identifiable {
     /// The system's own name for a cryptic quantity, when the title is a plain phrase ("resource coalition"
     /// for "Accounting group"). Leads the tooltip; menus and the column manager show "Title (term)".
     var term: String? = nil
+    /// On an app's row (a Smart tree unit), show the app's own process's value: its pid, path, parent.
+    var unitShowsRoot = false
     var minWidth: CGFloat = 50
     var width: CGFloat = 80
     var numeric = false
@@ -153,6 +155,7 @@ struct Column: Identifiable {
     /// is a member of every group row above it).
     @MainActor
     func groupValue(_ n: ProcNode, members: [ProcInfo], store: Store, value: (ProcInfo) -> CellValue) -> CellValue {
+        if unitShowsRoot, n.kind == .unit, let r = n.rootPid.flatMap({ store.procs[$0] }) { return value(r).dimmed }
         switch rule {
         case .blank: return .empty
         case .sum:
@@ -281,19 +284,19 @@ private let catalogue: [Column] = [
     Column(id: "name", title: "Name",
            tooltip: "Process name, or the title of a group row. Badges: LEFT (outlived its app), ZOMBIE, ROSETTA, SBX (sandboxed), EXITED.",
            section: .identity, minWidth: 180, width: 280, rule: .blank) { p, _ in .text(p.name) },
-    Column(id: "pid", title: "PID", tooltip: "Process ID. App rows: the app's own process.",
-           section: .identity, minWidth: 44, width: 56, numeric: true, rule: .blank) { p, _ in .number(Double(p.pid), String(p.pid)) },
+    Column(id: "pid", title: "PID", tooltip: "Process ID.",
+           section: .identity, unitShowsRoot: true, minWidth: 44, width: 56, numeric: true, rule: .blank) { p, _ in .number(Double(p.pid), String(p.pid)) },
     Column(id: "kind", title: "Kind",
            tooltip: "Where the Smart tree puts it: category, then the role inside its app (\"App · XPC service\", \"Extension · Widgets\").",
            section: .identity, width: 150, rule: .same) { p, s in text(s.kind(of: p)) },
-    Column(id: "path", title: "Path", tooltip: "Executable path. App rows: the app's.",
-           section: .identity, width: 260, truncateMiddle: true, rule: .blank) { p, _ in text(p.path) },
+    Column(id: "path", title: "Path", tooltip: "Executable path.",
+           section: .identity, unitShowsRoot: true, width: 260, truncateMiddle: true, rule: .blank) { p, _ in text(p.path) },
     Column(id: "bundleID", title: "Bundle ID",
-           tooltip: "Bundle identifier of the app or extension bundle that holds the executable. App rows: the app's.",
-           section: .identity, width: 180, rule: .blank) { p, s in text(s.bundleID(of: p)) },
+           tooltip: "Bundle identifier of the app or extension bundle that holds the executable.",
+           section: .identity, unitShowsRoot: true, width: 180, rule: .blank) { p, s in text(s.bundleID(of: p)) },
     Column(id: "commandLine", title: "Command line",
-           tooltip: "The arguments the process was started with (argv), read once per process. Other users' processes need the helper; \"—\" means they couldn't be read. App rows: the app's.",
-           section: .identity, minWidth: 120, width: 360, rule: .blank) { p, _ in
+           tooltip: "The arguments the process was started with (argv), read once per process. Other users' processes need the helper; \"—\" means they couldn't be read.",
+           section: .identity, unitShowsRoot: true, minWidth: 120, width: 360, rule: .blank) { p, _ in
         if let c = p.commandLine { return .text(c) }
         return p.commandLineRead ? .unknown : .empty
     },
@@ -320,9 +323,9 @@ private let catalogue: [Column] = [
                return .number(Double(counts.values.reduce(0, +)), parts.joined(separator: ", "), .warning)
            }) { p, _ in state(p) },
     Column(id: "started", title: "Started", tooltip: "Time since the process started. Group rows: the oldest; category rows: the newest.",
-           section: .execution, minWidth: 50, width: 70, numeric: false, rule: .oldest) { p, _ in .date(p.start, Fmt.age(p.start)) },
+           section: .execution, unitShowsRoot: true, minWidth: 50, width: 70, numeric: false, rule: .oldest) { p, _ in .date(p.start, Fmt.age(p.start)) },
     Column(id: "startTime", title: "Start time", tooltip: "When the process started. Group rows: the oldest; category rows: the newest.",
-           section: .execution, width: 120, rule: .oldest) { p, _ in .date(p.start, Fmt.date.string(from: Fmt.shownStart(p.start))) },
+           section: .execution, unitShowsRoot: true, width: 120, rule: .oldest) { p, _ in .date(p.start, Fmt.date.string(from: Fmt.shownStart(p.start))) },
     Column(id: "tty", title: "TTY", tooltip: "Controlling terminal.",
            section: .execution, width: 70, rule: .same) { p, _ in text(p.tty.map(SmartTree.ttyName)) },
     Column(id: "pgid", title: "Process group", tooltip: "Process group id: a shell job, such as a pipeline, shares one.",
@@ -337,8 +340,8 @@ private let catalogue: [Column] = [
     },
 
     // Lineage
-    Column(id: "parent", title: "Parent", tooltip: "Parent process (ppid). App rows: the app's parent.",
-           section: .lineage, width: 130, rule: .blank) { p, s in
+    Column(id: "parent", title: "Parent", tooltip: "Parent process (ppid).",
+           section: .lineage, unitShowsRoot: true, width: 130, rule: .blank) { p, s in
         guard p.ppid != p.pid else { return .empty }
         // A "parent" started after its child is a later process that reused the pid.
         guard let par = s.procs[p.ppid], par.start <= p.start else { return .text("gone (\(p.ppid))", .secondary) }
@@ -346,7 +349,7 @@ private let catalogue: [Column] = [
     },
     Column(id: "responsible", title: "Responsible",
            tooltip: "The process macOS holds responsible for this one (for privacy prompts and energy). † marks one that has exited.",
-           section: .lineage, minWidth: 80, width: 130, rule: .blank) { p, s in
+           section: .lineage, unitShowsRoot: true, minWidth: 80, width: 130, rule: .blank) { p, s in
         if let t = p.leftBehindText { return .text("† \(t)", .warning) }
         guard let r = p.responsible else { return .empty }
         if r == p.pid { return .text("self", .secondary) }
@@ -354,12 +357,12 @@ private let catalogue: [Column] = [
         return .text("† gone (\(r))", .warning)
     },
     Column(id: "label", title: "launchd label", tooltip: "Label of the launchd job this process is the main process of.",
-           section: .lineage, width: 200, rule: .blank) { p, _ in text(p.launchdLabel) },
+           section: .lineage, unitShowsRoot: true, width: 200, rule: .blank) { p, _ in text(p.launchdLabel) },
     Column(id: "domain", title: "Domain", tooltip: "launchd domain of that job: system, gui or user.",
            section: .lineage, width: 64, rule: .same) { p, _ in text(p.launchdDomain) },
     Column(id: "lsType", title: "LaunchServices type",
            tooltip: "The app's type as LaunchServices registers it (lsappinfo): Foreground (has a Dock icon), UIElement (no Dock icon) or BackgroundOnly (no UI). Empty: not registered with LaunchServices. The Smart tree's categories are derived from it.",
-           section: .lineage, width: 110, rule: .same) { p, _ in text(p.lsType) },
+           section: .lineage, unitShowsRoot: true, width: 110, rule: .same) { p, _ in text(p.lsType) },
     Column(id: "lsState", title: "LaunchServices state",
            tooltip: "LaunchServices' state tags for the app, verbatim as lsappinfo prints them (such as !signalled).",
            section: .lineage, width: 140, rule: .blank) { p, _ in
@@ -576,8 +579,8 @@ private let catalogue: [Column] = [
     },
     Column(id: "team", title: "Team ID", tooltip: "Developer team of the signature.",
            section: .security, width: 90, rule: .same) { p, s in text(s.signInfo(for: p)?.teamID) },
-    Column(id: "signingID", title: "Signing ID", tooltip: "Identifier in the code signature. App rows: the app's.",
-           section: .security, width: 180, rule: .blank) { p, _ in text(p.signID) },
+    Column(id: "signingID", title: "Signing ID", tooltip: "Identifier in the code signature.",
+           section: .security, unitShowsRoot: true, width: 180, rule: .blank) { p, _ in text(p.signID) },
     Column(id: "sandboxed", title: "Sandboxed", tooltip: "Whether the App Sandbox confines it. Group rows: all, none, or how many.",
            section: .security, width: 76, rule: .custom { ms, _ in share(ms) { $0.sandboxed } }) { p, _ in yesNo(p.sandboxed) },
     Column(id: "hardened", title: "Hardened runtime",
