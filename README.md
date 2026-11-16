@@ -1,61 +1,106 @@
 # Proc X-Ray
 
-A Process Hacker–style process explorer for macOS. It shows the attribution data macOS itself uses: responsible processes, coalitions, LaunchServices state, code signatures, launchd jobs and Background Task Management records.
+A process explorer for macOS in the spirit of Process Hacker. It shows what is running, who it belongs to, who started it and what it costs, using the attribution data macOS itself keeps: responsible processes, coalitions, LaunchServices, code signatures, launchd and Background Items.
 
-![Proc X-Ray](docs/screenshots/overview.png)
+![The process list grouped by app and sorted by memory, with the inspector below](docs/screenshots/overview.png)
 
 ## Highlights
 
-- **Smart process tree.** Every process is sorted into Left behind, Apps, Background apps, Extensions and Third-party services (third-party only), System interface and System services (Apple only), with each app's helpers, XPC services and terminal sessions under it; an app's row shows its own pid, path and parent. You can switch to a responsible/parent tree (each process under its responsible process, or under its parent when it has none), a flat list, or a flat list grouped by signer, user, launchd domain, sandbox or architecture, or click a column header to see every process in one flat list sorted by it (descending, then ascending, then back to the tree), as in Process Hacker. View ▸ Keep Groups When Sorting sorts inside the groups instead.
-- **Rich columns.** About 75 columns in eleven sections (Identity, Execution, Lineage, CPU, GPU, Memory, Disk, Network, IPC, Energy, Security), each with what it means and where it comes from. Filter chips catch the usual suspects, and a predicate (`cpu > 5 and not sandboxed`) filters on any column. Saved filters sit in the sidebar.
-- **Inspector.** Ten tabs (Info, Launch, Security, Usage, Threads, Memory, Files & Ports, Logs, Sample, Syscalls; ⌘1–⌘0) show what a process is, who started it and why, who signed it, what it's using and what it's talking to. Every field's name opens a bubble saying what it is and where it comes from, and every process it mentions is a clickable link.
-- **Left Behind.** A built-in filter finds processes that keep an app "running in the background" after you quit it.
-- **Visual, not just text.** The output of `lsof`, `vmmap`, `sample`, `log`, `launchctl` and `lsappinfo` is parsed into tables, charts and call trees. A Raw switch shows the original text.
-- **Menu bar dropdown and Triage.** Live CPU, GPU, memory, disk and network widgets; the dropdown ranks apps, not single processes: each row is an accounting group (the kernel's resource coalition), so a browser's 20 processes add up to one figure. Expand a group to see who the work is for: its command-line sessions, terminal sessions, XPC services and same-name helpers. A switch shows single processes instead.
-- **Privileged helper (optional).** A read-only root daemon fills in data for root-owned processes and loads Background Items without a password prompt.
+- **A tree that groups by app.** Every process sits under the app or service it works for, so Firefox and all its helpers are one row with one total.
+- **Filter on anything.** One-click chips for the usual suspects, or an expression such as `mem > 200MB and not apple`.
+- **An inspector with ten tabs.** Identity, launch history, signature and sandbox, usage, threads, memory, open files and ports, logs, stack samples and system calls.
+- **Every value says where it comes from.** Click a field's name to see what it means and which API or tool produced it.
+- **Pictures instead of tool output.** `lsof`, `vmmap`, `sample` and `log` are drawn as graphs, charts and call trees, with the raw text one click away.
+- **A menu bar monitor.** Live CPU, GPU, memory, disk and network, and a ranking of apps rather than single processes.
+- **Light.** It reads only what the columns on screen need.
 
 ## A closer look
 
-Usage: each figure now and since start, with sparklines and CPU time split by QoS class.
+### The process list
 
-![Usage](docs/screenshots/resources.png)
+Apps, background apps, extensions and services are sorted into categories, with each app's helpers, XPC services and terminal sessions under it. Group rows add up their members. About 75 columns in eleven sections cover identity, lineage, CPU, GPU, memory, disk, network, IPC, energy and security.
 
-`vmmap --summary` drawn as footprint tiles, portion bars and a per-region chart.
+Prefer another view? Switch to a responsible/parent tree or a flat list, group by signer, user, launchd domain, sandbox or architecture, or click a column header to sort everything by it.
 
-![Memory map](docs/screenshots/memory.png)
+### Filters
 
-Files & Ports, with the other end of every pipe and socket resolved into a peer graph.
+Chips catch recently started, unsigned, unsandboxed, busy and non-Apple root processes. The predicate row takes expressions over any column, and a filter can be saved under a name.
 
-![Connections](docs/screenshots/connections.png)
+![Processes filtered with the expression mem > 200MB and not apple](docs/screenshots/filter.png)
 
-`sample` as a collapsible call tree, with busy threads in orange.
+### Why is it running?
 
-![Sample](docs/screenshots/sample.png)
+The Launch tab traces a process back: its parent chain, the process macOS holds responsible, how it was started and why, and its launchd, LaunchServices and Background Items records.
 
-## Build & run
+![The Launch tab: lineage, mechanism and the launchd job](docs/screenshots/launch.png)
 
-Requires full Xcode, not just the Command Line Tools.
+### What is it allowed to do?
+
+The Security tab shows the signature, hardening, sandbox (with live checks of what it can read and write), privacy permissions and entitlements.
+
+![The Security tab: signature and hardening](docs/screenshots/security.png)
+
+### What does it cost?
+
+Every figure now and since the process started, with its history.
+
+![The Usage tab: CPU now and since start, by QoS class](docs/screenshots/usage.png)
+
+### What is it talking to?
+
+Open files, sockets and pipes, with the process on the other end of each one resolved into a graph.
+
+![The Files & Ports tab: a graph of the processes Firefox is connected to](docs/screenshots/files-ports.png)
+
+### Memory and stacks
+
+`vmmap` as tiles and a per-region chart, and `sample` as a call tree with the busy threads marked.
+
+![The Memory tab: footprint tiles and the largest regions](docs/screenshots/memory.png)
+
+![The Sample tab: a call tree of every thread](docs/screenshots/sample.png)
+
+### Triage and the menu bar
+
+The menu bar item shows live meters. Its dropdown, and the Triage section in the window, rank apps by what they and all their helpers use together, list what just launched or ended, and raise an alert when a process stays busy.
+
+![Triage: system meters, top apps by CPU and recent launches](docs/screenshots/triage.png)
+
+### Also
+
+- **Left Behind** finds processes that outlived the app that started them.
+- **Pick Window** (⌥⌘P): click any window on screen to find its process.
+- **Binary inspector**: open or drop a Mach-O file to see its slices, load commands, segments and libraries.
+- **launchd Jobs** and **Background Items** list what is set up to launch, linked to the processes that are running.
+
+## Install
+
+There is no packaged download yet: build it from source. It needs macOS 15 or later and full Xcode, not only the Command Line Tools.
 
 ```bash
 ./build-app.sh --release
+```
+
+```bash
 open "build/Proc X-Ray.app"
 ```
 
-Without `--release` you get `build/Proc X-Ray Dev.app`. It has its own bundle id, helper and settings, so it can run alongside the release build. `build-app.sh` signs with your first "Apple Development" identity; set `SIGN_ID=…` to use another.
+`./build-app.sh --install` also copies it to Applications. Without `--release` you get `build/Proc X-Ray Dev.app`, which has its own bundle id, helper and settings and can run beside the release build. The script signs with your first "Apple Development" identity; set `SIGN_ID=…` to use another.
 
-## Privileged helper
+## Privileged helper (optional)
 
-Click **Install Privileged Helper…** in Settings ▸ Helper (the helper part of the sidebar's status line opens it), then approve it once in System Settings → General → Login Items. The helper:
+Without it the app runs unprivileged, and what it cannot read for other users' processes shows `?`. The helper is a read-only root daemon that fills those in.
 
-- is read-only and runs only a fixed allowlist of tools (`lsof`, `vmmap`, `sample`, `launchctl procinfo` and `sfltool dumpbtm`), with arguments it builds itself.
-- accepts connections only from this exact build of the app, matched by team ID and cdhash.
-- lets admins inspect any process. Other users can inspect only their own processes.
-- exits about 10 s after it goes idle. launchd restarts it on demand.
+Install it from Settings ▸ Helper, then approve it once in System Settings → General → Login Items. It needs a build signed with a developer identity; an ad-hoc build cannot install it.
 
-Without the helper the app runs unprivileged, and what it can't read for root-owned processes shows `?`.
+The helper:
+
+- runs only a fixed list of tools (`lsof`, `vmmap`, `sample`, `launchctl procinfo`, `sfltool dumpbtm`), with arguments it builds itself.
+- accepts connections only from the exact build that installed it, matched by team ID and code hash.
+- lets admins inspect any process, and other users only their own.
+- exits about 10 seconds after it goes idle.
 
 ## More
 
 - [docs/process-info-sources.md](docs/process-info-sources.md) lists where each piece of data comes from.
-- `ProcXRay --dump [--pid N]` prints a snapshot for cross-checking. `--bench` times each refresh stage. `--ambient <seconds>` times the menu bar monitor's ticks, and `--groups [seconds]` prints its accounting groups.
-- Proc X-Ray aims to be very light on system resources.
+- `ProcXRay --dump` prints a snapshot for cross-checking, and `--bench` times each refresh stage.
