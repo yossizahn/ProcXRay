@@ -104,3 +104,7 @@ The helper:
 
 - [docs/process-info-sources.md](docs/process-info-sources.md) lists where each piece of data comes from.
 - `ProcXRay --dump` prints a snapshot for cross-checking, and `--bench` times each refresh stage.
+
+## License
+
+[MIT](LICENSE).
