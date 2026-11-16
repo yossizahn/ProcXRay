@@ -53,6 +53,7 @@ struct ProcXRayApp: App {
     @AppStorage(ShowSources.key) private var showSources = true
 
     init() {
+        Section.migrate()
         ColumnPrefs.migrate()
         if CommandLine.arguments.contains("--spawn-leftover") {
             // Test helper: reproduce "app quit but its helper kept running".
@@ -451,8 +452,6 @@ extension FocusedValues {
 enum Section: String, CaseIterable, Identifiable {
     case triage = "Triage"
     case processes = "Processes"
-    case ghosts = "Left Behind"
-    case apps = "LaunchServices Apps"
     case background = "Background Items"
     case launchd = "launchd Jobs"
     var id: String { rawValue }
@@ -460,21 +459,51 @@ enum Section: String, CaseIterable, Identifiable {
         switch self {
         case .triage: "stethoscope"
         case .processes: "cpu"
-        case .ghosts: "figure.walk.departure"
-        case .apps: "app.badge"
         case .background: "gearshape.2"
         case .launchd: "bolt.horizontal"
         }
     }
+
+    /// The sections an earlier version had that are filters of the process list now: open the list with
+    /// that filter instead. Runs before any view reads the `section` default.
+    static func migrate() {
+        let d = UserDefaults.standard
+        let old: [String: SavedPredicate] = ["Left Behind": .leftBehind, "LaunchServices Apps": .launchServicesApps]
+        guard let raw = d.string(forKey: "section"), let f = old[raw] else { return }
+        SavedPredicate.apply(f)
+        d.set(Section.processes.rawValue, forKey: "section")
+    }
+}
+
+/// A sidebar row: a filter of the process list, or one of the other sections.
+enum SidebarItem: Hashable {
+    case filter(String)
+    case section(Section)
 }
 
 struct ContentView: View {
     @Environment(Store.self) var store
     @AppStorage("section") private var savedSection: Section = .processes
     @AppStorage("sidebarHidden") private var sidebarHidden = false
+    @AppStorage("processes.predicate") private var predicate = ""
+    @AppStorage(SavedPredicate.key) private var savedRaw = ""
 
-    private var section: Binding<Section?> {
-        Binding(get: { savedSection }, set: { if let s = $0 { savedSection = s } })
+    private var userFilters: [SavedPredicate] { SavedPredicate.parse(savedRaw) }
+
+    /// The process list shows a filter's row as selected while its predicate is the one in force.
+    private var selection: Binding<SidebarItem?> {
+        Binding(get: {
+            guard savedSection == .processes else { return .section(savedSection) }
+            return (SavedPredicate.builtIns + userFilters).first { $0.source == predicate }.map { .filter($0.name) }
+        }, set: { item in
+            switch item {
+            case .section(let s)?: savedSection = s
+            case .filter(let name)?:
+                savedSection = .processes
+                if let f = (SavedPredicate.builtIns + userFilters).first(where: { $0.name == name }) { SavedPredicate.apply(f) }
+            case nil: break
+            }
+        })
     }
     private var columnVisibility: Binding<NavigationSplitViewVisibility> {
         Binding(get: { sidebarHidden ? .detailOnly : .all }, set: { sidebarHidden = $0 == .detailOnly })
@@ -482,16 +511,22 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView(columnVisibility: columnVisibility) {
-            List(Section.allCases, selection: section) { s in
-                HStack {
-                    Label(s.rawValue, systemImage: s.icon)
-                    Spacer()
-                    if s == .triage { TriageBadge() }
-                    if s == .ghosts, store.ghostCount > 0 {
-                        Text(verbatim: "\(store.ghostCount)").font(.caption).padding(.horizontal, 6)
-                            .background(.orange.opacity(0.3), in: Capsule())
+            List(selection: selection) {
+                SwiftUI.Section("Processes") {
+                    ForEach(SavedPredicate.builtIns) { f in filterRow(f, builtIn: true) }
+                    ForEach(userFilters) { f in filterRow(f, builtIn: false) }
+                    HStack {
+                        Label(Section.triage.rawValue, systemImage: Section.triage.icon)
+                        Spacer()
+                        TriageBadge()
                     }
-                }.tag(s)
+                    .tag(SidebarItem.section(.triage))
+                }
+                SwiftUI.Section("Launch registries") {
+                    ForEach([Section.launchd, .background]) { s in
+                        Label(s.rawValue, systemImage: s.icon).tag(SidebarItem.section(s))
+                    }
+                }
             }
             .navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 300)
             .safeAreaInset(edge: .bottom) {
@@ -508,14 +543,31 @@ struct ContentView: View {
             switch savedSection {
             case .triage: TriageSection()
             case .processes: ProcessesView()
-            case .ghosts: GhostsView()
-            case .apps: AppsView()
             case .background: BackgroundItemsView()
             case .launchd: LaunchdView()
             }
         }
         .modifier(InspectAtLaunch())
         .modifier(KeepOpenWindow())
+    }
+
+    @ViewBuilder private func filterRow(_ f: SavedPredicate, builtIn: Bool) -> some View {
+        HStack {
+            Label(f.name, systemImage: f == .allProcesses ? Section.processes.icon
+                  : f == .leftBehind ? "figure.walk.departure" : f == .launchServicesApps ? "app.badge" : "line.3.horizontal.decrease.circle")
+            Spacer()
+            if f == .leftBehind, store.ghostCount > 0 {
+                Text(verbatim: "\(store.ghostCount)").font(.caption).padding(.horizontal, 6)
+                    .background(.orange.opacity(0.3), in: Capsule())
+            }
+        }
+        .help(SavedPredicate.tooltips[f.name] ?? (f.source.isEmpty ? "Every process" : f.source))
+        .tag(SidebarItem.filter(f.name))
+        .contextMenu {
+            if !builtIn {
+                Button("Delete Filter") { savedRaw = SavedPredicate.encode(userFilters.filter { $0.id != f.id }) }
+            }
+        }
     }
 }
 

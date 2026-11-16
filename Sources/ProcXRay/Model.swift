@@ -93,6 +93,8 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var leftBehindGroup: Int?
     var leftBehindApp: String?
     var leftBehindPid: pid_t?
+    /// The exited app's LaunchServices state tags, for the Left behind group row.
+    var leftBehindTags: [String] = []
     var leftBehindText: String? {
         guard leftBehindGroup != nil else { return nil }
         return "\(leftBehindApp ?? "exited app") (\(leftBehindPid.map { "pid \($0)" } ?? "previous instance"))"
@@ -166,7 +168,7 @@ struct Ghost: Identifiable, Sendable {
 }
 
 /// What the process list shows with no column sort. Raw values are persisted in @AppStorage("grouping").
-enum Grouping: String, CaseIterable, Identifiable {
+enum Grouping: String, CaseIterable, Identifiable, Codable {
     case smart = "Smart"
     // A process goes under its responsible process when that's another process, else under its parent.
     case responsible = "Responsible tree"   // raw value kept stable: it's persisted in @AppStorage("grouping")
@@ -859,7 +861,7 @@ final class Store {
     var ghosts: [Ghost] { Self.ghosts(procs: procs, lsApps: lsApps) }
 
     /// Tags every survivor of a Left Behind group with its dead app, so the LEFT badge, the Responsible
-    /// column and the Responsible tree agree with the Left Behind section. On macOS 27 a leftover reports
+    /// column and the Responsible tree agree with the Left Behind filter. On macOS 27 a leftover reports
     /// itself as its own responsible process, so "responsible pid is dead" alone no longer finds it.
     nonisolated static func markLeftBehind(_ procs: inout [pid_t: ProcInfo], lsApps: [LSApp]) {
         for g in ghosts(procs: procs, lsApps: lsApps) {
@@ -867,6 +869,7 @@ final class Store {
                 procs[s.pid]?.leftBehindGroup = g.id
                 procs[s.pid]?.leftBehindApp = g.name
                 procs[s.pid]?.leftBehindPid = g.deadPid
+                procs[s.pid]?.leftBehindTags = g.lsApp?.stateTags ?? []
             }
         }
     }

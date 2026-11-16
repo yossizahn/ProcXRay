@@ -4,7 +4,41 @@ import SwiftUI
 struct SavedPredicate: Codable, Hashable, Identifiable {
     var name: String
     var source: String
+    /// The grouping and columns the filter switches to; nil keeps what is shown. Optional, so filters
+    /// saved before these existed still decode.
+    var grouping: Grouping? = nil
+    var columns: [String]? = nil
     var id: String { name }
+
+    /// The sidebar's built-in filters, which can't be deleted: Left Behind and LaunchServices Apps were
+    /// sections of their own, but every row is a running process, so they are filters of this list.
+    static let allProcesses = SavedPredicate(name: "All Processes", source: "", grouping: .smart)
+    static let leftBehind = SavedPredicate(name: "Left Behind", source: "leftBehind", grouping: .smart)
+    /// lsappinfo's coalition is the jetsam one, so that is the coalition column here.
+    static let launchServicesApps = SavedPredicate(name: "LaunchServices Apps", source: "lsType", grouping: .flat,
+                                                   columns: ["name", "pid", "lsType", "lsState", "jetsam", "bundleID", "arch"])
+    static let builtIns = [allProcesses, leftBehind, launchServicesApps]
+    static let tooltips = [
+        leftBehind.name: "Processes that outlived the app that launched them; macOS keeps the app 'running in background' while these live.",
+        launchServicesApps.name: "Processes LaunchServices knows as apps, with their type and state.",
+    ]
+
+    /// Puts the filter in force: its predicate, grouping and columns. A filter without columns brings back
+    /// the columns that were shown before one with columns took over.
+    static func apply(_ f: SavedPredicate) {
+        let d = UserDefaults.standard
+        d.set(f.source, forKey: "processes.predicate")
+        d.set("", forKey: "processes.columnSort")
+        if let g = f.grouping { d.set(g.rawValue, forKey: "grouping") }
+        if let cols = f.columns {
+            if d.string(forKey: userColumnsKey) == nil { d.set(ColumnPrefs.shownInOrder.joined(separator: ","), forKey: userColumnsKey) }
+            ColumnPrefs.apply(cols)
+        } else if let own = d.string(forKey: userColumnsKey) {
+            d.removeObject(forKey: userColumnsKey)
+            ColumnPrefs.apply(own.split(separator: ",").map(String.init))
+        }
+    }
+    private static let userColumnsKey = "processes.columnsBeforeFilter"
 
     static let key = "processes.savedPredicates"
     /// Persisted as a JSON array; "" or anything unreadable is none.

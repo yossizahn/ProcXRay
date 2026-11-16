@@ -399,12 +399,12 @@ enum SmartTree {
 
         // Pass 2: categories.
         var byCategory: [ProcCategory: [(sub: String?, node: ProcNode)]] = [:]
-        var ghosts: [Int: (title: String, nodes: [ProcNode])] = [:]
+        var ghosts: [Int: (title: String, tags: String, nodes: [ProcNode])] = [:]
         for (r, ms) in members {
             let rp = procs[r]!
             let n = unitNode(r, ms)
             if let g = rp.leftBehindGroup {
-                ghosts[g, default: ("\(rp.leftBehindText ?? "app") (exited)", [])].nodes.append(n)
+                ghosts[g, default: ("\(rp.leftBehindText ?? "app") (exited)", rp.leftBehindTags.joined(separator: " "), [])].nodes.append(n)
                 continue
             }
             let c = category(ofRoot: rp)
@@ -412,7 +412,8 @@ enum SmartTree {
         }
         if !ghosts.isEmpty {
             byCategory[.leftBehind] = ghosts.map { gid, g in
-                var n = ProcNode(id: gid, proc: nil, title: g.title, subtitle: "", isGhost: true, children: g.nodes)
+                // The exited app's LaunchServices state tags go in the row's Context cell.
+                var n = ProcNode(id: gid, proc: nil, title: g.title, subtitle: g.tags, isGhost: true, children: g.nodes)
                 n.kind = .ghost
                 return (nil, n)
             }
