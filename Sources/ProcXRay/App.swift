@@ -287,7 +287,7 @@ struct ProcXRayApp: App {
         // "Start in the menu bar": no window at launch.
         .defaultLaunchBehavior(launchHidden ? .suppressed : .automatic)
         .commands {
-            InspectCommand()
+            ProcessCommands()
             InspectorTabCommands()
             ColumnsCommands()
             OpenBinaryCommand()
@@ -295,8 +295,6 @@ struct ProcXRayApp: App {
                 Button("Refresh Now") { store.refresh() }.keyboardShortcut("r")
                 Button(store.paused ? "Resume Updates" : "Pause Updates") { store.paused.toggle() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
-                Button("Pick Process by Window…") { WindowPicker.start { AppRouter.shared.show($0) } }
-                    .keyboardShortcut("p", modifiers: [.command, .option])
                 Toggle("Keep Groups When Sorting", isOn: $sortKeepsGroups)
                 Toggle("Show Sources", isOn: $showSources)
                     .keyboardShortcut("s", modifiers: [.command, .option])
@@ -340,26 +338,87 @@ struct ProcXRayApp: App {
     }
 }
 
-/// View ▸ Inspect Process (⌘I), as in Activity Monitor; acts on the selected row of the focused window.
-struct InspectCommand: Commands {
-    @FocusedValue(\.inspectProcess) private var inspect
+/// The Process menu: commands for the selected process of the focused window (the list's selection, or
+/// the process an inspector window shows).
+struct ProcessCommands: Commands {
+    @FocusedValue(\.processTarget) private var target
+    @FocusedValue(\.inspectorTab) private var tab
     @AppStorage(InspectorPaneKey.name) private var showPane = false
+
     var body: some Commands {
-        CommandGroup(before: .toolbar) {
-            Button("Inspect Process") { inspect?() }
+        CommandMenu("Process") {
+            let p = target?.current()
+            Button("Inspect") { target?.inspect?() }
                 .keyboardShortcut("i")
-                .disabled(inspect == nil)
+                .disabled(target?.inspect == nil || p == nil)
             Button(showPane ? "Hide Inspector Pane" : "Show Inspector Pane") { showPane.toggle() }
                 .keyboardShortcut("i", modifiers: [.command, .option])
+            Button("Pick Process by Window…") { WindowPicker.start { AppRouter.shared.show($0) } }
+                .keyboardShortcut("p", modifiers: [.command, .option])
             Divider()
+            Button("Reveal in Finder") {
+                if let path = target?.current()?.path { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(p?.path == nil)
+            Button("Inspect Binary") {
+                if let path = target?.current()?.path, let t = MachOProbe.target(path) { MachOOpen.open(t) }
+            }
+            .disabled(p?.path == nil)
+            Button("Copy PID") { if let p = target?.current() { Self.copy("\(p.pid)") } }
+                .disabled(p == nil)
+            Button("Copy Path") { if let path = target?.current()?.path { Self.copy(path) } }
+                .disabled(p?.path == nil)
+            Button("Select Parent") { if let p = target?.current() { target?.select(p.ppid) } }
+                .disabled(p.map { $0.ppid == $0.pid || $0.ppid < 0 } ?? true)
+            Button("Select Responsible") { if let r = target?.current()?.responsible { target?.select(r) } }
+                .disabled(p.flatMap { $0.responsible.map { $0 != p?.pid } } != true)
+            Divider()
+            Button("Sample") { show(.sample) }.disabled(p == nil)
+            Button("Trace Syscalls") { show(.syscalls) }.disabled(p == nil)
+            Divider()
+            // kernel_task (pid 0): kill(0, …) would signal ProcXRay's own process group.
+            let canSignal = (p?.pid ?? 0) > 0
+            Button("Terminate…") { signal(SIGTERM, "SIGTERM") }.disabled(!canSignal)
+            Button("Kill…") { signal(SIGKILL, "SIGKILL") }.disabled(!canSignal)
+            Button("Suspend") { signal(SIGSTOP, "SIGSTOP") }.disabled(!canSignal)
+            Button("Resume") { signal(SIGCONT, "SIGCONT") }.disabled(!canSignal)
         }
     }
+
+    private func signal(_ sig: Int32, _ label: String) {
+        if let t = target, let p = t.current(), p.pid > 0 { t.signal(p, sig, label) }
+    }
+
+    /// Switches the focused inspector to `t`, or opens an inspector on it.
+    private func show(_ t: InspectorTab) {
+        if let tab { tab.wrappedValue = t; return }
+        UserDefaults.standard.set(t.rawValue, forKey: "inspectorTab")
+        target?.inspect?()
+    }
+
+    static func copy(_ s: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(s, forType: .string)
+    }
+}
+
+/// What the Process menu acts on, published by the focused window.
+struct ProcessTarget {
+    /// The process now, looked up when a command runs.
+    let current: () -> ProcInfo?
+    /// Opens it in an inspector; nil where it already is one.
+    var inspect: (() -> Void)?
+    /// Selects (or, in an inspector window, shows) another process.
+    let select: (pid_t) -> Void
+    /// Sends a signal, confirming the destructive ones first.
+    let signal: (ProcInfo, Int32, String) -> Void
 }
 
 /// Whether the Processes view shows the selected process in a pane below the list (off: inspector windows only).
 enum InspectorPaneKey { static let name = "showInspectorPane" }
 
-struct InspectProcessKey: FocusedValueKey { typealias Value = () -> Void }
+struct ProcessTargetKey: FocusedValueKey { typealias Value = ProcessTarget }
 struct InspectorTabKey: FocusedValueKey { typealias Value = Binding<InspectorTab> }
 extension FocusedValues {
     var inspectorTab: Binding<InspectorTab>? {
@@ -383,9 +442,9 @@ struct InspectorTabCommands: Commands {
     }
 }
 extension FocusedValues {
-    var inspectProcess: (() -> Void)? {
-        get { self[InspectProcessKey.self] }
-        set { self[InspectProcessKey.self] = newValue }
+    var processTarget: ProcessTarget? {
+        get { self[ProcessTargetKey.self] }
+        set { self[ProcessTargetKey.self] = newValue }
     }
 }
 

@@ -627,7 +627,7 @@ struct ProcessOutline: NSViewRepresentable {
                 mi.representedObject = a    // keeps the target alive while the menu is up
                 menu.addItem(mi)
             }
-            add("Properties") { parent.onOpen(p) }
+            add("Inspect") { parent.onOpen(p) }
             menu.addItem(.separator())
             // No signals for kernel_task (pid 0): kill(0, …) would hit ProcXRay's own process group.
             if p.pid > 0 {

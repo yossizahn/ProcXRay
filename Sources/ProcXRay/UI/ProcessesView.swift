@@ -64,7 +64,10 @@ struct ProcessesView: View {
     // and each re-render pushes SwiftUI's environment through every cell view of the outline. The outline
     // observes the store itself. The selected process is looked up only when an action runs.
     /// A process row's pid. Group rows (negative ids), an app's unit row included, have none.
-    private var selectedPid: pid_t? { selection.flatMap { $0 >= 0 ? pid_t(clamping: $0) : nil } }
+    private var selectedPid: pid_t? {
+        guard let id = selection else { return nil }
+        return id >= 0 ? pid_t(clamping: id) : SmartTree.rootPid(ofUnitID: id)
+    }
     private var hasProcessSelected: Bool { selectedPid != nil }
     private func inspectSelected() {
         if let pid = selectedPid, let p = store.procs[pid] { inspect(p) }
@@ -96,7 +99,13 @@ struct ProcessesView: View {
                                 predicate: predicate, sort: sort.wrappedValue ?? .pid,
                                 columns: ColumnPrefs.parse(shownColumns))
         }
-        .focusedSceneValue(\.inspectProcess, hasProcessSelected ? { inspectSelected() } : nil)
+        .focusedSceneValue(\.processTarget, ProcessTarget(
+            current: { [store] in selectedPid.flatMap { store.procs[$0] } },
+            inspect: hasProcessSelected ? { inspectSelected() } : nil,
+            select: { pid in reveal(pid, tries: 0) },
+            signal: { p, sig, label in
+                if sig == SIGCONT { send(sig, label, to: p) } else { pendingSignal = (p, sig, label) }
+            }))
         .searchable(text: $search, placement: .toolbar, prompt: "name, pid, path, team, bundle, label…")
         .toolbar {
             ToolbarItemGroup {
@@ -267,6 +276,8 @@ struct ProcessWindow: View {
     /// window forward, and a restored window comes back on it.
     @Binding var ref: ProcessRef?
     @State private var nav = InspectorNavigation()
+    @State private var pendingSignal: (ProcInfo, Int32, String)?
+    @State private var signalError: String?
 
     var body: some View {
         let ref = self.ref ?? ProcessRef(pid: -1, start: 0)
@@ -283,6 +294,30 @@ struct ProcessWindow: View {
             if let p = nav.current?.proc { self.ref = ProcessRef(p) }
         }
         .frame(minWidth: 640, minHeight: 420)
+        // The Process menu acts on the process shown; Select Parent and Responsible show those here.
+        .focusedSceneValue(\.processTarget, ProcessTarget(
+            current: { [store] in nav.current.flatMap { store.live($0.proc) } },
+            inspect: nil,
+            select: { [store] pid in if let p = store.procs[pid] { nav.push(p) } },
+            signal: { p, sig, label in
+                if sig == SIGCONT { send(sig, label, to: p) } else { pendingSignal = (p, sig, label) }
+            }))
+        .confirmationDialog(pendingSignal.map { "Send \($0.2) to \($0.0.name) (pid \($0.0.pid))?" } ?? "",
+                            isPresented: Binding(get: { pendingSignal != nil }, set: { if !$0 { pendingSignal = nil } })) {
+            Button(pendingSignal?.2 ?? "Send", role: .destructive) {
+                if let (p, sig, label) = pendingSignal { send(sig, label, to: p) }
+                pendingSignal = nil
+            }
+        }
+        .signalFailureAlert($signalError)
+    }
+
+    private func send(_ sig: Int32, _ label: String, to p: ProcInfo) {
+        if let err = store.send(sig, to: p) {
+            let msg = "Couldn't send \(label) to \(p.name) (pid \(p.pid)).\n\n\(err)"
+            DispatchQueue.main.async { signalError = msg }
+        }
+        store.refresh()
     }
 }
 

@@ -71,6 +71,11 @@ enum SmartTree {
     private static let roleBase = -(1 << 43)
 
     static func unitID(_ pid: pid_t) -> Int { unitBase - Int(pid) }
+    /// The root pid of a unit row's id, or nil for any other row.
+    static func rootPid(ofUnitID id: Int) -> pid_t? {
+        let pid = unitBase - id
+        return (0...Int(Int32.max)).contains(pid) ? pid_t(pid) : nil
+    }
     static func categoryID(_ c: ProcCategory) -> Int { categoryBase - c.rawValue }
     static func groupID(_ c: ProcCategory, _ key: String) -> Int {
         groupBase - (c.rawValue << 32) - Int(fnv(key))
