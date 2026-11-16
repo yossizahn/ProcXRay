@@ -305,6 +305,14 @@ struct ProcXRayApp: App {
             SettingsView()
         }
 
+        Window("Columns", id: ColumnManager.id) {
+            ColumnManager()
+        }
+        .defaultSize(width: 680, height: 500)
+        .windowResizability(.contentMinSize)
+        .restorationBehavior(.disabled)
+        .commandsRemoved()   // opened from View ▸ Columns or the table header's menu
+
         WindowGroup("Process", id: ProcessWindow.id, for: ProcessRef.self) { $ref in
             if $ref.wrappedValue != nil { ProcessWindow(ref: $ref).environment(store) }
         }

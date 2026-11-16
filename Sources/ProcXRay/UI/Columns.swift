@@ -585,6 +585,68 @@ enum ColumnPrefs {
         setShown(s)
     }
 
+    // MARK: Order and layouts
+
+    /// Every column id in the table's current left-to-right order, hidden ones included. The table writes
+    /// it whenever a column moves; the column manager reads it. (AppKit's autosave holds the same order,
+    /// but in a private format.)
+    static let orderKey = "columnOrder"
+    /// Posted after `apply(_:)`: every process table takes the stored shown set and order at once.
+    static let layoutChanged = Notification.Name("ProcXRay.columnLayoutChanged")
+
+    static var order: [String] {
+        let saved = (UserDefaults.standard.string(forKey: orderKey) ?? "").split(separator: ",").map(String.init)
+            .filter { Column.byID[$0] != nil }
+        // Columns the saved order doesn't know (new in this version) go after it, in catalogue order.
+        let base = saved.isEmpty ? Column.defaultShown : saved
+        return base + Column.all.map(\.id).filter { !base.contains($0) }
+    }
+    static func setOrder(_ ids: [String]) {
+        UserDefaults.standard.set(ids.joined(separator: ","), forKey: orderKey)
+    }
+    /// The shown columns, left to right.
+    static var shownInOrder: [String] {
+        let s = shown
+        return order.filter(s.contains)
+    }
+
+    /// Shows exactly `ids`, in that order (Name always among them); the hidden columns keep their
+    /// relative order after them.
+    static func apply(_ ids: [String]) {
+        var ids = ids.filter { Column.byID[$0] != nil }
+        if !ids.contains("name") { ids.insert("name", at: 0) }
+        setOrder(ids + order.filter { !ids.contains($0) })
+        setShown(Set(ids))
+        NotificationCenter.default.post(name: layoutChanged, object: nil)
+    }
+
+    // MARK: Saved sets
+
+    /// A named list of shown columns, in order.
+    struct Layout: Codable, Hashable, Identifiable {
+        var name: String
+        var columns: [String]
+        var id: String { name }
+    }
+    static let setsKey = "columnSets"
+    static let defaultLayout = Layout(name: "Default", columns: Column.defaultShown)
+
+    static func decodeSets(_ raw: String) -> [Layout] {
+        (try? JSONDecoder().decode([Layout].self, from: Data(raw.utf8))) ?? []
+    }
+    static var sets: [Layout] { decodeSets(UserDefaults.standard.string(forKey: setsKey) ?? "") }
+    static func setSets(_ sets: [Layout]) {
+        let data = (try? JSONEncoder().encode(sets)) ?? Data("[]".utf8)
+        UserDefaults.standard.set(String(decoding: data, as: UTF8.self), forKey: setsKey)
+    }
+    /// Saves the shown columns under `name`, replacing a set of that name.
+    static func saveSet(named name: String) {
+        var all = sets.filter { $0.name != name }
+        all.append(Layout(name: name, columns: shownInOrder))
+        setSets(all.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
+    }
+    static func deleteSet(named name: String) { setSets(sets.filter { $0.name != name }) }
+
     /// The previous version stored hidden columns; carry that choice over once.
     static func migrate() {
         let d = UserDefaults.standard
@@ -599,10 +661,21 @@ enum ColumnPrefs {
 /// View ▸ Columns: the header menu's toggles, by section, reachable from the keyboard.
 struct ColumnsCommands: Commands {
     @AppStorage(ColumnPrefs.key) private var shownRaw = ColumnPrefs.defaultShown
+    @AppStorage(ColumnPrefs.setsKey) private var setsRaw = ""
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        let _ = ColumnManager.openWindow = openWindow
         CommandGroup(after: .toolbar) {
             Menu("Columns") {
+                Button("Manage Columns…") { ColumnManager.open() }
+                    .keyboardShortcut("k", modifiers: [.command, .option])
+                Menu("Column Sets") {
+                    ForEach([ColumnPrefs.defaultLayout] + ColumnPrefs.decodeSets(setsRaw)) { s in
+                        Button(s.name) { ColumnPrefs.apply(s.columns) }
+                    }
+                }
+                Divider()
                 let shown = ColumnPrefs.parse(shownRaw)
                 ForEach(Column.Section.allCases, id: \.self) { section in
                     Menu(section.title) {

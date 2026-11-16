@@ -115,6 +115,9 @@ struct ProcessOutline: NSViewRepresentable {
         private var shownApplied: Set<String>?
         /// The header column a column shown from the header menu goes next to.
         private var showNextTo: String?
+        /// A column re-shown from the menu's list of shown columns goes back where it was (the menu stays
+        /// open, so unchecking and rechecking one is an undo).
+        private var keepPlace = false
         private var commandObservers: [NSObjectProtocol] = []
 
         /// View ▸ Columns acts on the outline in the key window (several main windows can be open).
@@ -127,6 +130,10 @@ struct ProcessOutline: NSViewRepresentable {
                 nc.addObserver(forName: ColumnPrefs.reset, object: nil, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { if let self, self.isInKeyWindow { self.resetColumns() } }
                 },
+                // A layout from the column manager or a saved set: every window, not just the key one.
+                nc.addObserver(forName: ColumnPrefs.layoutChanged, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.applyLayout() }
+                },
             ]
         }
         deinit { commandObservers.forEach(NotificationCenter.default.removeObserver) }
@@ -136,9 +143,34 @@ struct ProcessOutline: NSViewRepresentable {
             return w == (NSApp.keyWindow ?? NSApp.mainWindow)
         }
 
+        /// Takes the stored order and shown set as they are, moving nothing else.
+        private func applyLayout() {
+            guard let o = outline else { return }
+            let order = ColumnPrefs.order
+            movingForLayout = true
+            for (i, id) in order.enumerated() where i < o.tableColumns.count {
+                let at = o.column(withIdentifier: NSUserInterfaceItemIdentifier(id))
+                if at >= 0, at != i { o.moveColumn(at, toColumn: i) }
+            }
+            movingForLayout = false
+            keepPlace = true
+            syncShown(o)
+        }
+
+        /// Records the table's order for the column manager.
+        private func saveOrder() {
+            guard !movingForLayout, let o = outline else { return }
+            ColumnPrefs.setOrder(o.tableColumns.map(\.identifier.rawValue))
+        }
+        private var movingForLayout = false
+
+        func outlineViewColumnDidMove(_ n: Notification) { saveOrder() }
+
         private func syncShown(_ outline: NSOutlineView) {
-            let shown = parent.shownColumns
-            guard shown != shownApplied else { return }
+            // From the defaults rather than `parent`: after a layout change SwiftUI hands over the new set
+            // a moment later, and the old one mustn't be re-applied in between.
+            let shown = ColumnPrefs.shown
+            guard shown != shownApplied else { keepPlace = false; return }
             parent.store.extraReads = Column.reads(for: shown)
             let first = shownApplied == nil
             shownApplied = shown
@@ -149,9 +181,11 @@ struct ProcessOutline: NSViewRepresentable {
                 col.isHidden = hide
                 // A column just switched on goes next to the header column it was picked from, or after
                 // the last shown one, not wherever it sat in the catalogue.
-                if !hide, !first { place(col, in: outline) }
+                if !hide, !first, !keepPlace { place(col, in: outline) }
             }
             showNextTo = nil
+            keepPlace = false
+            if first { saveOrder() }
             // Sorting by a column nobody can see: back to no sort (the chosen grouping).
             // Next turn: this runs inside a SwiftUI update, which mustn't change state.
             if let s = parent.sort, s.id != "name", !shown.contains(s.id) {
@@ -218,12 +252,21 @@ struct ProcessOutline: NSViewRepresentable {
 
         private func buildHeaderMenu(_ menu: NSMenu) {
             guard let o = outline, let header = o.headerView else { return }
-            func item(_ title: String, state: Bool? = nil, in m: NSMenu? = nil, _ action: @escaping () -> Void) {
+            // A blank state image gives the plain rows the checkmark gutter, so their titles line up
+            // with the toggles' (AppKit only leaves the gutter when some row has a state image).
+            let gutter = NSImage(size: NSSize(width: MenuToggleView.checkmark.size.width + 2, height: 1))
+            func item(_ title: String, in m: NSMenu? = nil, _ action: @escaping () -> Void) {
                 let mi = NSMenuItem(title: title, action: #selector(MenuAction.fire), keyEquivalent: "")
                 let a = MenuAction(action)
                 mi.target = a
                 mi.representedObject = a
-                if let state { mi.state = state ? .on : .off }
+                mi.offStateImage = gutter
+                (m ?? menu).addItem(mi)
+            }
+            // Column toggles flip in place and leave the menu up, so several can be picked in one go.
+            func toggle(_ title: String, on: Bool, in m: NSMenu? = nil, _ action: @escaping () -> Void) {
+                let mi = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                mi.view = MenuToggleView(title: title, on: on, action)
                 (m ?? menu).addItem(mi)
             }
             // The column under the pointer when the menu opened.
@@ -246,22 +289,35 @@ struct ProcessOutline: NSViewRepresentable {
             let anchor = clicked?.identifier.rawValue
             for col in o.tableColumns where !col.isHidden && col.identifier.rawValue != "name" {
                 let id = col.identifier.rawValue
-                item(col.title, state: true) { ColumnPrefs.toggle(id) }
+                toggle(col.title, on: true) { [weak self] in
+                    self?.keepPlace = true
+                    ColumnPrefs.toggle(id)
+                }
             }
             menu.addItem(.separator())
             for section in Column.Section.allCases {
                 let sub = NSMenu(title: section.title)
                 for c in Column.all where c.section == section && c.id != "name" {
-                    item(c.title, state: shown.contains(c.id), in: sub) { [weak self] in
+                    toggle(c.title, on: shown.contains(c.id), in: sub) { [weak self] in
                         self?.showNextTo = anchor
                         ColumnPrefs.toggle(c.id)
                     }
                 }
                 let mi = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+                mi.offStateImage = gutter
                 mi.submenu = sub
                 menu.addItem(mi)
             }
             menu.addItem(.separator())
+            let sets = NSMenu(title: "Column Sets")
+            for layout in [ColumnPrefs.defaultLayout] + ColumnPrefs.sets {
+                item(layout.name, in: sets) { ColumnPrefs.apply(layout.columns) }
+            }
+            let setsItem = NSMenuItem(title: "Column Sets", action: nil, keyEquivalent: "")
+            setsItem.offStateImage = gutter
+            setsItem.submenu = sets
+            menu.addItem(setsItem)
+            item("Manage Columns…") { ColumnManager.open() }
             item("Reset Columns") { [weak self] in self?.resetColumns() }
         }
 
@@ -619,6 +675,88 @@ struct ProcessOutline: NSViewRepresentable {
         let action: () -> Void
         init(_ action: @escaping () -> Void) { self.action = action }
         @objc func fire() { action() }
+    }
+
+    /// A checkable menu row that toggles on click without closing the menu (a plain NSMenuItem always
+    /// closes it). Drawn to match AppKit's own rows, measured on macOS 27: 24pt rows, a full-height highlight
+    /// inset 5pt from the menu's sides with 8pt corners, checkmark 8.5pt and title 26pt past its left edge.
+    final class MenuToggleView: NSView {
+        static let height: CGFloat = 24
+        static let inset: CGFloat = 5
+        static let radius: CGFloat = 8
+        static let checkX: CGFloat = inset + 7.5   // the symbol's ink starts 1pt into its image
+        /// Matches AppKit's own menu checkmark in size and stroke.
+        static let checkmark = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)!
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))!
+        static let textX: CGFloat = inset + 25
+        static let trailing: CGFloat = 24
+
+        private let title: String
+        private var on: Bool
+        private let action: () -> Void
+        private let font = NSFont.menuFont(ofSize: 0)
+        private var hover = false
+
+        init(title: String, on: Bool, _ action: @escaping () -> Void) {
+            self.title = title
+            self.on = on
+            self.action = action
+            let w = Self.textX + (title as NSString).size(withAttributes: [.font: font]).width + Self.trailing
+            super.init(frame: NSRect(x: 0, y: 0, width: ceil(w), height: Self.height))
+            autoresizingMask = [.width]
+            setAccessibilityElement(true)
+            setAccessibilityRole(.checkBox)
+            setAccessibilityLabel(title)
+        }
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func accessibilityValue() -> Any? { on ? 1 : 0 }
+        override func accessibilityPerformPress() -> Bool { flip(); return true }
+
+        // AppKit doesn't redraw a view item when the pointer moves over it, so track that here.
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                           owner: self, userInfo: nil))
+        }
+        override func mouseEntered(with e: NSEvent) { hover = true; needsDisplay = true }
+        override func mouseExited(with e: NSEvent) { hover = false; needsDisplay = true }
+
+        override func draw(_ dirtyRect: NSRect) {
+            let lit = hover || (enclosingMenuItem?.isHighlighted ?? false)
+            if lit {
+                NSColor.controlAccentColor.setFill()
+                NSBezierPath(roundedRect: bounds.insetBy(dx: Self.inset, dy: 0), xRadius: Self.radius, yRadius: Self.radius).fill()
+            }
+            let color: NSColor = lit ? .selectedMenuItemTextColor : .labelColor
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+            let size = (title as NSString).size(withAttributes: attrs)
+            (title as NSString).draw(at: NSPoint(x: Self.textX, y: ((bounds.height - size.height) / 2).rounded()), withAttributes: attrs)
+            if on {
+                let check = Self.checkmark
+                let r = NSRect(x: Self.checkX, y: ((bounds.height - check.size.height) / 2).rounded() - 1,
+                               width: check.size.width, height: check.size.height)
+                let tinted = NSImage(size: check.size, flipped: false) { b in
+                    check.draw(in: b)
+                    color.set()
+                    b.fill(using: .sourceAtop)
+                    return true
+                }
+                tinted.draw(in: r)
+            }
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+            flip()
+        }
+
+        private func flip() {
+            on.toggle()
+            needsDisplay = true
+            action()
+        }
     }
 
     /// Return opens the selected process, like a double-click. The row under the pointer shows an ⓘ button
