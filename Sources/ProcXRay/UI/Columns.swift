@@ -394,6 +394,26 @@ private let catalogue: [Column] = [
     .amount(id: "compressed", title: "Compressed",
             tooltip: "Memory the system has compressed for this process (TASK_VM_INFO). Your own processes; other users' need the helper. Group rows: the sum.",
             section: .memory, width: 80, reads: .compressed, format: bytesFormat) { $0.compressed.map { Double($0) } },
+    Column(id: "jetsamBand", title: "Jetsam band",
+           tooltip: "Where the kernel's memory killer (jetsam) puts the process: when memory runs short, lower bands are killed first; 0 is the idle band. Read as root, so it needs the helper.",
+           section: .memory, width: 64, numeric: true, rule: .same(noun: "band"), reads: .jetsam) { p, _ in
+        p.jetsam.map { .number(Double($0.band), String($0.band), $0.band == 0 ? .secondary : .normal) } ?? .unknown
+    },
+    Column(id: "memLimit", title: "Memory limit",
+           tooltip: "The footprint at which the kernel kills the process (jetsam), in force now. Some processes have a different limit while inactive (see the Usage tab). Needs the helper.",
+           section: .memory, width: 80, numeric: true, rule: .blank, reads: .jetsam) { p, _ in
+        guard let j = p.jetsam else { return .unknown }
+        guard let b = j.limitBytes else { return .number(.infinity, "none", .secondary) }
+        return .number(Double(b), Fmt.bytes(b))
+    },
+    Column(id: "memLimitUsed", title: "Limit used",
+           tooltip: "Footprint as a share of the memory limit: at 100 % the kernel kills the process. Needs the helper.",
+           section: .memory, width: 64, numeric: true, rule: .blank, reads: .jetsam) { p, _ in
+        guard let j = p.jetsam else { return .unknown }
+        guard let b = j.limitBytes, b > 0, let f = p.footprint else { return .empty }
+        let v = Double(f) / Double(b) * 100
+        return .number(v, String(format: "%.0f %%", v), v >= 90 ? .danger : v >= 75 ? .warning : .normal)
+    },
 
     .amount(id: "faultRate", title: "Page faults/s", tooltip: "Page faults per second. Group rows: the sum." + rateNote,
             section: .memory, width: 80, format: perSecFormat) { $0.rates?.faults },

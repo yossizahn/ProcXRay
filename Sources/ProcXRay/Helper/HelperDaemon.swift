@@ -70,11 +70,12 @@ enum HelperDaemon {
         func allMetrics(extras: Int, reply: @escaping (Data) -> Void) {
             let extras = ExtraReads(rawValue: extras).intersection(.viaHelper)
             var out: [PrivMetrics] = []
+            let jetsam = extras.contains(.jetsam) ? Jetsam.all() : nil
             for k in Native.allProcesses() where k.pid > 0 {
                 // Usage of another user's process is root-only in the kernel (proc_pid_rusage checks
                 // same-user): a standard user gets it for their own processes only, as without the helper.
                 var m = mayInspect(k.pid) ? PrivMetrics.read(k.pid) : PrivMetrics(pid: k.pid)
-                if mayInspect(k.pid) { m.readExtras(extras) }
+                if mayInspect(k.pid) { m.readExtras(extras); m.jetsam = jetsam?[k.pid] }
                 m.responsible = Native.responsible(k.pid)
                 m.sandboxed = Native.sandboxed(k.pid, start: k.start)
                 out.append(m)
@@ -86,6 +87,11 @@ enum HelperDaemon {
             guard pid > 0, mayInspect(pid), let a = Native.argsEnv(pid) else { reply(nil); return }
             let v = PrivArgsEnv(execPath: a.execPath, args: a.args, env: a.env, cwd: Native.cwd(pid))
             reply(try? JSONEncoder().encode(v))
+        }
+
+        func securityConfig(pid: Int32, reply: @escaping (Int64) -> Void) {
+            guard pid > 0, mayInspect(pid), let c = SecurityConfig.read(pid) else { reply(-1); return }
+            reply(Int64(bitPattern: c.rawValue))
         }
 
         func threads(pid: Int32, reply: @escaping (Data?) -> Void) {

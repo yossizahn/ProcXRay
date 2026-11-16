@@ -40,6 +40,8 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var nice: Int32?
     var openFiles: Int?
     var compressed: UInt64?
+    /// Jetsam band and memory limits (root only: from the helper, unless the app runs as root).
+    var jetsam: JetsamInfo?
     /// Power assertion types held (IOPMCopyAssertionsByProcess); empty when it holds none.
     var assertions: [String]?
     /// GPU time since the process started, nanoseconds; nil when it has never used the GPU.
@@ -132,7 +134,7 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
         // Counters as a whole: a local read that got only one of the two calls keeps its partial set.
         fill(\.energyNJ, m.energyNJ); fill(\.wakeups, m.wakeups); fill(\.counters, m.counters)
         fill(\.priority, m.priority); fill(\.nice, m.nice); fill(\.openFiles, m.openFiles)
-        fill(\.compressed, m.compressed)
+        fill(\.compressed, m.compressed); fill(\.jetsam, m.jetsam)
         return took
     }
 
@@ -305,6 +307,8 @@ final class Store {
     /// Inspector pages showing network usage (Resources, the group page): while any is, refreshes read the
     /// network rates as the network columns do.
     @ObservationIgnored var networkViewers = 0
+    /// Inspector pages showing the jetsam band and memory limit: while any is, refreshes read them.
+    @ObservationIgnored var jetsamViewers = 0
     /// Each process's counters at the last refresh, by key: CPU % and the rate columns divide the change
     /// by the time between the two readings.
     @ObservationIgnored private var prevSamples: [String: Sample] = [:]
@@ -463,7 +467,7 @@ final class Store {
         let argv = argvCache
         let jobParents = jobParentCache
         let hosts = domainHostOf
-        let extras = extraReads.union(networkViewers > 0 ? .network : [])
+        let extras = extraReads.union(networkViewers > 0 ? .network : []).union(jetsamViewers > 0 ? .jetsam : [])
         let useHelper = helperState.isRunning
         let readSlow = full || ticksSinceSlow + 1 >= Self.slowEvery || lsApps.isEmpty
         ticksSinceSlow = readSlow ? 0 : ticksSinceSlow + 1
@@ -757,6 +761,8 @@ final class Store {
         NetSampler.shared.want(readNet)
         let net = readNet ? NetSampler.shared.current() : nil
         let mach = extras.contains(.machPorts) ? MachLoader.current() : nil
+        // Root only: nil (one failed call) in the app, which gets it from the helper instead.
+        let jetsam = extras.contains(.jetsam) ? Jetsam.all() : nil
 
         let now = DispatchTime.now().uptimeNanoseconds
         var users: [uid_t: String] = [:]
@@ -798,6 +804,7 @@ final class Store {
             }
             // A pid reused since the snapshot would get another process's ports.
             if let mach, p.start <= mach.at { p.machPorts = mach.counts[k.pid] }
+            if let jetsam { p.jetsam = jetsam[k.pid] }
             out[k.pid] = p
         }
         let priv = privSource()

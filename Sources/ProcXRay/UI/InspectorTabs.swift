@@ -545,7 +545,7 @@ struct UsageTab: View {
                     ("Neural Engine", Fmt.bytes(c?.neuralFootprint), ""),
                     ("Page faults", rate(r?.faults), c.map { "\(Fmt.count($0.faults)) (\(Fmt.count($0.cowFaults)) copy-on-write)" } ?? "—"),
                     ("Page-ins", rate(r?.pageins), Fmt.count(c?.pageins)),
-                ])
+                ] + jetsamRows(p))
                 Self.section("Disk", "internaldrive", h?.disk, format: bytesPerSecFormat, rows: [
                     ("Read", r?.diskRead.map(bytesPerSecFormat) ?? "—", Fmt.bytes(p.diskRead)),
                     ("Written", r?.diskWrite.map(bytesPerSecFormat) ?? "—", Fmt.bytes(p.diskWrite)),
@@ -572,6 +572,8 @@ struct UsageTab: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .readsNetwork()
+        .onAppear { store.jetsamViewers += 1 }
+        .onDisappear { store.jetsamViewers -= 1 }
         // Each refresh: these are read for the shown process only, not every process.
         .task(id: "\(p.key)|\(store.dataGen)|\(exited)") {
             guard !exited else { return }
@@ -658,6 +660,19 @@ struct UsageTab: View {
             ("Dead names", Fmt.count(m.deadNames), ""),
             ("Full queues", Fmt.count(m.fullQueues), ""),
         ]
+    }
+    /// Jetsam band and memory limits (root only: the helper's), under "Now".
+    private func jetsamRows(_ p: ProcInfo) -> [(String, String, String)] {
+        guard let j = p.jetsam else {
+            return [("Memory limit", "—", store.helperState.isRunning ? "not readable" : "needs the privileged helper")]
+        }
+        let mb: (Int32?) -> String = { $0.map { Fmt.bytes(UInt64($0) << 20) } ?? "none" }
+        var used = ""
+        if let b = j.limitBytes, b > 0, let f = p.footprint { used = String(format: "footprint is %.0f %% of it", Double(f) / Double(b) * 100) }
+        var rows = [("Memory limit", mb(j.limitMB), used)]
+        if j.limitsDiffer { rows.append(("  active / inactive", "", "\(mb(j.activeLimitMB)) / \(mb(j.inactiveLimitMB))")) }
+        rows.append(("Jetsam band", String(j.band), j.band == 0 ? "idle band: killed first" : ""))
+        return rows
     }
     private static let metricWidth: CGFloat = 180, nowWidth: CGFloat = 90, totalWidth: CGFloat = 240
 
@@ -1123,6 +1138,7 @@ struct TrustTab: View {
                 Card(title: "Signature", systemImage: "signature") {
                     FactGrid(rows: signatureRows(s))
                 }
+                HardeningCard(proc: proc, exited: exited)
                 SandboxCard(proc: proc, exited: exited, entitlements: dict)
                 TCCCard(proc: proc, responsible: store.responsibleProcess(proc), entitlements: dict)
                 entitlements(dict, platform: s.isPlatform || s.isAppleSigned)

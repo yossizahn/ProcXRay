@@ -164,6 +164,23 @@ enum Bench {
         let tools: [String: HelperTool] = ["lsof": .lsof, "vmmap": .vmmap, "sample": .sample,
                                            "procinfo": .launchctlProcinfo, "btm": .btmDump, "lsofall": .lsofAll,
                                            "taskinfo": .taskinfo, "powermetrics": .powermetrics, "stacks": .stacks]
+        if what == "jetsam" {
+            // jetsam [pid…]: the helper's jetsam reads (allMetrics with .jetsam), counted, and the given pids.
+            let t0 = Date()
+            guard let m = c.allMetrics(extras: .jetsam) else { print("jetsam: no reply"); return }
+            let got = m.values.compactMap(\.jetsam)
+            print(String(format: "jetsam: %d of %d processes in %.1f ms (whole allMetrics call), %d with no limit, %d with different active/inactive limits",
+                         got.count, m.count, -t0.timeIntervalSinceNow * 1000, got.filter { $0.limitMB == nil }.count, got.filter(\.limitsDiffer).count))
+            for p in args.dropFirst().compactMap({ Int32($0) }) { print("  \(p): \(m[p]?.jetsam.map { "\($0)" } ?? "none")") }
+            return
+        }
+        if what == "security" {
+            // security <pid>: SecurityConfig through the helper, next to the local read.
+            let names = { (c: SecurityConfig?) in c.map { c in String(format: "0x%llx ", c.rawValue) + SecurityConfig.all.filter { c.contains($0.0) }.map(\.name).joined(separator: ", ") } ?? "unreadable" }
+            print("local:  \(names(SecurityConfig.read(pid)))")
+            print("helper: \(names(c.securityConfig(pid)))")
+            return
+        }
         if what == "mach" {
             let t0 = Date()
             switch c.machPorts() {
@@ -637,7 +654,7 @@ enum Bench {
         print(String(format: "snapshot without extras: %.1f ms%@", base, root ? " (helper metrics fetched before timing)" : ""))
         if root {
             for (name, e) in [("none", ExtraReads()), ("files+nice+compressed", [.openFiles, .nice, .compressed] as ExtraReads),
-                              ] {
+                              ("jetsam", .jetsam)] {
                 _ = HelperClient.shared.allMetrics(extras: e)
                 let t = Date()
                 for _ in 0..<5 { _ = HelperClient.shared.allMetrics(extras: e) }
@@ -650,6 +667,7 @@ enum Bench {
             ("compressed", .compressed, { $0.compressed != nil }),
             ("assertions", .assertions, { ExtraRead.preventing($0.assertions ?? []) != nil }),
             ("gpu", .gpu, { $0.gpuNanos != nil }),
+            ("jetsam", .jetsam, { $0.jetsam != nil }),
         ]
         for (name, e, has) in cases {
             var ms = 0.0
