@@ -952,8 +952,35 @@ struct ProcessOutline: NSViewRepresentable {
         }
 
         // Assign only on change, so unchanged cells cause no redraw at all.
-        private func set(_ v: String) { if label.stringValue != v { label.stringValue = v; updateTip() } }
-        private func set(_ v: NSAttributedString) { if label.attributedStringValue != v { label.attributedStringValue = v; updateTip() } }
+        private func set(_ v: String) { styled = nil; if label.stringValue != v { label.stringValue = v; updateTip() } }
+        private func set(_ v: NSAttributedString) {
+            guard styled != v else { return }
+            styled = v
+            showStyled()
+        }
+
+        /// The Name cell's attributed text as built, before selection colors. Its runs carry their own
+        /// colors, which the text field doesn't swap for white on a selected row the way it does its
+        /// textColor, so the cell does that itself.
+        private var styled: NSAttributedString?
+        override var backgroundStyle: NSView.BackgroundStyle {
+            didSet { if backgroundStyle != oldValue, styled != nil { showStyled() } }
+        }
+        private func showStyled() {
+            guard let v = styled else { return }
+            let shown = backgroundStyle == .emphasized ? Self.onSelection(v) : v
+            if label.attributedStringValue != shown { label.attributedStringValue = shown; updateTip() }
+        }
+        /// Every run in the selected-text color; badges keep a faint white plate instead of their tint.
+        private static func onSelection(_ v: NSAttributedString) -> NSAttributedString {
+            let s = NSMutableAttributedString(attributedString: v)
+            let all = NSRange(location: 0, length: s.length)
+            s.addAttribute(.foregroundColor, value: NSColor.alternateSelectedControlTextColor, range: all)
+            s.enumerateAttribute(.backgroundColor, in: all) { c, r, _ in
+                if c != nil { s.addAttribute(.backgroundColor, value: NSColor.white.withAlphaComponent(0.25), range: r) }
+            }
+            return s
+        }
         private func set(color: NSColor) { if label.textColor != color { label.textColor = color } }
         private func set(image: NSImage?, tint: NSColor?) {
             if icon.image !== image { icon.image = image }
