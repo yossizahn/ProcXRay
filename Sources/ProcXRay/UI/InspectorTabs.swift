@@ -43,8 +43,6 @@ struct InspectorHeader: View {
     let proc: ProcInfo
     let exited: Bool
     let sign: SignInfo?
-    @State private var pendingSignal: (Int32, String)?
-    @State private var signalError: String?
 
     var body: some View {
         let p = proc
@@ -81,49 +79,35 @@ struct InspectorHeader: View {
                     p.sandboxed.map { $0 ? "sandboxed" : "not sandboxed" } ?? "sandbox unknown",
                     TrustVerdict(sign).short,
                 ].joined(separator: " · "))
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
+                // The four live figures; Usage has them with their history.
+                Text(verbatim: live(p)).monospacedDigit().layoutPriority(1)
+                    .help("CPU · Memory · Disk I/O · Power, over the last refresh")
             }
             .font(.callout).foregroundStyle(.secondary).lineLimit(1)
             .frame(height: 20)
-            HStack(spacing: 6) {
-                ForEach(badges(p), id: \.0) { Pill(text: $0.0, color: $0.1).help($0.2) }
-                Spacer(minLength: 0)
-                Menu("Signal") {
-                    Button("Terminate (SIGTERM)") { pendingSignal = (SIGTERM, "SIGTERM") }
-                    Button("Kill (SIGKILL)") { pendingSignal = (SIGKILL, "SIGKILL") }
-                    Button("Suspend (SIGSTOP)") { pendingSignal = (SIGSTOP, "SIGSTOP") }
-                    Button("Resume (SIGCONT)") { send(SIGCONT, "SIGCONT") }   // harmless: no confirmation
+            // Badges only; the signals and Reveal are in the Process menu and the row's context menu.
+            let b = badges(p)
+            if !b.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(b, id: \.0) { Pill(text: $0.0, color: $0.1).help($0.2) }
+                    Spacer(minLength: 0)
                 }
-                .controlSize(.small).fixedSize()
-                // kernel_task (pid 0): kill(0, …) would signal ProcXRay's own process group.
-                .disabled(exited || p.pid <= 0)
-                .help(exited ? "The process has exited." : "Send a signal to this process")
-                Button("Reveal") {
-                    if let path = p.path { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
-                }
-                .controlSize(.small)
-                .disabled(p.path == nil)
-                .help(p.path ?? "No executable path")
-            }
-            .frame(height: 22)
-        }
-        .padding(.horizontal, 10).padding(.top, 4)
-        .confirmationDialog(pendingSignal.map { "Send \($0.1) to \(p.name) (pid \(p.pid))?" } ?? "",
-                            isPresented: Binding(get: { pendingSignal != nil }, set: { if !$0 { pendingSignal = nil } })) {
-            Button(pendingSignal?.1 ?? "Send", role: .destructive) {
-                if let (sig, label) = pendingSignal { send(sig, label) }
-                pendingSignal = nil
+                .frame(height: 22)
             }
         }
-        .signalFailureAlert($signalError)
+        .padding(.horizontal, 10).padding(.top, 4).padding(.bottom, 2)
     }
 
-    private func send(_ sig: Int32, _ label: String) {
-        if let err = store.send(sig, to: proc) {
-            let msg = "Couldn't send \(label) to \(proc.name) (pid \(proc.pid)).\n\n\(err)"
-            DispatchQueue.main.async { signalError = msg }
-        }
-        store.refresh()
+    /// "CPU 3.7 % · 759 MB · 0 B/s · <0.01 W"
+    private func live(_ p: ProcInfo) -> String {
+        if exited { return "exited" }
+        let r = p.rates
+        let disk = r.flatMap { a in a.diskRead.flatMap { rd in a.diskWrite.map { rd + $0 } } }
+        return ["CPU " + (p.cpuPercent.map { "\(Fmt.pct($0)) %" } ?? "—"),
+                Fmt.bytes(p.footprint),
+                disk.map(bytesPerSecFormat) ?? "—",
+                r?.watts.map(wattsFormat) ?? "—"].joined(separator: " · ")
     }
 
     /// (text, colour, tooltip): states worth seeing at a glance, each read from a field.
@@ -267,57 +251,32 @@ struct Collapsible<Content: View>: View {
     }
 }
 
-// MARK: - Overview
+// MARK: - Info
 
-struct OverviewTab: View {
+/// What the code is and how this instance runs: the Identity and Execution columns, one row each, and the
+/// command line. Live figures are in the header and on Usage; who started it is on Launch.
+struct InfoTab: View {
     @Environment(Store.self) var store
     let proc: ProcInfo
     var exited = false
     let sign: SignInfo?
-    /// Switches the inspector to another tab (the Related strip's counts lead to Origin).
-    let show: (InspectorTab) -> Void
     @State private var cwd: (key: String, path: String?)?
     /// Arguments and environment, for the process `key` (nil: not readable).
     @State private var args: (key: String, value: Native.ArgsEnv?)?
 
     var body: some View {
         let p = proc
-        let r = p.rates
-        let children = store.procs.values.filter { $0.ppid == p.pid && $0.pid != p.pid && $0.start >= p.start }.count
-        let attributed = store.procs.values.filter { $0.responsible == p.pid && $0.pid != p.pid && $0.start >= p.start }.count
-        let owner = store.unitRoot(of: p).flatMap { $0 == p.pid ? nil : store.procs[$0] }
-        let parent = store.procs[p.ppid].flatMap { $0.start <= p.start && $0.pid != p.pid ? $0 : nil }
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                // Now (over the last refresh), with the last few minutes behind it.
-                let h = store.history[p.key]
-                HStack(spacing: 8) {
-                    SparkTile(title: "CPU", value: p.cpuPercent.map { "\(Fmt.pct($0)) %" } ?? "—",
-                              values: h?.cpu ?? [], format: { "\(Fmt.pct($0)) %" })
-                    SparkTile(title: "Memory", value: Fmt.bytes(p.footprint), values: h?.memory ?? [], fromZero: false,
-                              format: { Fmt.bytes(UInt64($0)) })
-                    SparkTile(title: "Disk read + written", value: diskRate(r), values: h?.disk ?? [], format: bytesPerSecFormat)
-                    SparkTile(title: "Power", value: r?.watts.map(wattsFormat) ?? "—", values: h?.power ?? [], format: wattsFormat)
-                    Spacer(minLength: 0)
-                }
-                FactGrid(rows: facts(p))
-                Card(title: "Related", systemImage: "point.3.connected.trianglepath.dotted") {
-                    FactGrid(rows: [
-                        ("Owner", owner.map { .process($0) } ?? .text("— (it is the top of its group)")),
-                        ("Parent", parent.map { .process($0) } ?? .text(p.ppid == p.pid ? "none" : "not running (\(p.ppid))")),
-                        ("Responsible", store.responsibleProcess(p).map { .process($0) } ?? .text(store.responsibleDescription(p))),
-                    ])
-                    HStack(spacing: 8) {
-                        Button("\(children) children") { show(.launch) }
-                        Button("responsible for \(attributed)") { show(.launch) }
-                    }
-                    .controlSize(.small)
-                }
+            VStack(alignment: .leading, spacing: 10) {
+                Card(title: Column.Section.identity.title) { FactGrid(rows: identity(p)) }
                 command(p)
+                Card(title: Column.Section.execution.title) { FactGrid(rows: execution(p)) }
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        // Nice is an optional read: make it while this tab shows it.
+        .readsWhileShown(.nice)
         // Re-read on an exec, on a manual refresh, and when the helper comes or goes.
         .task(id: "\(p.codeKey)|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
             guard !exited else { return }
@@ -339,67 +298,87 @@ struct OverviewTab: View {
         }
     }
 
-    /// The command line it was started with and its environment, collapsed.
+    /// The arguments, open, one per line; the environment collapsed.
     @ViewBuilder private func command(_ p: ProcInfo) -> some View {
         let loaded = args?.key == p.key ? args : nil
-        Collapsible(title: "Command" + (loaded?.value.map { " (\($0.args.count) arguments, \($0.env.count) environment variables)" } ?? ""),
-                    startsOpen: false) {
+        Card(title: "Command", trailing: loaded?.value.map { "\($0.args.count) arguments" }) {
             if let a = loaded?.value {
-                VStack(alignment: .leading, spacing: 6) {
-                    Collapsible(title: "Arguments (\(a.args.count))", startsOpen: a.args.count <= 6) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(Array(a.args.enumerated()), id: \.offset) { i, s in
-                                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                    Text("[\(i)]").foregroundStyle(.secondary).monospacedDigit()
-                                    Text(s).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                                    if let path = Reveal.path(in: s) { RevealButton(path: path) }
-                                }
-                            }
-                        }
-                    }
-                    Collapsible(title: "Environment (\(a.env.count))", startsOpen: false) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(a.env.sorted(), id: \.self) { Text($0).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(a.args.enumerated()), id: \.offset) { i, s in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("[\(i)]").foregroundStyle(.secondary).monospacedDigit()
+                            Text(s).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                            if let path = Reveal.path(in: s) { RevealButton(path: path) }
                         }
                     }
                 }
+                Collapsible(title: "Environment (\(a.env.count))", startsOpen: false) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(a.env.sorted(), id: \.self) { Text($0).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
+                    }
+                }
             } else {
-                Text(exited && loaded == nil ? "The process has exited; its arguments can't be read any more."
-                     : loaded != nil ? "Not readable (another user's process; the privileged helper can read it)." : "Reading…")
+                Text(exited && loaded == nil ? "Exited." : loaded != nil ? "Not readable: another user's process (needs the helper)." : "Reading…")
                     .foregroundStyle(.secondary)
             }
         }
     }
 
-    private func diskRate(_ r: Rates?) -> String {
-        guard let read = r?.diskRead, let write = r?.diskWrite else { return "—" }
-        let total = read + write
-        return total < 1 ? "0 B/s" : Fmt.bytes(UInt64(total)) + "/s"
-    }
+    private func col(_ id: String, _ p: ProcInfo) -> String { Column.byID[id]!.value(p, store).display }
 
-    private func facts(_ p: ProcInfo) -> [(String, KVValue)] {
+    /// The Identity columns (name and pid are in the header, the command line has its own card).
+    private func identity(_ p: ProcInfo) -> [(String, KVValue)] {
         var rows: [(String, KVValue)] = [("Path", p.path.map { .path($0) } ?? .text("— (\(p.comm))"))]
         if let b = store.bundleID(of: p) {
             let version = p.bundlePath.flatMap(BundleInfo.version)
-            rows.append(("Bundle", .text(b + (version.map { "  \($0)" } ?? ""))))
+            rows.append(("Bundle ID", .text(b + (version.map { "  \($0)" } ?? ""))))
         }
         rows += [
+            ("Kind", .text(store.kind(of: p) ?? "—")),
+            ("Architecture", .text(col("arch", p))),
+        ]
+        if let e = p.extensionPoint { rows.append(("Extension point", .text("\(ExtensionInfo.title(e))  (\(e))"))) }
+        return rows
+    }
+
+    /// The Execution columns, plus the working directory and scheduling.
+    private func execution(_ p: ProcInfo) -> [(String, KVValue)] {
+        var rows: [(String, KVValue)] = [
             ("User", .text("\(p.user) (uid \(p.uid))")),
             ("Started", .text(Fmt.shownStart(p.start) == p.start
                 ? "\(Fmt.date.string(from: p.start))  (\(Fmt.age(p.start)) ago)"
                 : "at boot, before the clock was set (\(Fmt.date.string(from: Fmt.shownStart(p.start))))")),
-            ("State", .text(Column.byID["state"]!.value(p, store).display.ifEmpty("live"))),
-            ("Architecture", .text(Column.byID["arch"]!.value(p, store).display)),
-            ("Sandbox", .text(p.sandboxed.map { $0 ? "sandboxed" : "not sandboxed" } ?? "unknown")),
-            ("Signed", .text(TrustVerdict(sign).long)),
-            ("Working dir", (cwd?.key == p.key ? cwd?.path : nil).map { .path($0) } ?? .text("—")),
-            ("Kind", .text(store.kind(of: p) ?? "—")),
+            ("State", .text(col("state", p).ifEmpty("live"))),
         ]
-        if let l = p.launchdLabel { rows.append(("launchd label", .text(l))) }
         // Cheap and unprivileged, so read here rather than waiting for the column's next refresh.
-        if let s = p.idleExit ?? IdleExitState.read(p.pid), s.contains(.tracked) { rows.append(("Idle exit", .text(s.long))) }
-        if let e = p.extensionPoint { rows.append(("Extension point", .text("\(ExtensionInfo.title(e))  (\(e))"))) }
+        if let s = p.idleExit ?? IdleExitState.read(p.pid) {
+            rows.append(("Idle exit (dirty tracking)", .text(s.contains(.tracked) ? s.long : "not tracked")))
+        }
+        rows += [
+            ("Working dir", (cwd?.key == p.key ? cwd?.path : nil).map { .path($0) } ?? .text("—")),
+            ("TTY", .text(p.tty.map(SmartTree.ttyName) ?? "—")),
+            ("Process group", .text(p.pgid == p.pid ? "\(p.pgid) (leader)" : "\(p.pgid)")),
+            ("Priority", .text(col("priority", p))),
+            ("Nice", .text(col("nice", p))),
+        ]
         return rows
+    }
+}
+
+extension View {
+    /// Makes the snapshot read `r` (an optional read, as a shown column would) while this view is on screen.
+    func readsWhileShown(_ r: ExtraReads) -> some View {
+        modifier(ReadsWhileShown(reads: r))
+    }
+}
+
+private struct ReadsWhileShown: ViewModifier {
+    @Environment(Store.self) var store
+    let reads: ExtraReads
+    func body(content: Content) -> some View {
+        content
+            .onAppear { store.addViewer(reads) }
+            .onDisappear { store.removeViewer(reads) }
     }
 }
 

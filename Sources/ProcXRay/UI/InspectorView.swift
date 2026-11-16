@@ -23,13 +23,13 @@ struct InspectorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Fixed height: a missing icon, owner or badge must not shift the tab strip below it.
+            // Two fixed-height rows, and a badge row only when there are badges.
             InspectorHeader(proc: proc, exited: exited, sign: sign)
             InspectorTabStrip(selection: tab)
             Divider()
             Group {
                 switch tab.wrappedValue {
-                case .info: OverviewTab(proc: proc, exited: exited, sign: sign) { tab.wrappedValue = $0 }
+                case .info: InfoTab(proc: proc, exited: exited, sign: sign)
                 case .launch: OriginTab(proc: proc, exited: exited)
                 case .security: TrustTab(proc: proc, sign: sign, exited: exited)
                 case .usage: UsageTab(proc: proc, exited: exited)

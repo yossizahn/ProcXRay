@@ -315,6 +315,18 @@ final class Store {
     @ObservationIgnored var networkViewers = 0
     /// Inspector pages showing the jetsam band and memory limit: while any is, refreshes read them.
     @ObservationIgnored var jetsamViewers = 0
+    /// Other optional reads inspector pages show (nice, compressed, open files, GPU…), counted per read:
+    /// while any page shows one, refreshes make it as the column would.
+    @ObservationIgnored private var viewerCounts: [Int: Int] = [:]
+    var viewerReads: ExtraReads {
+        viewerCounts.reduce(into: ExtraReads()) { if $1.value > 0 { $0.insert(ExtraReads(rawValue: $1.key)) } }
+    }
+    func addViewer(_ r: ExtraReads) {
+        for bit in 0..<16 where r.rawValue & (1 << bit) != 0 { viewerCounts[1 << bit, default: 0] += 1 }
+    }
+    func removeViewer(_ r: ExtraReads) {
+        for bit in 0..<16 where r.rawValue & (1 << bit) != 0 { viewerCounts[1 << bit, default: 0] -= 1 }
+    }
     /// Each process's counters at the last refresh, by key: CPU % and the rate columns divide the change
     /// by the time between the two readings.
     @ObservationIgnored private var prevSamples: [String: Sample] = [:]
@@ -473,7 +485,8 @@ final class Store {
         let argv = argvCache
         let jobParents = jobParentCache
         let hosts = domainHostOf
-        let extras = extraReads.union(predicateReads).union(networkViewers > 0 ? .network : []).union(jetsamViewers > 0 ? .jetsam : [])
+        let extras = extraReads.union(predicateReads).union(viewerReads)
+            .union(networkViewers > 0 ? .network : []).union(jetsamViewers > 0 ? .jetsam : [])
         let useHelper = helperState.isRunning
         let readSlow = full || ticksSinceSlow + 1 >= Self.slowEvery || lsApps.isEmpty
         ticksSinceSlow = readSlow ? 0 : ticksSinceSlow + 1
