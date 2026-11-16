@@ -308,7 +308,9 @@ struct ProcXRayApp: App {
             }
         }
 
-        MenuBarExtra(isInserted: Binding(get: { showIn != .dock }, set: { if !$0 { showIn = .dock } })) {
+        // SwiftUI calls the setter with false on every scene update while the item is out; writing the same value
+        // back to the defaults re-runs this body, which calls it again: a main-thread loop (hang) in Dock mode.
+        MenuBarExtra(isInserted: Binding(get: { showIn != .dock }, set: { if !$0, showIn != .dock { showIn = .dock } })) {
             MenuBarPopover().environment(store)
         } label: {
             MenuBarLabel()
