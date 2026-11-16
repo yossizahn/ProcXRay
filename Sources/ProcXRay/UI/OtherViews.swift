@@ -344,6 +344,9 @@ enum SelfTest {
         for g in Store.ghosts(procs: procs, lsApps: snap.ls) {
             print("left behind by \(g.name) (\(g.detail)): \(g.survivors.map { "\($0.name)(\($0.pid))" })")
         }
+        // Inspector tab names an earlier version stored, and where they open now.
+        print("inspector tabs: " + ["Overview", "Origin", "Trust", "Resources", "Connections", "Activity", "Files & Ports", "Bogus"]
+            .map { "\($0)→\(InspectorTab(stored: $0)?.rawValue ?? "nil")" }.joined(separator: ", "))
         let me = getpid()
         if let p = procs[me] {
             print("self: \(p.name) pid \(p.pid) ppid \(p.ppid) resp \(p.responsible ?? -1) coal \(p.coalition ?? 0) fp \(Fmt.bytes(p.footprint))")

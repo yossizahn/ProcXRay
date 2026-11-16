@@ -469,7 +469,7 @@ enum Bench {
         }
     }
 
-    /// `ProcXRay --peers [--root] [pid…]`: builds the Connections tab's peer index, then resolves each
+    /// `ProcXRay --peers [--root] [pid…]`: builds the Files & Ports tab's peer index, then resolves each
     /// process's descriptors as the tab does (its own `lsof -p` run), and counts how many other ends were
     /// found per kind. Without pids, every process in the index.
     static func peers(_ args: [String]) {

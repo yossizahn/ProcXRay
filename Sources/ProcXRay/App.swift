@@ -136,7 +136,7 @@ struct ProcXRayApp: App {
             exit(0)
         }
         if let i = CommandLine.arguments.firstIndex(of: "--attribution") {
-            // --attribution <pid> [launchd label]: the Origin tab's Attribution lines for one process.
+            // --attribution <pid> [launchd label]: the Launch tab's Attribution lines for one process.
             let a = Array(CommandLine.arguments[(i + 1)...])
             guard let pid = a.first.flatMap({ pid_t($0) }) else { print("usage: --attribution <pid> [label]"); exit(2) }
             LaunchMechanism.bench(pid: pid, label: a.count > 1 ? a[1] : nil)
@@ -287,6 +287,7 @@ struct ProcXRayApp: App {
         .defaultLaunchBehavior(launchHidden ? .suppressed : .automatic)
         .commands {
             InspectCommand()
+            InspectorTabCommands()
             ColumnsCommands()
             OpenBinaryCommand()
             CommandGroup(after: .toolbar) {
@@ -356,6 +357,28 @@ struct InspectCommand: Commands {
 enum InspectorPaneKey { static let name = "showInspectorPane" }
 
 struct InspectProcessKey: FocusedValueKey { typealias Value = () -> Void }
+struct InspectorTabKey: FocusedValueKey { typealias Value = Binding<InspectorTab> }
+extension FocusedValues {
+    var inspectorTab: Binding<InspectorTab>? {
+        get { self[InspectorTabKey.self] }
+        set { self[InspectorTabKey.self] = newValue }
+    }
+}
+
+/// View ▸ the inspector's tabs, ⌘1 … ⌘0, for the inspector in the focused window.
+struct InspectorTabCommands: Commands {
+    @FocusedValue(\.inspectorTab) private var tab
+    var body: some Commands {
+        CommandGroup(after: .sidebar) {
+            ForEach(InspectorTab.allCases) { t in
+                Button(t.rawValue) { tab?.wrappedValue = t }
+                    .keyboardShortcut(t.shortcut)
+                    .disabled(tab == nil)
+            }
+            Divider()
+        }
+    }
+}
 extension FocusedValues {
     var inspectProcess: (() -> Void)? {
         get { self[InspectProcessKey.self] }

@@ -11,15 +11,13 @@ struct InspectorView: View {
     var lastSign: SignInfo?
     /// The tab is remembered per window: a click in one Inspector must not switch (and so discard the
     /// collected output of) the others. The app-wide value is only the default for a new window.
-    @AppStorage("inspectorTab") private var lastTab: InspectorTab = .overview
+    /// Stored as the raw name; InspectorTab(stored:) also reads the names an earlier version stored.
+    @AppStorage("inspectorTab") private var lastTab = InspectorTab.info.rawValue
     @SceneStorage("inspectorTab") private var windowTab: String?
     private var tab: Binding<InspectorTab> {
-        Binding(get: { windowTab.flatMap(InspectorTab.init(rawValue:)) ?? lastTab },
-                set: { windowTab = $0.rawValue; lastTab = $0 })
+        Binding(get: { windowTab.flatMap(InspectorTab.init(stored:)) ?? InspectorTab(stored: lastTab) ?? .info },
+                set: { windowTab = $0.rawValue; lastTab = $0.rawValue })
     }
-    /// Which pane Resources and Activity show (Resources: usage, threads or the memory map; Activity: logs or a sample).
-    @AppStorage("inspector.resourcesView") private var resourcesPane = "Usage"
-    @AppStorage("inspector.activityPane") private var activityPane = "Logs"
 
     private var sign: SignInfo? { store.signInfo(for: proc) ?? lastSign }
 
@@ -31,42 +29,34 @@ struct InspectorView: View {
             Divider()
             Group {
                 switch tab.wrappedValue {
-                case .overview: OverviewTab(proc: proc, exited: exited, sign: sign) { tab.wrappedValue = $0 }
-                case .origin: OriginTab(proc: proc, exited: exited)
-                case .trust: TrustTab(proc: proc, sign: sign, exited: exited)
-                case .resources:
-                    SubPanes(selection: $resourcesPane, names: ["Usage", "Threads", "Memory map"]) {
-                        if resourcesPane == "Threads" {
-                            ThreadsView(proc: proc, exited: exited)
-                        } else if resourcesPane == "Memory map" {
-                            toolTab(.vmmap, auto: false, title: "vmmap --summary \(proc.pid)",
-                                    parse: { VmmapParser.parse($0) }, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
-                        } else {
-                            UsageTab(proc: proc, exited: exited)
-                        }
-                    }
-                case .connections:
+                case .info: OverviewTab(proc: proc, exited: exited, sign: sign) { tab.wrappedValue = $0 }
+                case .launch: OriginTab(proc: proc, exited: exited)
+                case .security: TrustTab(proc: proc, sign: sign, exited: exited)
+                case .usage: UsageTab(proc: proc, exited: exited)
+                case .threads: ThreadsView(proc: proc, exited: exited)
+                case .memory:
+                    toolTab(.vmmap, auto: false, title: "vmmap --summary \(proc.pid)",
+                            parse: { VmmapParser.parse($0) }, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
+                case .filesPorts:
                     toolTab(.lsof, auto: true, title: "lsof -n -P -p \(proc.pid)",
                             parse: { LsofParser.parse($0) }, isEmpty: \.isEmpty) { [pid = proc.pid] in LsofView(entries: $0, filter: $1, pid: pid) }
-                case .activity:
-                    SubPanes(selection: $activityPane, names: ["Logs", "Sample", "Syscalls"]) {
-                        if activityPane == "Sample" {
-                            toolTab(.sample, auto: false, title: "sample \(proc.pid) 1 (all thread stacks for 1s)",
-                                    parse: { SampleParser.parse($0) }, isEmpty: \.threads.isEmpty) { SampleView(report: $0, filter: $1) }
-                        } else if activityPane == "Syscalls" {
-                            // A new process gets a new tracer (and the old one's trace stops).
-                            SyscallTraceView(proc: proc, exited: exited).id(proc.key)
-                        } else {
-                            // A new process gets a new session (and the old one's stream stops).
-                            LogsPane(proc: proc, exited: exited).id(proc.key)
-                        }
-                    }
+                case .logs:
+                    // A new process gets a new session (and the old one's stream stops).
+                    LogsPane(proc: proc, exited: exited).id(proc.key)
+                case .sample:
+                    toolTab(.sample, auto: false, title: "sample \(proc.pid) 1 (all thread stacks for 1s)",
+                            parse: { SampleParser.parse($0) }, isEmpty: \.threads.isEmpty) { SampleView(report: $0, filter: $1) }
+                case .syscalls:
+                    // A new process gets a new tracer (and the old one's trace stops).
+                    SyscallTraceView(proc: proc, exited: exited).id(proc.key)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         // Pin a new window to the tab in use when it opened; from then on other windows don't move it.
-        .onAppear { if windowTab == nil { windowTab = lastTab.rawValue } }
+        .onAppear { if windowTab == nil { windowTab = tab.wrappedValue.rawValue } }
+        // View ▸ the tab's ⌘-digit, while this inspector's window is focused.
+        .focusedSceneValue(\.inspectorTab, tab)
     }
 
     /// lsof / vmmap / sample need root (or task_for_pid rights) for most processes: route them through
@@ -197,25 +187,6 @@ struct KV: View {
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-/// Two panes in one tab, picked with a small segmented control above them.
-struct SubPanes<Content: View>: View {
-    @Binding var selection: String
-    let names: [String]
-    @ViewBuilder let content: () -> Content
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Picker("", selection: $selection) {
-                ForEach(names, id: \.self) { Text($0).tag($0) }
-            }
-            .pickerStyle(.segmented).labelsHidden().fixedSize()
-            .padding(.vertical, 6)
-            Divider()
-            content().frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

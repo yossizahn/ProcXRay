@@ -1,18 +1,37 @@
 import AppKit
 import SwiftUI
 
-// The inspector's six question-shaped tabs and its fixed header (docs/tree-and-inspector-proposal.md,
-// Part 3). Overview, Origin and Trust are built here; Resources, Connections and Activity hold the
-// existing panes until steps 8 and 9 rebuild them.
+// The inspector's tabs and its fixed header (docs/ui-regrouping-plan.md, Part 5). Info, Launch, Security
+// and Usage are built here; the other tabs are their own views.
 
+/// The inspector's tabs, named by what they hold: static facts, then live counters, then on-demand captures
+/// (docs/ui-regrouping-plan.md, 5.1).
 enum InspectorTab: String, CaseIterable, Identifiable {
-    case overview = "Overview"
-    case origin = "Origin"
-    case trust = "Trust"
-    case resources = "Resources"
-    case connections = "Connections"
-    case activity = "Activity"
+    case info = "Info"
+    case launch = "Launch"
+    case security = "Security"
+    case usage = "Usage"
+    case threads = "Threads"
+    case memory = "Memory"
+    case filesPorts = "Files & Ports"
+    case logs = "Logs"
+    case sample = "Sample"
+    case syscalls = "Syscalls"
     var id: String { rawValue }
+
+    /// A stored tab name, including the six names an earlier version stored.
+    init?(stored raw: String) {
+        let old: [String: InspectorTab] = ["Overview": .info, "Origin": .launch, "Trust": .security,
+                                           "Resources": .usage, "Connections": .filesPorts, "Activity": .logs]
+        guard let t = InspectorTab(rawValue: raw) ?? old[raw] else { return nil }
+        self = t
+    }
+
+    /// ⌘1 … ⌘9, then ⌘0 for the tenth.
+    var shortcut: KeyEquivalent {
+        let i = InspectorTab.allCases.firstIndex(of: self)!
+        return KeyEquivalent(Character(String((i + 1) % 10)))
+    }
 }
 
 // MARK: - Header
@@ -289,8 +308,8 @@ struct OverviewTab: View {
                         ("Responsible", store.responsibleProcess(p).map { .process($0) } ?? .text(store.responsibleDescription(p))),
                     ])
                     HStack(spacing: 8) {
-                        Button("\(children) children") { show(.origin) }
-                        Button("responsible for \(attributed)") { show(.origin) }
+                        Button("\(children) children") { show(.launch) }
+                        Button("responsible for \(attributed)") { show(.launch) }
                     }
                     .controlSize(.small)
                 }

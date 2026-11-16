@@ -377,7 +377,7 @@ struct PortPair: Hashable, Sendable {
     init(_ x: Int32, _ y: Int32) { a = min(x, y); b = max(x, y) }
 }
 
-/// One peer of a process, as the Connections tab shows it.
+/// One peer of a process, as the Files & Ports tab shows it.
 struct MachPeer: Hashable, Sendable {
     let pid: Int32
     /// Ports of the peer's that this process can send to, and the reverse.
@@ -440,7 +440,7 @@ struct MachPeer: Hashable, Sendable {
     }
 }
 
-/// The last snapshot, shared by every Connections tab. Taking one costs ~3 s of root work, so it is reused
+/// The last snapshot, shared by every Files & Ports tab. Taking one costs ~3 s of root work, so it is reused
 /// for `maxAge` unless asked for fresh.
 enum MachLoader {
     enum Result: Sendable {
