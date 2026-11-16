@@ -3,6 +3,7 @@
 #   ./build-app.sh            dev build:     "build/Proc X-Ray Dev.app", bundle id local.procxray.dev
 #   ./build-app.sh --release  installable:   "build/Proc X-Ray.app",     bundle id local.procxray
 #   ./build-app.sh --install  --release, then replaces "/Applications/Proc X-Ray.app" (quitting and relaunching it if running)
+# VERSION=1.2.3 sets the version in Info.plist (default below); BUILD_NUMBER sets CFBundleVersion.
 # The bundle's executable stays ProcXRay (no space), so command-line use is `.../MacOS/ProcXRay --bench` etc.
 # macOS registers the privileged helper by bundle id, and whichever copy with that id launched last takes the
 # registration over. Dev builds get their own id (and helper, and settings) so running one never breaks the
@@ -18,6 +19,9 @@ case "${1:-}" in
   "")        BUNDLE_ID=local.procxray.dev; NAME="Proc X-Ray Dev" ;;
   *) echo "usage: $0 [--release | --install]" >&2; exit 2 ;;
 esac
+
+VERSION="${VERSION:-0.1.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-1}"
 
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app/Contents/Developer ]]; then
   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
@@ -50,8 +54,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>ProcXRay</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>

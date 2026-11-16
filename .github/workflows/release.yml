@@ -1,0 +1,67 @@
+# Builds "Proc X-Ray.app" and attaches it, zipped, to the GitHub release of a pushed v* tag.
+# Run by hand (Actions ▸ Release ▸ Run workflow) it only builds and keeps the zip as a workflow artifact.
+#
+# The runner has no signing identity, so build-app.sh signs ad hoc: the app runs once Gatekeeper is told to
+# open it, but it cannot install the privileged helper (SMAppService won't run an ad-hoc daemon).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=0.0.0-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+          echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          xcodebuild -version
+          ./build-app.sh --release
+
+      - name: Check
+        run: |
+          APP="build/Proc X-Ray.app"
+          codesign --verify --strict --verbose=2 "$APP"
+          lipo -archs "$APP/Contents/MacOS/ProcXRay"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
+          # The binary must at least start and read the process list.
+          "$APP/Contents/MacOS/ProcXRay" --dump > dump.txt
+          head -3 dump.txt
+
+      - name: Package
+        run: |
+          ZIP="Proc-X-Ray-$VERSION.zip"
+          ditto -c -k --sequesterRsrc --keepParent "build/Proc X-Ray.app" "$ZIP"
+          shasum -a 256 "$ZIP"
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Proc-X-Ray-${{ env.VERSION }}
+          path: ${{ env.ZIP }}
+
+      - name: Attach to the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A release written by hand for this tag keeps its notes; otherwise one is created.
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --title "Proc X-Ray $VERSION" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
