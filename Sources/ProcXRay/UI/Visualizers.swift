@@ -297,6 +297,25 @@ struct LsofView: View {
     @State private var mach: MachLoader.Result?
     @State private var machLoading = false
 
+    /// Open descriptors and the port space's counts (from the last lsmp snapshot), above the table.
+    private var summary: some View {
+        let fds = entries.filter { $0.fd.first?.isNumber == true }.count
+        let p = store.procs[pid]
+        let m = p?.machPorts ?? p.flatMap { p in MachLoader.peek().flatMap { s in p.start <= s.at ? s.counts[p.pid] : nil } }
+        var parts = ["\(Fmt.count(fds)) open files"]
+        if let m {
+            parts.append("\(Fmt.count(m.total)) Mach ports (\(Fmt.count(m.receive)) receive · \(Fmt.count(m.send)) send · \(Fmt.count(m.portSets)) sets)")
+            parts.append("\(Fmt.count(m.sendOnce)) replies owed (send-once)")
+            parts.append("\(Fmt.count(m.deadNames)) dead names")
+            parts.append("\(Fmt.count(m.fullQueues)) full queues")
+        }
+        return Text(verbatim: parts.joined(separator: " · "))
+            .font(.callout).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            .truncationHelp(parts.joined(separator: "\n"))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8).padding(.top, 6)
+    }
+
     var body: some View {
         let bundle = store.procs[pid]?.bundlePath
         let entries = self.entries.map { e -> LsofEntry in
@@ -315,6 +334,7 @@ struct LsofView: View {
         }.sorted(using: sort)
         let listeners = entries.filter { $0.kind == .tcp && $0.endpoints.state == "LISTEN" }
         VStack(spacing: 0) {
+            summary
             if !listeners.isEmpty { listening(listeners) }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {

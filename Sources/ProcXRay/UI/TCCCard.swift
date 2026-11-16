@@ -20,7 +20,7 @@ struct TCCCard: View {
     private var owner: ProcInfo { responsible ?? proc }
 
     var body: some View {
-        Card(title: "Privacy & Security", systemImage: "hand.raised") {
+        Card(title: "Privacy permissions (TCC)", systemImage: "hand.raised") {
             Text(attribution).fixedSize(horizontal: false, vertical: true)
             if let r = report {
                 if r.grants.isEmpty {

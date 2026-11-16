@@ -42,6 +42,7 @@ struct GroupInspectorView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .readsNetwork()
+            .readsWhileShown([.gpu, .compressed, .openFiles])
         }
     }
 
@@ -135,7 +136,7 @@ struct GroupInspectorView: View {
                       values: summedHistory(ms, \.cpu), format: { "\(Fmt.pct($0)) %" })
             SparkTile(title: "Memory", value: mem.map { Fmt.bytes(UInt64($0)) } ?? "—",
                       values: summedHistory(ms, \.memory), fromZero: false, format: { Fmt.bytes(UInt64($0)) })
-            SparkTile(title: "Disk read + written", value: disk.map(bytesPerSecFormat) ?? "—",
+            SparkTile(title: "Disk I/O", value: disk.map(bytesPerSecFormat) ?? "—",
                       values: summedHistory(ms, \.disk), format: bytesPerSecFormat)
             SparkTile(title: "Power", value: watts.map(wattsFormat) ?? "—",
                       values: summedHistory(ms, \.power), format: wattsFormat)
@@ -155,21 +156,30 @@ struct GroupInspectorView: View {
         let pCoreCPU = sum(ms) { p in p.rates.flatMap { r in r.pCoreShare.flatMap { _ in r.cpuPercent } } }
         let instrNow = sum(ms) { $0.rates?.instructions }, cyclesNow = sum(ms) { $0.rates?.cycles }
         let instr = sum(ms) { $0.counters?.instructions.map { Double($0) } }, cycles = sum(ms) { $0.counters?.cycles.map { Double($0) } }
-        return VStack(alignment: .leading, spacing: 12) {
-        UsageTab.section("CPU", "cpu", summedHistory(ms, \.cpu), format: { "\(Fmt.pct($0)) %" }, rows: [
+        let vouchers: [(String, String, String)] = voucherRows(ms) ?? []
+        let cpuRows: [(String, String, String)] = [
             ("CPU", cpu.map { "\(Fmt.pct($0)) %" } ?? "—", cpuNanos.map { Fmt.secs(UInt64($0)) } ?? "—"),
-            ("On performance cores",
+            ("P-core share",
              pCoreNow.flatMap { n in pCoreCPU.flatMap { $0 > 0 ? String(format: "%.0f %%", n / $0) : nil } } ?? "—",
              pCoreNanos.map { pc in Fmt.secs(UInt64(pc)) + (cpuNanos.flatMap { $0 > 0 ? String(format: " (%.0f %%)", pc / $0 * 100) : nil } ?? "") } ?? "—"),
-            ("Waiting for a CPU", sum(ms) { $0.rates?.waitingPercent }.map { String(format: "%.1f %%", $0) } ?? "—",
+            ("Runnable wait", sum(ms) { $0.rates?.waitingPercent }.map { String(format: "%.1f %%", $0) } ?? "—",
              sum(ms) { $0.counters?.waitingNanos.map { Double($0) } }.map { Fmt.secs(UInt64($0)) } ?? "—"),
             ("Threads", sum(ms) { $0.threads.map { Double($0) } }.map { Fmt.count(Int64($0)) } ?? "—", ""),
-            ("Instructions per cycle", instrNow.flatMap { i in cyclesNow.flatMap { $0 > 0 ? String(format: "%.2f", i / $0) : nil } } ?? "—",
+            ("Instr/cycle", instrNow.flatMap { i in cyclesNow.flatMap { $0 > 0 ? String(format: "%.2f", i / $0) : nil } } ?? "—",
              instr.flatMap { i in cycles.flatMap { $0 > 0 ? String(format: "%.2f", i / $0) : nil } } ?? "—"),
             ("Context switches", rate(\.contextSwitches), count(\.contextSwitches)),
-        ])
+        ]
+        return VStack(alignment: .leading, spacing: 12) {
+        UsageTab.section("CPU", "cpu", summedHistory(ms, \.cpu), format: { "\(Fmt.pct($0)) %" }, rows: cpuRows + vouchers.prefix(2))
+        if ms.contains(where: { $0.rates?.gpuPercent != nil || $0.gpuNanos != nil }) {
+            UsageTab.section("GPU", "cpu.fill", nil, format: { _ in "" }, rows: [
+                ("% GPU", sum(ms) { $0.rates?.gpuPercent }.map { $0 < 0.05 ? "0" : String(format: "%.1f %%", $0) } ?? "—",
+                 sum(ms) { $0.gpuNanos.map { Double($0) } }.map { Fmt.secs(UInt64($0)) } ?? "—"),
+            ])
+        }
         UsageTab.section("Memory", "memorychip", summedHistory(ms, \.memory), fromZero: false, format: { Fmt.bytes(UInt64($0)) }, rows: [
-            ("Footprint", bytes(sum(ms) { $0.footprint.map { Double($0) } }), ""),
+            ("Memory", bytes(sum(ms) { $0.footprint.map { Double($0) } }), ""),
+            ("Compressed", bytes(sum(ms) { $0.compressed.map { Double($0) } }), ""),
             ("Neural Engine", bytes(sum(ms) { $0.counters?.neuralFootprint.map { Double($0) } }), ""),
             ("Page faults", rate(\.faults), count(\.faults)),
             ("Page-ins", rate(\.pageins), count(\.pageins)),
@@ -183,23 +193,20 @@ struct GroupInspectorView: View {
         UsageTab.networkSection(summedHistory(ms, \.network), inRate: sum(ms) { $0.netIn }, outRate: sum(ms) { $0.netOut },
                                 inTotal: sum(ms) { $0.netInTotal.map { Double($0) } }, outTotal: sum(ms) { $0.netOutTotal.map { Double($0) } },
                                 start: ms.map(\.start).min())
-        UsageTab.section("Energy and wakeups", "bolt", summedHistory(ms, \.power), format: wattsFormat, rows: [
-            ("CPU energy", sum(ms) { $0.rates?.watts }.map(wattsFormat) ?? "—",
-             sum(ms) { $0.energyNJ.map { Double($0) } }.map { String(format: "%.2f J", $0 / 1e9) } ?? "—"),
-            ("Wakeups (idle + interrupt)", rate(\.wakeups),
-             sum(ms) { $0.wakeups.map { Double($0) } }.map { Fmt.count(Int64($0)) } ?? "—"),
-        ])
-        UsageTab.section("System calls and IPC", "arrow.left.arrow.right", nil, format: { _ in "" }, rows: [
+        UsageTab.section("IPC", "arrow.left.arrow.right", nil, format: { _ in "" }, rows: [
             ("BSD system calls", rate(\.unixSyscalls), count(\.unixSyscalls)),
             ("Mach system calls", rate(\.machSyscalls), count(\.machSyscalls)),
             ("Mach messages sent", rate(\.machMsgsSent), count(\.machMsgsSent)),
             ("Mach messages received", rate(\.machMsgsReceived), count(\.machMsgsReceived)),
+            ("Open files", sum(ms) { $0.openFiles.map { Double($0) } }.map { Fmt.count(Int64($0)) } ?? "—", ""),
         ])
-        if let vr = voucherRows(ms) {
-            UsageTab.section("On behalf of other processes", "arrow.left.arrow.right.square", nil, format: { _ in "" }, rows: vr)
-                .help("Work attributed through Mach vouchers (the BANK attribute), summed across the group. \"For others\" is CPU and energy these processes spent servicing other processes' requests; \"by others\" is what other processes spent servicing these. Most of it flows automatically over XPC.")
-            VoucherFlowsView(pids: Set(ms.map(\.pid)), subject: "these processes")
-        }
+        UsageTab.section("Energy", "bolt", summedHistory(ms, \.power), format: wattsFormat, rows: [
+            ("Power", sum(ms) { $0.rates?.watts }.map(wattsFormat) ?? "—",
+             sum(ms) { $0.energyNJ.map { Double($0) } }.map { String(format: "%.2f J", $0 / 1e9) } ?? "—"),
+            ("Wakeups", rate(\.wakeups),
+             sum(ms) { $0.wakeups.map { Double($0) } }.map { Fmt.count(Int64($0)) } ?? "—"),
+        ] + vouchers.suffix(2))
+        if !vouchers.isEmpty { VoucherFlowsView(pids: Set(ms.map(\.pid)), subject: "these processes") }
         Text("Resident and virtual size aren't summed: shared pages would be counted once per process.")
             .font(.caption).foregroundStyle(.secondary)
         }

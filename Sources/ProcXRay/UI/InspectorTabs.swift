@@ -504,7 +504,7 @@ struct SparkTile: View {
     }
 }
 
-// MARK: - Resources
+// MARK: - Usage
 
 /// What the process is costing: each value now (over the last refresh) beside its total since start.
 struct UsageTab: View {
@@ -518,6 +518,7 @@ struct UsageTab: View {
     var body: some View {
         let p = proc, r = p.rates, c = p.counters
         let h = store.history[p.key]
+        let e = extra?.key == p.key ? extra : nil
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 if !p.isInspectable {
@@ -526,22 +527,27 @@ struct UsageTab: View {
                 }
                 Self.section("CPU", "cpu", h?.cpu, format: { "\(Fmt.pct($0)) %" }, rows: [
                     ("CPU", r?.cpuPercent.map { "\(Fmt.pct($0)) %" } ?? "—", Fmt.secs(p.cpuNanos)),
-                    ("On performance cores", r?.pCoreShare.map { String(format: "%.0f %%", $0) } ?? "—",
+                    ("P-core share", r?.pCoreShare.map { String(format: "%.0f %%", $0) } ?? "—",
                      c?.pCoreNanos.map { pc in Fmt.secs(pc) + (p.cpuNanos.flatMap { $0 > 0 ? String(format: " (%.0f %%)", Double(pc) / Double($0) * 100) : nil } ?? "") } ?? "—"),
-                    ("Waiting for a CPU", r?.waitingPercent.map { String(format: "%.1f %%", $0) } ?? "—", Fmt.secs(c?.waitingNanos)),
+                    ("Runnable wait", r?.waitingPercent.map { String(format: "%.1f %%", $0) } ?? "—", Fmt.secs(c?.waitingNanos)),
                     // How many threads exist. (No "running" count: pti_numrunning is one instant, and for a
                     // process at a few percent CPU it reads 0 almost every time: 95.7 % of 2,000 reads for
                     // Firefox at 2 %.)
                     ("Threads", p.threads.map(String.init) ?? "—", ""),
-                    ("Instructions per cycle", r?.ipc.map { String(format: "%.2f", $0) } ?? "—",
+                    ("Instr/cycle", r?.ipc.map { String(format: "%.2f", $0) } ?? "—",
                      c.flatMap { c in c.instructions.flatMap { i in c.cycles.flatMap { $0 > 0 ? String(format: "%.2f", Double(i) / Double($0)) : nil } } } ?? "—"),
                     ("Context switches", rate(r?.contextSwitches), Fmt.count(c?.contextSwitches)),
-                ])
-                qosSection(p)
+                ] + qosRows(p) + voucherCPURows(p))
+                if r?.gpuPercent != nil || p.gpuNanos != nil {
+                    Self.section("GPU", "cpu.fill", nil, format: { _ in "" }, rows: [
+                        ("% GPU", r?.gpuPercent.map { $0 < 0.05 ? "0" : String(format: "%.1f %%", $0) } ?? "—", Fmt.secs(p.gpuNanos)),
+                    ])
+                }
                 Self.section("Memory", "memorychip", h?.memory, fromZero: false, format: { Fmt.bytes(UInt64($0)) }, rows: [
-                    ("Footprint", Fmt.bytes(p.footprint), c?.peakFootprint.map { "peak " + Fmt.bytes($0) } ?? "—"),
+                    ("Memory", Fmt.bytes(p.footprint), c?.peakFootprint.map { "peak " + Fmt.bytes($0) } ?? "—"),
                     ("Resident", Fmt.bytes(p.rss), ""),
                     ("Virtual", Fmt.bytes(p.virt), ""),
+                    ("Compressed", Fmt.bytes(p.compressed), ""),
                     ("Neural Engine", Fmt.bytes(c?.neuralFootprint), ""),
                     ("Page faults", rate(r?.faults), c.map { "\(Fmt.count($0.faults)) (\(Fmt.count($0.cowFaults)) copy-on-write)" } ?? "—"),
                     ("Page-ins", rate(r?.pageins), Fmt.count(c?.pageins)),
@@ -554,24 +560,24 @@ struct UsageTab: View {
                 Self.networkSection(h?.network, inRate: p.netIn, outRate: p.netOut,
                                     inTotal: p.netInTotal.map { Double($0) }, outTotal: p.netOutTotal.map { Double($0) },
                                     start: p.start)
-                Self.section("Energy and wakeups", "bolt", h?.power, format: wattsFormat, rows: [
-                    ("CPU energy", r?.watts.map(wattsFormat) ?? "—", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
-                    ("Wakeups (idle + interrupt)", rate(r?.wakeups), Fmt.count(p.wakeups)),
-                ])
-                Self.section("System calls and IPC", "arrow.left.arrow.right", nil, format: { _ in "" }, rows: [
+                Self.section("IPC", "arrow.left.arrow.right", nil, format: { _ in "" }, rows: [
                     ("BSD system calls", rate(r?.unixSyscalls), Fmt.count(c?.unixSyscalls)),
                     ("Mach system calls", rate(r?.machSyscalls), Fmt.count(c?.machSyscalls)),
                     ("Mach messages sent", rate(r?.machMsgsSent), Fmt.count(c?.machMsgsSent)),
                     ("Mach messages received", rate(r?.machMsgsReceived), Fmt.count(c?.machMsgsReceived)),
-                ] + machPortRows(p))
-                voucherSection(p)
-                other(p)
-                if p.viaHelper { Text("Task metrics read as root through the privileged helper.").font(.caption).foregroundStyle(.secondary) }
+                    ("Open files", e?.files.map { Fmt.count($0) } ?? "—", ""),
+                ])
+                Self.section("Energy", "bolt", h?.power, format: wattsFormat, rows: [
+                    ("Power", r?.watts.map(wattsFormat) ?? "—", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
+                    ("Wakeups", rate(r?.wakeups), Fmt.count(p.wakeups)),
+                ] + voucherEnergyRows(p) + assertionRows(e))
+                if hasVouchers(p) { VoucherFlowsView(pids: [p.pid], subject: "this process").id(p.key) }
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .readsNetwork()
+        .readsWhileShown([.gpu, .compressed])
         .onAppear { store.jetsamViewers += 1 }
         .onDisappear { store.jetsamViewers -= 1 }
         // Each refresh: these are read for the shown process only, not every process.
@@ -587,39 +593,39 @@ struct UsageTab: View {
         }
     }
 
-    /// Mach-voucher (BANK) accounting: CPU and energy this process ran on behalf of others, and that others
-    /// ran on its behalf (rusage ri_billed/serviced_system_time and _energy). Hidden when all four are zero,
-    /// which is the common case; it is mainly non-zero for service daemons and the processes they serve.
-    @ViewBuilder private func voucherSection(_ p: ProcInfo) -> some View {
+    /// Mach-voucher (BANK) accounting (rusage ri_billed/serviced_system_time and _energy): CPU and energy this
+    /// process ran on behalf of others, and others on its behalf. Rows only when any is non-zero, which is
+    /// mainly service daemons and the processes they serve.
+    private func hasVouchers(_ p: ProcInfo) -> Bool {
         let c = p.counters
+        return [c?.servicedCpuNanos, c?.billedCpuNanos, c?.servicedEnergyNJ, c?.billedEnergyNJ].contains { ($0 ?? 0) > 0 }
+    }
+    private func voucherCPURows(_ p: ProcInfo) -> [Row] {
+        guard hasVouchers(p) else { return [] }
+        return [("CPU for others", "", Fmt.secs(p.counters?.servicedCpuNanos)),
+                ("CPU by others", "", Fmt.secs(p.counters?.billedCpuNanos))]
+    }
+    private func voucherEnergyRows(_ p: ProcInfo) -> [Row] {
+        guard hasVouchers(p) else { return [] }
         let joules: (UInt64?) -> String = { $0.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—" }
-        let any = [c?.servicedCpuNanos, c?.billedCpuNanos, c?.servicedEnergyNJ, c?.billedEnergyNJ].contains { ($0 ?? 0) > 0 }
-        if any {
-            Self.section("On behalf of other processes", "arrow.left.arrow.right.square", nil, format: { _ in "" }, rows: [
-                ("CPU for others", "", Fmt.secs(c?.servicedCpuNanos)),
-                ("CPU by others", "", Fmt.secs(c?.billedCpuNanos)),
-                ("Energy for others", "", joules(c?.servicedEnergyNJ)),
-                ("Energy by others", "", joules(c?.billedEnergyNJ)),
-            ])
-            .help("Work attributed through Mach vouchers (the BANK attribute). \"For others\" is CPU and energy this process spent servicing other processes' requests; \"by others\" is what other processes spent servicing this one. Most of it flows automatically over XPC, where a service adopts its caller's voucher. Totals since the process started.")
-            VoucherFlowsView(pids: [p.pid], subject: "this process").id(p.key)
-        }
+        return [("Energy for others", "", joules(p.counters?.servicedEnergyNJ)),
+                ("Energy by others", "", joules(p.counters?.billedEnergyNJ))]
+    }
+    private func assertionRows(_ e: (key: String, files: Int?, qos: [(String, UInt64)]?, assertions: [(String, String)])?) -> [Row] {
+        guard let e else { return [("Power assertions", "—", "")] }
+        if e.assertions.isEmpty { return [("Power assertions", "none", "")] }
+        return e.assertions.map { ("Power assertion", $0.0, $0.1) }
     }
 
-    /// CPU time by quality-of-service class: which kind of work the CPU went to (rusage ri_cpu_time_qos_*).
-    /// Read with the rest of the counters each refresh, so "now" covers the same interval as CPU %.
-    @ViewBuilder private func qosSection(_ p: ProcInfo) -> some View {
-        if let q = p.counters?.qosNanos {
-            let total = q.reduce(0, +)
-            let now = p.rates?.qosPercent
-            let rows: [Row] = q.indices.filter { q[$0] > 0 }.map { i in
-                let share = total > 0 ? String(format: " (%.0f %%)", Double(q[i]) / Double(total) * 100) : ""
-                return (Counters.qosClasses[i], now.map { "\(Fmt.pct($0[i])) %" } ?? "—", Fmt.secs(q[i]) + share)
-            }
-            if !rows.isEmpty {
-                Self.section("CPU by QoS class", "dial.medium", nil, format: { _ in "" }, rows: rows)
-                    .help("The quality-of-service class threads ran at. \"Now\" is the share of one core over the last refresh, as CPU % above.")
-            }
+    /// CPU time by quality-of-service class (rusage ri_cpu_time_qos_*), indented under CPU. Read with the rest
+    /// of the counters each refresh, so "now" covers the same interval as CPU %.
+    private func qosRows(_ p: ProcInfo) -> [Row] {
+        guard let q = p.counters?.qosNanos else { return [] }
+        let total = q.reduce(0, +)
+        let now = p.rates?.qosPercent
+        return q.indices.filter { q[$0] > 0 }.map { i in
+            let share = total > 0 ? String(format: " (%.0f %%)", Double(q[i]) / Double(total) * 100) : ""
+            return ("  QoS " + Counters.qosClasses[i], now.map { "\(Fmt.pct($0[i])) %" } ?? "—", Fmt.secs(q[i]) + share)
         }
     }
 
@@ -648,19 +654,6 @@ struct UsageTab: View {
               + (lowerBound ? ". \"≥\" and \"since\": the process started before the app, so sockets it closed before then aren't counted." : "."))
     }
 
-    /// The process's port space from the last lsmp snapshot (the Mach ports columns' or the Connections
-    /// tab's, whichever ran); none until one has been taken. Counts at that moment, so under "Now".
-    private func machPortRows(_ p: ProcInfo) -> [(String, String, String)] {
-        guard let m = p.machPorts
-                ?? MachLoader.peek().flatMap({ s in p.start <= s.at ? s.counts[p.pid] : nil }) else { return [] }
-        return [
-            ("Mach ports", Fmt.count(m.total),
-             "\(Fmt.count(m.receive)) receive · \(Fmt.count(m.send)) send · \(Fmt.count(m.portSets)) sets"),
-            ("Replies owed (send-once)", Fmt.count(m.sendOnce), ""),
-            ("Dead names", Fmt.count(m.deadNames), ""),
-            ("Full queues", Fmt.count(m.fullQueues), ""),
-        ]
-    }
     /// Jetsam band and memory limits (root only: the helper's), under "Now".
     private func jetsamRows(_ p: ProcInfo) -> [(String, String, String)] {
         guard let j = p.jetsam else {
@@ -671,7 +664,7 @@ struct UsageTab: View {
         if let b = j.limitBytes, b > 0, let f = p.footprint { used = String(format: "footprint is %.0f %% of it", Double(f) / Double(b) * 100) }
         var rows = [("Memory limit", mb(j.limitMB), used)]
         if j.limitsDiffer { rows.append(("  active / inactive", "", "\(mb(j.activeLimitMB)) / \(mb(j.inactiveLimitMB))")) }
-        rows.append(("Jetsam band", String(j.band), j.band == 0 ? "idle band: killed first" : ""))
+        rows.append(("Memory-kill band (jetsam)", String(j.band), j.band == 0 ? "idle band: killed first" : ""))
         return rows
     }
     private static let metricWidth: CGFloat = 180, nowWidth: CGFloat = 90, totalWidth: CGFloat = 240
@@ -708,17 +701,6 @@ struct UsageTab: View {
         }
     }
 
-    @ViewBuilder private func other(_ p: ProcInfo) -> some View {
-        let e = extra?.key == p.key ? extra : nil
-        Card(title: "Other", systemImage: "ellipsis.circle") {
-            VStack(alignment: .leading, spacing: 8) {
-                FactGrid(rows: [
-                    ("Open files", .text(e?.files.map { "\($0) descriptors (files, sockets, pipes)" } ?? (exited ? "—" : "not readable"))),
-                    ("Power assertions", .text(e.map { $0.assertions.isEmpty ? "none" : $0.assertions.map { "\($0.0)\($0.1.isEmpty ? "" : ": \($0.1)")" }.joined(separator: "\n") } ?? "—")),
-                ])
-            }
-        }
-    }
 }
 
 /// While shown, the store reads network rates (Store.networkViewers), as it does for the network columns.
@@ -1206,12 +1188,12 @@ struct TrustTab: View {
         rows.append(("Identifier", .text(s.identifier ?? "—")))
         rows.append(("Team ID", .text(s.teamID ?? "—")))
         rows.append(("Authority", .text(s.authority.isEmpty ? "—" : s.authority.joined(separator: "\n"))))
-        rows.append(("Valid now", .text(s.valid.map { $0 ? "yes" : "NO" } ?? "unknown")))
-        rows.append(("CDHash", .text(s.cdHash ?? "—")))
+        rows.append(("Valid", .text(s.valid.map { $0 ? "yes" : "NO" } ?? "unknown")))
+        rows.append(("Code hash (cdhash)", .text(s.cdHash ?? "—")))
         rows.append(("Code directory flags", .text(s.staticFlagNames.joined(separator: " ").ifEmpty("none"))))
         let status: String = s.runtimeStatus.map { String(format: "0x%08x  ", $0) + s.runtimeFlagNames.joined(separator: " ") } ?? "—"
         rows.append(("Runtime status", .text(status)))
-        rows.append(("Requirement", .text(s.designatedRequirement ?? "—")))
+        rows.append(("Designated requirement", .text(s.designatedRequirement ?? "—")))
         if let e = s.error { rows.append(("Error", .text(e))) }
         return rows
     }

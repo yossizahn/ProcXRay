@@ -11,7 +11,7 @@ struct HardeningCard: View {
     enum Loaded: Equatable { case reading, read(SecurityDetail, viaHelper: Bool), unreadable }
 
     var body: some View {
-        Card(title: "Runtime hardening", systemImage: "shield.lefthalf.filled", trailing: trailing) {
+        Card(title: "Hardened process (kernel)", systemImage: "shield.lefthalf.filled", trailing: trailing) {
             switch state {
             case .reading:
                 Text(exited ? "The process exited before this was read." : "Reading…").foregroundStyle(.secondary)
@@ -28,9 +28,10 @@ struct HardeningCard: View {
                             Image(systemName: on ? "checkmark.circle.fill" : "minus.circle")
                                 .foregroundStyle(on ? Color.green : Color.secondary)
                             Text(name).foregroundStyle(on ? .primary : .secondary)
-                            Text(about).font(.caption).foregroundStyle(.secondary)
+                            Text(on ? "on" : "off").foregroundStyle(on ? .primary : .secondary)
                             Spacer(minLength: 0)
                         }
+                        .help(about)
                     }
                     if d.kernel != nil || d.ipcPolicy != nil {
                         Divider()
@@ -50,7 +51,7 @@ struct HardeningCard: View {
         let onOff = { (b: Bool) in b ? "on" : "off" }
         var rows: [(String, KVValue)] = []
         if let k = d.kernel {
-            rows.append(("Enhanced security", .text(k.enhancedSecurityVersion == 0 ? "no (not a hardened process)"
+            rows.append(("Enhanced security", .text(k.enhancedSecurityVersion == 0 ? "off"
                                                     : "version \(k.enhancedSecurityVersion)")))
             let pr: String = switch k.platformRestrictions {
             case 0: "none"
