@@ -33,6 +33,14 @@ enum CellValue: Equatable, Sendable {
     }
 
     var number: Double? { if case .number(let v, _, _) = self { v } else { nil } }
+    /// The same value in the secondary tint.
+    var dimmed: CellValue {
+        switch self {
+        case .text(let s, _): .text(s, .secondary)
+        case .number(let v, let s, _): .number(v, s, .secondary)
+        default: self
+        }
+    }
     var date: Date? { if case .date(let d, _) = self { d } else { nil } }
     var hasValue: Bool { self != .empty && self != .unknown }
 
@@ -80,12 +88,18 @@ struct Column: Identifiable {
     enum GroupRule {
         /// The total of its processes (values that really add up).
         case sum
-        /// The value when every process has the same one, otherwise a count of the different values
-        /// ("3 users"; `noun` is singular, the plural adds an s).
-        case same(noun: String)
+        /// The members' values: the one value (dimmed when some members have none), two or three
+        /// comma-separated with the most common first, or the most common and "+N".
+        case same
+        /// The value when every member that has one agrees (dimmed when some have none), else nothing:
+        /// a count of distinct ids would say nothing.
+        case uniform
+        /// "min–max" of a number, or the single value.
+        case range
         /// Nothing: a total would mislead (shared pages, peaks at different times).
         case blank
-        /// The earliest date.
+        /// The earliest date; on a category row the newest (the oldest member of a category is always
+        /// something started at boot).
         case oldest
         /// Worked out from the processes some other way.
         case custom(@MainActor ([ProcInfo], Store) -> CellValue)
@@ -148,22 +162,38 @@ struct Column: Identifiable {
             }
             guard any else { return members.isEmpty ? .empty : .unknown }
             return .number(total, format(total))
-        case .same(let noun):
-            var seen: [String: CellValue] = [:]
+        case .same, .uniform:
+            var seen: [String: (value: CellValue, count: Int)] = [:]
             var missing = false
             for m in members {
                 let v = value(m)
-                if v.hasValue { seen[v.display] = v } else { missing = true }
+                if v.hasValue { seen[v.display, default: (v, 0)].count += 1 } else { missing = true }
             }
-            // Only when every process has it: one extension in a category of apps isn't the category's.
-            if seen.count == 1, !missing { return seen.values.first! }
             guard !seen.isEmpty else { return .empty }
-            return .text("\(seen.count) \(seen.count == 1 ? noun : noun + "s")", .secondary)
+            if seen.count == 1 {
+                let v = seen.values.first!.value
+                return missing ? v.dimmed : v
+            }
+            guard case .same = rule else { return .empty }
+            let common = seen.sorted { $0.value.count != $1.value.count ? $0.value.count > $1.value.count : $0.key < $1.key }
+            let s = common.count <= 3 ? common.map(\.key).joined(separator: ", ") : "\(common[0].key) +\(common.count - 1)"
+            return .text(s, .secondary)
+        case .range:
+            var lo = Double.infinity, hi = -Double.infinity
+            var shown: (lo: String, hi: String) = ("", "")
+            for m in members {
+                guard let v = value(m).number, v.isFinite else { continue }
+                if v < lo { lo = v; shown.lo = value(m).display }
+                if v > hi { hi = v; shown.hi = value(m).display }
+            }
+            guard lo <= hi else { return members.isEmpty ? .empty : .unknown }
+            return lo == hi ? .number(lo, shown.lo) : .number(lo, "\(shown.lo)–\(shown.hi)", .secondary)
         case .oldest:
+            let newest = n.kind == .category
             var best: CellValue = .empty
             for m in members {
                 let v = value(m)
-                if let d = v.date, best.date.map({ d < $0 }) ?? true { best = v }
+                if let d = v.date, best.date.map({ newest ? d > $0 : d < $0 }) ?? true { best = v }
             }
             return best
         case .custom(let f):
@@ -255,7 +285,7 @@ private let catalogue: [Column] = [
            section: .identity, minWidth: 44, width: 56, numeric: true, rule: .blank) { p, _ in .number(Double(p.pid), String(p.pid)) },
     Column(id: "kind", title: "Kind",
            tooltip: "Where the Smart tree puts it: category, then the role inside its app (\"App · XPC service\", \"Extension · Widgets\").",
-           section: .identity, width: 150, rule: .same(noun: "kind")) { p, s in text(s.kind(of: p)) },
+           section: .identity, width: 150, rule: .same) { p, s in text(s.kind(of: p)) },
     Column(id: "path", title: "Path", tooltip: "Executable path. App rows: the app's.",
            section: .identity, width: 260, truncateMiddle: true, rule: .blank) { p, _ in text(p.path) },
     Column(id: "bundleID", title: "Bundle ID",
@@ -268,7 +298,7 @@ private let catalogue: [Column] = [
         return p.commandLineRead ? .unknown : .empty
     },
     Column(id: "arch", title: "Architecture", tooltip: "Native, or x86_64 translated by Rosetta.",
-           section: .identity, width: 90, rule: .same(noun: "architecture")) { p, _ in
+           section: .identity, width: 90, rule: .same) { p, _ in
         #if arch(arm64)
         p.isTranslated ? .text("x86_64 (Rosetta)", .warning) : .text("arm64")
         #else
@@ -278,27 +308,30 @@ private let catalogue: [Column] = [
 
     // Execution
     Column(id: "user", title: "User", tooltip: "User the process runs as.",
-           section: .execution, width: 70, rule: .same(noun: "user")) { p, _ in .text(p.user) },
+           section: .execution, width: 70, rule: .same) { p, _ in .text(p.user) },
     Column(id: "state", title: "State",
            tooltip: "Not responding (WindowServer reports the app hung, as in Activity Monitor), stopped (by a signal such as SIGSTOP), zombie (exited, waiting for its parent) or starting, from the kernel's process state. Empty for a normal live process. Group rows: how many are stopped, zombie or starting.",
            section: .execution, width: 76,
            rule: .custom { ms, _ in
-               let n = ms.filter { state($0).hasValue }.count
-               return n == 0 ? .empty : .number(Double(n), "\(n) stopped, zombie or hung", .warning)
+               var counts: [String: Int] = [:]
+               for m in ms { let v = state(m); if v.hasValue { counts[v.display, default: 0] += 1 } }
+               guard !counts.isEmpty else { return .empty }
+               let parts = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map { "\($0.value) \($0.key)" }
+               return .number(Double(counts.values.reduce(0, +)), parts.joined(separator: ", "), .warning)
            }) { p, _ in state(p) },
-    Column(id: "started", title: "Started", tooltip: "Time since the process started. Group rows: the oldest.",
+    Column(id: "started", title: "Started", tooltip: "Time since the process started. Group rows: the oldest; category rows: the newest.",
            section: .execution, minWidth: 50, width: 70, numeric: false, rule: .oldest) { p, _ in .date(p.start, Fmt.age(p.start)) },
-    Column(id: "startTime", title: "Start time", tooltip: "When the process started. Group rows: the oldest.",
+    Column(id: "startTime", title: "Start time", tooltip: "When the process started. Group rows: the oldest; category rows: the newest.",
            section: .execution, width: 120, rule: .oldest) { p, _ in .date(p.start, Fmt.date.string(from: Fmt.shownStart(p.start))) },
     Column(id: "tty", title: "TTY", tooltip: "Controlling terminal.",
-           section: .execution, width: 70, rule: .same(noun: "terminal")) { p, _ in text(p.tty.map(SmartTree.ttyName)) },
+           section: .execution, width: 70, rule: .same) { p, _ in text(p.tty.map(SmartTree.ttyName)) },
     Column(id: "pgid", title: "Process group", tooltip: "Process group id: a shell job, such as a pipeline, shares one.",
-           section: .execution, width: 90, numeric: true, rule: .same(noun: "group")) { p, _ in
+           section: .execution, width: 90, numeric: true, rule: .uniform) { p, _ in
         .number(Double(p.pgid), String(p.pgid))
     },
     Column(id: "idleExit", title: "Idle exit",
            tooltip: "Dirty tracking (proc_get_dirty): \"can exit\" when launchd or the app lets the system stop it while idle; \"busy\" (dirty) while it has work and is kept. Empty: not tracked.",
-           section: .execution, term: "dirty tracking", width: 100, rule: .same(noun: "state"), reads: .idleExit) { p, _ in
+           section: .execution, term: "dirty tracking", width: 100, rule: .same, reads: .idleExit) { p, _ in
         guard let s = p.idleExit else { return .unknown }
         return .text(s.short, s.contains(.dirty) || !s.contains(.allowsIdleExit) ? .secondary : .normal)
     },
@@ -323,34 +356,34 @@ private let catalogue: [Column] = [
     Column(id: "label", title: "launchd label", tooltip: "Label of the launchd job this process is the main process of.",
            section: .lineage, width: 200, rule: .blank) { p, _ in text(p.launchdLabel) },
     Column(id: "domain", title: "Domain", tooltip: "launchd domain of that job: system, gui or user.",
-           section: .lineage, width: 64, rule: .same(noun: "domain")) { p, _ in text(p.launchdDomain) },
+           section: .lineage, width: 64, rule: .same) { p, _ in text(p.launchdDomain) },
     Column(id: "lsType", title: "LaunchServices type",
            tooltip: "The app's type as LaunchServices registers it (lsappinfo): Foreground (has a Dock icon), UIElement (no Dock icon) or BackgroundOnly (no UI). Empty: not registered with LaunchServices. The Smart tree's categories are derived from it.",
-           section: .lineage, width: 110, rule: .same(noun: "type")) { p, _ in text(p.lsType) },
+           section: .lineage, width: 110, rule: .same) { p, _ in text(p.lsType) },
     Column(id: "lsState", title: "LaunchServices state",
            tooltip: "LaunchServices' state tags for the app, verbatim as lsappinfo prints them (such as !signalled).",
            section: .lineage, width: 140, rule: .blank) { p, _ in
         p.lsTags.isEmpty ? .empty : .text(p.lsTags.joined(separator: " "))
     },
     Column(id: "extPoint", title: "Extension point", tooltip: "For an app extension: what it extends.",
-           section: .lineage, width: 130, rule: .same(noun: "extension point")) { p, _ in
+           section: .lineage, width: 130, rule: .same) { p, _ in
         text(p.extensionPoint.map(ExtensionInfo.title))
     },
     Column(id: "containedIn", title: "Contained in", tooltip: "For an app extension: the app whose bundle holds it.",
-           section: .lineage, width: 120, rule: .same(noun: "app")) { p, _ in text(p.containingAppName) },
+           section: .lineage, width: 120, rule: .same) { p, _ in text(p.containingAppName) },
     Column(id: "coalition", title: "Accounting group",
            tooltip: "Resource coalition id: processes macOS accounts for together, usually an app and its helpers.",
-           section: .lineage, term: "resource coalition", width: 100, numeric: true, rule: .same(noun: "coalition")) { p, _ in
+           section: .lineage, term: "resource coalition", width: 100, numeric: true, rule: .uniform) { p, _ in
         p.coalition.map { .number(Double($0), String($0)) } ?? .empty
     },
     Column(id: "jetsam", title: "Memory-kill group",
            tooltip: "Jetsam coalition id: processes macOS frees memory from together, such as a host app and its extensions.",
-           section: .lineage, term: "jetsam coalition", width: 100, numeric: true, rule: .same(noun: "coalition")) { p, _ in
+           section: .lineage, term: "jetsam coalition", width: 100, numeric: true, rule: .uniform) { p, _ in
         p.jetsamCoalition.map { .number(Double($0), String($0)) } ?? .empty
     },
     Column(id: "leftBehind", title: "Left behind",
            tooltip: "The app that has exited but left this process running; macOS keeps the app 'running in background' while it lives. Empty otherwise.",
-           section: .lineage, width: 110, rule: .same(noun: "app")) { p, _ in
+           section: .lineage, width: 110, rule: .same) { p, _ in
         p.leftBehindText.map { .text($0, .warning) } ?? .empty
     },
     Column(id: "context", title: "Context",
@@ -372,12 +405,12 @@ private let catalogue: [Column] = [
             section: .cpu, width: 90, format: perSecFormat) { $0.rates?.contextSwitches },
     Column(id: "priority", title: "Priority",
            tooltip: "Scheduling priority of the process's main thread (proc_taskinfo; 31 is the default, higher runs first).",
-           section: .cpu, width: 56, numeric: true, rule: .same(noun: "priority")) { p, _ in
+           section: .cpu, width: 56, numeric: true, rule: .range) { p, _ in
         p.priority.map { .number(Double($0), String($0)) } ?? .unknown
     },
     Column(id: "nice", title: "Nice",
            tooltip: "Nice value (proc_bsdinfo): 0 is normal, positive yields the CPU to others. Other users' processes need the helper.",
-           section: .cpu, width: 48, numeric: true, rule: .same(noun: "nice value"), reads: .nice) { p, _ in
+           section: .cpu, width: 48, numeric: true, rule: .range, reads: .nice) { p, _ in
         p.nice.map { .number(Double($0), String($0), $0 > 0 ? .secondary : $0 < 0 ? .warning : .normal) } ?? .unknown
     },
     Column(id: "pcore", title: "P-core share",
@@ -394,8 +427,15 @@ private let catalogue: [Column] = [
         let v = Double(pc) / Double(c) * 100
         return .number(v, String(format: "%.0f %%", v))
     },
-    Column(id: "ipc", title: "Instr/cycle", tooltip: "Instructions retired per CPU cycle, since the process started.",
-           section: .cpu, width: 70, numeric: true, rule: .blank) { p, _ in
+    Column(id: "ipc", title: "Instr/cycle", tooltip: "Instructions retired per CPU cycle, since the process started. Group rows: all instructions over all cycles.",
+           section: .cpu, width: 70, numeric: true,
+           rule: .custom { ms, _ in
+               var i: UInt64 = 0, c: UInt64 = 0
+               for m in ms { if let mi = m.counters?.instructions, let mc = m.counters?.cycles { i &+= mi; c &+= mc } }
+               guard c > 0 else { return .empty }
+               let v = Double(i) / Double(c)
+               return .number(v, String(format: "%.2f", v))
+           }) { p, _ in
         guard let i = p.counters?.instructions, let c = p.counters?.cycles, c > 0 else { return .unknown }
         let v = Double(i) / Double(c)
         return .number(v, String(format: "%.2f", v))
@@ -438,7 +478,7 @@ private let catalogue: [Column] = [
             section: .memory, width: 76, format: bytesFormat) { $0.counters?.neuralFootprint.map { Double($0) } },
     Column(id: "jetsamBand", title: "Memory-kill band",
            tooltip: "Jetsam band: where the kernel's memory killer (jetsam) puts the process: when memory runs short, lower bands are killed first; 0 is the idle band. Read as root, so it needs the helper.",
-           section: .memory, term: "jetsam", width: 64, numeric: true, rule: .same(noun: "band"), reads: .jetsam) { p, _ in
+           section: .memory, term: "jetsam", width: 64, numeric: true, rule: .range, reads: .jetsam) { p, _ in
         p.jetsam.map { .number(Double($0.band), String($0.band), $0.band == 0 ? .secondary : .normal) } ?? .unknown
     },
     Column(id: "memLimit", title: "Memory limit",
@@ -530,12 +570,12 @@ private let catalogue: [Column] = [
 
     // Security
     Column(id: "signer", title: "Signer", tooltip: "Who signed the running code: Apple, a Developer ID team, ad hoc, or unsigned.",
-           section: .security, minWidth: 70, width: 110, rule: .same(noun: "signer")) { p, _ in
+           section: .security, minWidth: 70, width: 110, rule: .same) { p, _ in
         guard let s = p.signer else { return .empty }
         return .text(s, s == "unsigned" ? .danger : .normal)
     },
     Column(id: "team", title: "Team ID", tooltip: "Developer team of the signature.",
-           section: .security, width: 90, rule: .same(noun: "team")) { p, s in text(s.signInfo(for: p)?.teamID) },
+           section: .security, width: 90, rule: .same) { p, s in text(s.signInfo(for: p)?.teamID) },
     Column(id: "signingID", title: "Signing ID", tooltip: "Identifier in the code signature. App rows: the app's.",
            section: .security, width: 180, rule: .blank) { p, _ in text(p.signID) },
     Column(id: "sandboxed", title: "Sandboxed", tooltip: "Whether the App Sandbox confines it. Group rows: all, none, or how many.",
