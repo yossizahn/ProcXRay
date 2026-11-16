@@ -301,7 +301,7 @@ struct InfoTab: View {
     /// The arguments, open, one per line; the environment collapsed.
     @ViewBuilder private func command(_ p: ProcInfo) -> some View {
         let loaded = args?.key == p.key ? args : nil
-        Card(title: "Command", trailing: loaded?.value.map { "\($0.args.count) arguments" }) {
+        Card(title: "Command", trailing: loaded?.value.map { "\($0.args.count) argument\($0.args.count == 1 ? "" : "s")" }) {
             if let a = loaded?.value {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(a.args.enumerated()), id: \.offset) { i, s in
