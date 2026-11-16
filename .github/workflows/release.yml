@@ -15,8 +15,13 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-26
+    # The Xcode 27 image, to match the toolchain the app is developed with: Xcode 26.6 on macos-26 gives up
+    # type-checking three expressions that Xcode 27 compiles, and build-app.sh stamps the SDK it built against.
+    runs-on: xcode-27
     timeout-minutes: 30
+    env:
+      # The same Xcode the app is built with locally (the image's default is 27.1).
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@v7
 
