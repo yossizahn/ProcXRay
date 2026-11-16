@@ -17,6 +17,10 @@ struct MenuBarPopover: View {
     @AppStorage("popover.secondary") private var secondary: RowField = .none
     @AppStorage("popover.inline") private var inline: RowField = .pid
     @AppStorage("popover.triageTab") private var triageTab: TriageTab = .alerts
+    /// Accounting groups (resource coalitions) or single processes.
+    @AppStorage("popover.grouped") private var grouped = true
+    /// Expanded groups ("g<id>") and sub-groups ("g<id>/<kind>"), for the life of the popover.
+    @State private var expanded: Set<String> = []
 
     static let width: CGFloat = 420
 
@@ -111,6 +115,12 @@ struct MenuBarPopover: View {
                     .help(f.help)
                 }
                 Spacer()
+                Picker("", selection: $grouped) {
+                    Image(systemName: "square.stack.3d.up").help("Groups: accounting groups (resource coalitions), each named after its leader").tag(true)
+                    Image(systemName: "list.bullet").help("Processes: one row per process").tag(false)
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                .help("Groups (accounting groups, from the kernel's resource coalitions) or single processes")
                 Menu {
                     Picker("Sort by", selection: $metric) { ForEach(AmbientMetric.allCases) { Text($0.title).tag($0) } }
                     Picker("Secondary line", selection: $secondary) { ForEach(RowField.allCases) { Text($0.title).tag($0) } }
@@ -131,13 +141,95 @@ struct MenuBarPopover: View {
             .sorted { (metric.value($0) ?? -1, $1.pid) > (metric.value($1) ?? -1, $0.pid) }
     }
 
+    private var shownGroups: [AmbientGroup] {
+        let me = getuid()
+        return monitor.groups.filter { filter.matches($0.leader, me: me) }
+            .sorted { (metric.value($0.sums) ?? -1, $1.leader.pid) > (metric.value($1.sums) ?? -1, $0.leader.pid) }
+    }
+
+    @ViewBuilder
     private var processList: some View {
-        let list = shown
+        if grouped { groupList } else {
+            let list = shown
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(list.prefix(150).enumerated()), id: \.element.id) { i, p in
+                        PopoverRow(subject: .proc(p), metric: metric, history: monitor.procHistory[p.key]?.values(metric) ?? [],
+                                   secondary: secondary, inline: inline, striped: i % 2 == 1)
+                    }
+                    if list.isEmpty {
+                        Text(monitor.procs.isEmpty ? "Reading…" : "No processes").foregroundStyle(.secondary).padding(.top, 40)
+                    }
+                }
+            }
+        }
+    }
+
+    /// One line of the grouped list.
+    private struct Line: Identifiable {
+        var id: String
+        var subject: PopoverRow.Subject
+        var depth: Int
+        var history: [Double]
+        /// nil: nothing to expand.
+        var open: Bool?
+    }
+
+    private func lines(_ groups: [AmbientGroup]) -> [Line] {
+        let v: (AmbientProc) -> Double = { metric.value($0) ?? -1 }
+        var out: [Line] = []
+        for g in groups.prefix(150) {
+            let gid = "g\(g.id)"
+            let open = expanded.contains(gid)
+            out.append(Line(id: gid, subject: g.single ? .proc(g.leader) : .group(g), depth: 0,
+                            history: monitor.groupHistory[g.id]?.values(metric) ?? [], open: g.single ? nil : open))
+            guard open, !g.single else { continue }
+            // The leader first, then sub-groups and the other members by the metric.
+            enum Child { case sub(AmbientSubgroup), proc(AmbientProc) }
+            var kids: [(Double, Child)] = g.plain.dropFirst().map { (v($0), .proc($0)) }
+            kids += g.subgroups.map { (metric.value($0.sums) ?? -1, .sub($0)) }
+            kids.sort { $0.0 > $1.0 }
+            out.append(procLine(g.leader, depth: 1))
+            for (_, k) in kids {
+                switch k {
+                case .proc(let p): out.append(procLine(p, depth: 1))
+                case .sub(let sg):
+                    let sid = "\(gid)/\(sg.id)"
+                    let sopen = expanded.contains(sid)
+                    out.append(Line(id: sid, subject: .sub(sg), depth: 1, history: summed(sg.members), open: sopen))
+                    if sopen { out += sg.members.sorted { v($0) > v($1) }.map { procLine($0, depth: 2) } }
+                }
+            }
+        }
+        return out
+    }
+
+    private func procLine(_ p: AmbientProc, depth: Int) -> Line {
+        Line(id: "p\(p.pid).\(p.start.timeIntervalSince1970)", subject: .proc(p), depth: depth,
+             history: monitor.procHistory[p.key]?.values(metric) ?? [], open: nil)
+    }
+
+    /// A sub-group's graph: its members' readings added up, aligned on the newest.
+    private func summed(_ ms: [AmbientProc]) -> [Double] {
+        var out: [Double] = []
+        for m in ms {
+            let h = monitor.procHistory[m.key]?.values(metric) ?? []
+            if h.count > out.count { out.insert(contentsOf: repeatElement(0, count: h.count - out.count), at: 0) }
+            let off = out.count - h.count
+            for (i, x) in h.enumerated() { out[off + i] += x }
+        }
+        return out
+    }
+
+    private var groupList: some View {
+        let list = lines(shownGroups)
         return ScrollView {
             LazyVStack(spacing: 0) {
-                ForEach(Array(list.prefix(150).enumerated()), id: \.element.id) { i, p in
-                    PopoverRow(proc: p, metric: metric, history: monitor.procHistory[p.key]?.values(metric) ?? [],
-                               secondary: secondary, inline: inline, striped: i % 2 == 1)
+                ForEach(Array(list.enumerated()), id: \.element.id) { i, l in
+                    PopoverRow(subject: l.subject, metric: metric, history: l.history, secondary: secondary, inline: inline,
+                               striped: i % 2 == 1, depth: l.depth, open: l.open, chevronRoom: true) {
+                        if expanded.contains(l.id) { expanded.remove(l.id) } else { expanded.insert(l.id) }
+                    }
                 }
                 if list.isEmpty {
                     Text(monitor.procs.isEmpty ? "Reading…" : "No processes").foregroundStyle(.secondary).padding(.top, 40)
@@ -149,17 +241,14 @@ struct MenuBarPopover: View {
     // MARK: Triage
 
     private var triageBody: some View {
-        let top = monitor.top[metric] ?? []
-        let peak = top.compactMap { metric.value($0) }.max() ?? 0
+        let top = monitor.topGroups[metric] ?? []
+        let peak = top.compactMap { metric.value($0.sums) }.max() ?? 0
         return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Top consumers · \(metric.title)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     .padding(.bottom, 2)
                 if top.isEmpty { Text("No readings yet").font(.caption).foregroundStyle(.secondary) }
-                ForEach(top) { p in
-                    ProcRow(proc: p, detail: metric.value(p).map(metric.format) ?? "–",
-                            fraction: (metric.value(p) ?? 0) / max(peak, 1e-9))
-                }
+                ForEach(top) { g in TopGroupRow(group: g, metric: metric, peak: peak) }
                 if let best = peakOverHistory(top) {
                     Text(verbatim: "Peak over the last \(Int(Double(ProcHistory.length) * UserDefaults.standard.double(forKey: AmbientPrefs.interval) / 60 + 0.5)) min: \(best.name) \(metric.format(best.value))")
                         .font(.caption2).foregroundStyle(.secondary).padding(.top, 2)
@@ -212,10 +301,10 @@ struct MenuBarPopover: View {
         }
     }
 
-    private func peakOverHistory(_ list: [AmbientProc]) -> (name: String, value: Double)? {
+    private func peakOverHistory(_ list: [AmbientGroup]) -> (name: String, value: Double)? {
         var best: (String, Double)?
-        for p in list {
-            if let v = monitor.procHistory[p.key]?.values(metric).max(), v > (best?.1 ?? 0) { best = (p.name, v) }
+        for g in list {
+            if let v = monitor.groupHistory[g.id]?.values(metric).max(), v > (best?.1 ?? 0) { best = (g.name, v) }
         }
         return best
     }
@@ -229,8 +318,10 @@ struct MenuBarPopover: View {
     private var toolbar: some View {
         HStack(spacing: 12) {
             Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }.help("Quit Proc X-Ray")
-            Text(verbatim: "\(min(shown.count, 150)) / \(monitor.procs.count)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                .help("Processes shown / running" + (shown.count > 150 ? " (the list shows the first 150 of \(shown.count))" : ""))
+            let n = grouped && !triage ? shownGroups.count : shown.count
+            Text(verbatim: "\(min(n, 150)) / \(monitor.procs.count)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                .help((grouped && !triage ? "Groups shown / processes running" : "Processes shown / running")
+                      + (n > 150 ? " (the list shows the first 150 of \(n))" : ""))
             Spacer()
             Button {
                 WindowPicker.start { pid in
@@ -307,35 +398,150 @@ enum RowField: String, CaseIterable, Identifiable {
     }
 }
 
-/// One process in the dropdown: icon, name, inline value, optional second line, its graph, its value.
-/// A click shows it in the main window's process list; the context menu has the rest.
+/// One row of the dropdown: a process, an accounting group, or a sub-group inside one. Icon, name, inline value,
+/// optional second line, its graph, its value. A click shows the process (a group's leader) in the main window's
+/// process list; the context menu has the rest. Groups and sub-groups have a disclosure chevron.
 struct PopoverRow: View {
-    let proc: AmbientProc
+    enum Subject {
+        case proc(AmbientProc), group(AmbientGroup), sub(AmbientSubgroup)
+    }
+    let subject: Subject
     let metric: AmbientMetric
     let history: [Double]
     let secondary: RowField
     let inline: RowField
     let striped: Bool
+    var depth = 0
+    /// Expanded or not; nil when there's nothing to expand.
+    var open: Bool? = nil
+    /// In the grouped list every row keeps the chevron's room, so icons line up; the flat list has none.
+    var chevronRoom = false
+    var toggle: () -> Void = {}
     @Environment(\.openWindow) private var openWindow
     @State private var hover = false
 
+    /// The process the row's click and menu act on.
+    private var target: AmbientProc? {
+        switch subject {
+        case .proc(let p): p
+        case .group(let g): g.leader
+        case .sub(let s): s.lead
+        }
+    }
+    private var title: String {
+        switch subject {
+        case .proc(let p): p.name
+        case .group(let g): g.name
+        case .sub(let s): s.title
+        }
+    }
+    private var sums: AmbientSums? {
+        switch subject {
+        case .proc: nil
+        case .group(let g): g.sums
+        case .sub(let s): s.sums
+        }
+    }
+    private var value: String {
+        if let s = sums {
+            guard let v = metric.value(s) else { return "–" }
+            return (s.partial ? "≥ " : "") + metric.format(v)
+        }
+        return target.flatMap { metric.value($0) }.map(metric.format) ?? "–"
+    }
+    private var inlineText: String? {
+        switch subject {
+        case .proc(let p): inline.text(p)
+        case .group(let g): "\(g.count) processes"
+        case .sub(let s):
+            switch s.id {
+            case .name: nil   // the title already says ×N
+            // Several sub-groups can share a name (four `claude` sessions): the pid tells them apart.
+            case .responsible(let pid): "\(pid) · \(s.members.count) processes"
+            case .terminal, .xpc: "\(s.members.count) processes"
+            }
+        }
+    }
+    private var secondText: String? {
+        switch subject {
+        case .proc(let p): secondary.text(p)
+        case .group(let g): secondary == .path ? g.leader.path : nil
+        case .sub: nil
+        }
+    }
+    private var notResponding: Bool {
+        switch subject {
+        case .proc(let p): p.notResponding
+        case .group(let g): g.leader.notResponding
+        case .sub: false
+        }
+    }
+    private var helpText: String {
+        switch subject {
+        case .proc(let p):
+            return "\(p.path ?? p.name)\nClick to show it in the process list."
+        case .group(let g):
+            return "Accounting group (resource coalition) of \(g.count) processes, named after \(g.name) (pid \(g.leader.pid)), the one the others are run for."
+                + (g.sums.coverageNote.map { "\n\($0): the others belong to another user and the helper isn't running." } ?? "")
+                + "\nClick to show \(g.name) in the process list; the chevron lists its members."
+        case .sub(let s):
+            let why: String
+            switch s.id {
+            case .responsible: why = "Processes \(s.title) is responsible for (macOS's responsible process)."
+            case .terminal: why = "Processes in one terminal session (controlling terminal)."
+            case .xpc: why = "XPC services (from .xpc bundles) running for this group."
+            case .name: why = "Processes with the same name."
+            }
+            return why + (s.sums.coverageNote.map { "\n\($0)." } ?? "") + (s.lead != nil ? "\nClick to show \(s.title) in the process list." : "\nClick to list them.")
+        }
+    }
+    private var iconPath: String? {
+        switch subject {
+        case .proc(let p): p.path
+        case .group(let g): g.leader.path
+        case .sub(let s):
+            switch s.id {
+            case .responsible, .name: s.lead?.path ?? s.members.first?.path
+            case .terminal, .xpc: nil
+            }
+        }
+    }
+    private var fallbackSymbol: String {
+        if case .sub(let s) = subject, case .xpc = s.id { return "shippingbox" }
+        return "terminal"
+    }
+
     var body: some View {
         HStack(spacing: 7) {
-            if let i = PathIcon.icon(proc.path) { Image(nsImage: i).resizable().frame(width: 16, height: 16) }
-            else { Image(systemName: "terminal").font(.system(size: 11)).frame(width: 16, height: 16).foregroundStyle(.secondary) }
+            if chevronRoom || open != nil {
+                Group {
+                if let open {
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                        .frame(width: 12, height: 16).contentShape(Rectangle())
+                        .onTapGesture(perform: toggle)
+                        .help(open ? "Hide the members" : "Show the members")
+                } else {
+                    Color.clear.frame(width: 12, height: 16)
+                }
+            }
+            .padding(.leading, CGFloat(depth) * 14)
+            }
+            if let i = PathIcon.icon(iconPath) { Image(nsImage: i).resizable().frame(width: 16, height: 16) }
+            else { Image(systemName: fallbackSymbol).font(.system(size: 11)).frame(width: 16, height: 16).foregroundStyle(.secondary) }
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 4) {
-                    Text(verbatim: proc.name).lineLimit(1).truncationMode(.middle)
-                        .foregroundStyle(proc.notResponding ? Color.red : .primary)
-                    if let t = inline.text(proc) {
+                    Text(verbatim: title).lineLimit(1).truncationMode(.middle)
+                        .foregroundStyle(notResponding ? Color.red : .primary)
+                    if let t = inlineText {
                         Text(verbatim: t).font(.caption2).foregroundStyle(.tertiary).monospacedDigit().lineLimit(1)
                     }
-                    if proc.notResponding {
+                    if notResponding {
                         Text("NOT RESPONDING").font(.system(size: 8, weight: .bold)).foregroundStyle(.red)
                             .padding(.horizontal, 3).background(.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 2))
                     }
                 }
-                if let t = secondary.text(proc) {
+                if let t = secondText {
                     Text(verbatim: t).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
             }
@@ -344,24 +550,32 @@ struct PopoverRow: View {
                       color: .accentColor, capacity: ProcHistory.length)
                 .frame(width: 56, height: 16)
                 .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 3))
-            Text(verbatim: metric.value(proc).map(metric.format) ?? "–")
+            Text(verbatim: value)
                 .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
                 .frame(width: 66, alignment: .trailing).lineLimit(1)
         }
         .font(.system(size: 12))
-        .padding(.horizontal, 10).frame(minHeight: 26)
+        .padding(.leading, chevronRoom ? 4 : 10).padding(.trailing, 10).frame(minHeight: 26)
         .background(hover ? AnyShapeStyle(Color.accentColor.opacity(0.12)) : striped ? AnyShapeStyle(.quaternary.opacity(0.3)) : AnyShapeStyle(.clear))
         .contentShape(Rectangle())
         .onHover { hover = $0 }
-        .onTapGesture { AppRouter.openMain(openWindow); AppRouter.shared.show(proc.pid) }
-        .help("\(proc.path ?? proc.name)\nClick to show it in the process list.")
+        .onTapGesture {
+            if let p = target { AppRouter.openMain(openWindow); AppRouter.shared.show(p.pid) } else { toggle() }
+        }
+        .help(helpText)
         .contextMenu {
-            Button("Show in Process List") { AppRouter.openMain(openWindow); AppRouter.shared.show(proc.pid) }
-            Button("Inspect") { AppRouter.inspect(proc.ref, openWindow) }
-            if let path = proc.path {
-                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+            if let p = target {
+                Button("Show in Process List") { AppRouter.openMain(openWindow); AppRouter.shared.show(p.pid) }
+                Button("Inspect") { AppRouter.inspect(p.ref, openWindow) }
+                if let path = p.path {
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+                }
+                Button("Copy PID") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("\(p.pid)", forType: .string) }
             }
-            Button("Copy PID") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("\(proc.pid)", forType: .string) }
+            if let open {
+                if target != nil { Divider() }
+                Button(open ? "Hide Members" : "Show Members", action: toggle)
+            }
         }
     }
 }

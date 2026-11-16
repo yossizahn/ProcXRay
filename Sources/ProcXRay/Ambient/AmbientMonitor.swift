@@ -105,6 +105,8 @@ enum AmbientMetric: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    func value(_ s: AmbientSums) -> Double? { s.value(self) }
+
     /// A process's value as text: CPU in percent of one core, GPU in percent, the rest in bytes (per second).
     func format(_ v: Double) -> String {
         switch self {
@@ -137,6 +139,15 @@ struct AmbientProc: Identifiable, Hashable, Sendable {
     var apple = false
     var isApp = false
     var uid: uid_t = 0
+    var ppid: pid_t = 0
+    /// The controlling terminal's device, nil without one.
+    var tty: Int32?
+    /// The resource coalition (read once per process), nil when unreadable.
+    var coalition: UInt64?
+    /// The process macOS holds responsible for this one (read once), nil when unreadable (other users' processes).
+    var responsible: pid_t?
+    /// The name of the accounting group this process belongs to, when it is not that group's leader.
+    var groupName: String?
     var ref: ProcessRef { ProcessRef(pid: pid, start: start.timeIntervalSince1970) }
 }
 
@@ -237,6 +248,11 @@ final class AmbientMonitor {
     /// The last readings of each running process (ProcHistory.length), for the popover's row graphs.
     private(set) var procHistory: [AmbientProc.Key: ProcHistory] = [:]
     private(set) var top: [AmbientMetric: [AmbientProc]] = [:]
+    /// Accounting groups (resource coalitions, see AmbientGroups), and the top few per metric.
+    private(set) var groups: [AmbientGroup] = []
+    private(set) var topGroups: [AmbientMetric: [AmbientGroup]] = [:]
+    /// Each group's own readings: members exit, and a sum of their rings would lose the group's past with them.
+    private(set) var groupHistory: [UInt64: ProcHistory] = [:]
     private(set) var alerts: [AmbientAlert] = []
     private(set) var conditions: [SystemCondition] = []
     /// What the menu bar's warning sign and the Triage badge count.
@@ -306,6 +322,9 @@ final class AmbientMonitor {
                 self.procs = out.procs
                 self.procHistory = done.history
                 self.top = out.top
+                self.groups = out.groups
+                self.topGroups = out.topGroups
+                self.groupHistory = done.groupHistory
                 self.alerts = out.alerts
                 self.conditions = out.conditions
                 self.cleared = done.cleared
@@ -365,6 +384,8 @@ final class AmbientMonitor {
         var system: SystemStats.Rates
         var procs: [AmbientProc]
         var top: [AmbientMetric: [AmbientProc]]
+        var groups: [AmbientGroup]
+        var topGroups: [AmbientMetric: [AmbientGroup]]
         var alerts: [AmbientAlert]
         var conditions: [SystemCondition]
     }
@@ -383,6 +404,8 @@ final class AmbientMonitor {
         var path: String?
         var name: String          // the executable's file name, or the kernel's 16-character comm
         var apple: Bool
+        var coalition: UInt64?
+        var responsible: pid_t?
     }
 
     /// The three counters the monitor turns into rates.
@@ -400,6 +423,7 @@ final class AmbientMonitor {
         var ioHistory: [IOSeries: [Double]] = [:]
         var lastProcs: [AmbientProc.Key: AmbientProc] = [:]
         var history: [AmbientProc.Key: ProcHistory] = [:]
+        var groupHistory: [UInt64: ProcHistory] = [:]
         var streaks: [AmbientAlert.ID: Streak] = [:]
         var conditions: [SystemCondition.Kind: SystemCondition] = [:]
         var cleared: [AmbientAlert] = []
@@ -442,7 +466,8 @@ final class AmbientMonitor {
             if let known = tr.stable[key] { st = known } else {
                 let p = ProcInfo(pid: k.pid, ppid: k.ppid, pgid: k.pgid, uid: k.uid, user: "", comm: k.comm,
                                  path: Native.path(k.pid), start: k.start, stat: k.stat, pflags: k.flags)
-                st = Stable(path: p.path, name: p.name, apple: SmartTree.isApple(p))
+                st = Stable(path: p.path, name: p.name, apple: SmartTree.isApple(p),
+                            coalition: Native.coalition(k.pid)?.0, responsible: Native.responsible(k.pid))
             }
             stable[key] = st
             // One rusage call; the helper's reading for processes of other users.
@@ -458,6 +483,10 @@ final class AmbientMonitor {
             let app = input.apps[k.pid]
             var a = AmbientProc(key: key, pid: k.pid, start: k.start, name: app?.name ?? st.name, path: st.path)
             a.uid = k.uid
+            a.ppid = k.ppid
+            if k.tty != -1 { a.tty = k.tty }   // NODEV: no controlling terminal
+            a.coalition = st.coalition
+            a.responsible = st.responsible
             if let c {
                 samples[key] = c
                 if let b = tr.samples[key], c.at > b.at {
@@ -474,6 +503,9 @@ final class AmbientMonitor {
             a.isApp = app?.regular == true
             procs.append(a)
         }
+
+        // Accounting groups; each member that isn't its group's leader carries the group's name.
+        let groups = AmbientGroups.group(&procs)
 
         // System totals and their history.
         var sysRates = SystemStats.Rates(gpuPercent: sys.gpuPercent, gpu: sys.gpu, memory: sys.memory, thermal: sys.thermal)
@@ -513,6 +545,8 @@ final class AmbientMonitor {
             }
             top[m] = best.map { procs[$0.1] }
         }
+        var topGroups: [AmbientMetric: [AmbientGroup]] = [:]
+        for m in AmbientMetric.allCases { topGroups[m] = AmbientGroups.top(groups, m, count: topCount) }
 
         // Launched and ended (not on the first tick: everything would look new).
         let byKey = Dictionary(procs.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
@@ -600,8 +634,16 @@ final class AmbientMonitor {
             hist[p.key] = h
         }
         tr.history = hist
+        var ghist: [UInt64: ProcHistory] = [:]
+        ghist.reserveCapacity(groups.count)
+        for g in groups {
+            var h = tr.groupHistory[g.id] ?? ProcHistory()
+            h.append(g.sums)
+            ghist[g.id] = h
+        }
+        tr.groupHistory = ghist
         tr.ticks += 1
-        return Output(system: sysRates, procs: procs, top: top, alerts: live, conditions: conditions)
+        return Output(system: sysRates, procs: procs, top: top, groups: groups, topGroups: topGroups, alerts: live, conditions: conditions)
     }
 }
 
@@ -648,6 +690,7 @@ extension AmbientMonitor {
                   + " renderer \(sys.gpu?.renderer.map { String(format: "%.0f%%", $0) } ?? "—") tiler \(sys.gpu?.tiler.map { String(format: "%.0f%%", $0) } ?? "—") mem " + Fmt.bytes(sys.gpu?.memoryInUse))
             for c in out.conditions { print("         CONDITION \(c.title) since \(Int(Date().timeIntervalSince(c.since))) s") }
             if let t = out.top[.cpu]?.first { print("         top cpu: \(t.name) (\(t.pid)) \(AmbientMetric.cpu.format(t.cpu ?? 0))") }
+            if let g = out.topGroups[.cpu]?.first { print("         top cpu group: \(g.name) (\(g.count) processes) \(AmbientMetric.cpu.format(g.sums.cpu ?? 0))") }
             if let t = out.top[.memory]?.first { print("         top memory: \(t.name) (\(t.pid)) \(AmbientMetric.memory.format(Double(t.footprint ?? 0)))") }
             print("         footprints: \(out.procs.filter { ($0.footprint ?? 0) > 0 }.count) of \(out.procs.count) nonzero, \(out.procs.filter { $0.footprint == nil }.count) nil")
             for a in out.alerts { print("         ALERT \(a.kind.title): \(a.proc.name) (\(a.proc.pid)) now \(a.kind.metric?.format(a.current) ?? "") peak \(a.kind.metric?.format(a.peak) ?? "") for \(Int(Date().timeIntervalSince(a.since))) s") }
@@ -665,18 +708,79 @@ extension AmbientMonitor {
     }
 }
 
+extension AmbientMonitor {
+    /// `--groups [seconds]`: two samples that far apart (2 s by default), then each accounting group of more than one
+    /// process with its leader, sub-groups and sums, largest CPU first; checks every process lands in exactly one group.
+    nonisolated static func printGroups(seconds: Double) {
+        NetSampler.shared.startAtLaunch()
+        func apps() -> [pid_t: AppInfo] {
+            DispatchQueue.main.sync {
+                var a: [pid_t: AppInfo] = [:]
+                for r in NSWorkspace.shared.runningApplications where r.activationPolicy != .prohibited {
+                    a[r.processIdentifier] = AppInfo(name: r.localizedName, regular: r.activationPolicy == .regular)
+                }
+                return a
+            }
+        }
+        var tr = Tracker()
+        let helper = HelperClient.shared.probe().isRunning
+        _ = sample(&tr, Input(apps: apps(), helper: helper, settings: Settings()))
+        Thread.sleep(forTimeInterval: seconds)
+        guard let out = sample(&tr, Input(apps: apps(), helper: helper, settings: Settings())) else { print("process list failed"); return }
+        var groups: [AmbientGroup] = [], times: [Double] = []
+        for _ in 0..<5 {   // the first call looks up terminal names (devname searches /dev); later ones are what a tick costs
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            var ps = out.procs
+            groups = AmbientGroups.group(&ps)
+            times.append(Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000)
+        }
+        let us = times.dropFirst().reduce(0, +) / Double(times.count - 1)
+        func figs(_ s: AmbientSums) -> String {
+            "\(AmbientMetric.cpu.format(s.cpu ?? 0)) cpu, \(Fmt.bytes(s.memory.map { UInt64($0) })) mem" + (s.partial ? " (sums cover \(s.covered) of \(s.count))" : "")
+        }
+        func line(_ p: AmbientProc) -> String {
+            "\(p.name) (\(p.pid)) \(AmbientMetric.cpu.format(p.cpu ?? 0)) \(Fmt.bytes(p.footprint))" + (p.responsible.map { $0 == p.pid ? "" : " resp \($0)" } ?? " resp ?")
+        }
+        let multi = groups.filter { !$0.single }.sorted { ($0.sums.cpu ?? 0) > ($1.sums.cpu ?? 0) }
+        for g in multi {
+            print("\(g.name) [coalition \(g.id)] \(g.count) processes: \(figs(g.sums)), leader pid \(g.leader.pid)")
+            for sg in g.subgroups.sorted(by: { ($0.sums.cpu ?? 0) > ($1.sums.cpu ?? 0) }) {
+                print("    ▸ \(sg.title) — \(sg.members.count): \(figs(sg.sums))")
+                for m in sg.members.sorted(by: { ($0.cpu ?? 0) > ($1.cpu ?? 0) }).prefix(4) { print("        \(line(m))") }
+                if sg.members.count > 4 { print("        …") }
+            }
+            for m in g.plain { print("    \(line(m))") }
+        }
+        // Every process in exactly one group, and in exactly one place inside it.
+        var seen: [AmbientProc.Key: Int] = [:]
+        for g in groups {
+            for m in g.members { seen[m.key, default: 0] += 1 }
+            if g.members.count != g.count { print("MISMATCH in \(g.name): \(g.members.count) placed of \(g.count)") }
+        }
+        let twice = seen.filter { $0.value != 1 }.count, missing = out.procs.filter { seen[$0.key] == nil }.count
+        print("\(out.procs.count) processes, \(groups.count) groups, \(multi.count) of more than one; in two groups: \(twice), in none: \(missing); grouping took \(String(format: "%.0f", times[0])) µs the first time, \(String(format: "%.0f", us)) µs after")
+        print("top cpu groups: " + (out.topGroups[.cpu] ?? []).map { "\($0.name) \(AmbientMetric.cpu.format($0.sums.cpu ?? 0))" }.joined(separator: ", "))
+        print("top cpu processes: " + (out.top[.cpu] ?? []).map { "\($0.name) \(AmbientMetric.cpu.format($0.cpu ?? 0))" }.joined(separator: ", "))
+    }
+}
+
 /// A process's last readings, oldest first; Float to keep ~650 processes × 5 series small.
 struct ProcHistory: Sendable {
     static let length = 30
     var cpu: [Float] = [], gpu: [Float] = [], memory: [Float] = [], disk: [Float] = [], network: [Float] = []
 
     mutating func append(_ p: AmbientProc) {
+        push(p.cpu, p.gpu, p.footprint.map { Double($0) }, p.disk, p.net)
+    }
+
+    mutating func append(_ s: AmbientSums) { push(s.cpu, s.gpu, s.memory, s.disk, s.net) }
+
+    private mutating func push(_ c: Double?, _ g: Double?, _ m: Double?, _ d: Double?, _ n: Double?) {
         func push(_ a: inout [Float], _ v: Double?) {
             a.append(Float(v ?? 0))
             if a.count > Self.length { a.removeFirst(a.count - Self.length) }
         }
-        push(&cpu, p.cpu); push(&gpu, p.gpu); push(&memory, p.footprint.map { Double($0) })
-        push(&disk, p.disk); push(&network, p.net)
+        push(&cpu, c); push(&gpu, g); push(&memory, m); push(&disk, d); push(&network, n)
     }
 
     func values(_ m: AmbientMetric) -> [Double] {

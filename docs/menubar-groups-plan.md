@@ -1,6 +1,11 @@
 # Plan: group the menu bar dropdown by who the work is for
 
-Status: plan, written 2026-11-16. Nothing here is implemented.
+Status: implemented 2026-11-16 (`AmbientGroups.swift`, `AmbientMonitor.swift`, `Popover.swift`, `MenuBarViews.swift`), with the defaults of section 9. Differences from the plan:
+
+- Leaders and the merge are recomputed every tick rather than cached per group: the whole grouping measures ~0.5 ms on ~800 processes once paths are searched as bytes, so a cache would save little and add a membership check of similar cost.
+- A member that rule 1 or 2 matched alone falls through to the later rules (as the idle-shell example in section 5 already assumed), instead of becoming a plain row.
+- A responsibility sub-group's row shows its responsible process's pid, since several can share a name (four `claude` sessions).
+- Checks: `--groups` placed each of ~800 processes in exactly one group. `--ambient 30` CPU per tick, run twice each on a busy machine: before 10.7 and 11.0 ms, after 12.9 and 10.8 ms (within run-to-run noise). Rule 2 with a command running in a terminal was not exercised.
 
 ## 1. Goal
 

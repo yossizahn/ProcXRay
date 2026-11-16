@@ -11,6 +11,7 @@ A Process Hacker–style process explorer for macOS. It shows the attribution da
 - **Inspector.** Ten tabs (Info, Launch, Security, Usage, Threads, Memory, Files & Ports, Logs, Sample, Syscalls; ⌘1–⌘0) show what a process is, who started it and why, who signed it, what it's using and what it's talking to. Every field's name opens a bubble saying what it is and where it comes from, and every process it mentions is a clickable link.
 - **Left Behind.** A built-in filter finds processes that keep an app "running in the background" after you quit it.
 - **Visual, not just text.** The output of `lsof`, `vmmap`, `sample`, `log`, `launchctl` and `lsappinfo` is parsed into tables, charts and call trees. A Raw switch shows the original text.
+- **Menu bar dropdown and Triage.** Live CPU, GPU, memory, disk and network widgets; the dropdown ranks apps, not single processes: each row is an accounting group (the kernel's resource coalition), so a browser's 20 processes add up to one figure. Expand a group to see who the work is for: its command-line sessions, terminal sessions, XPC services and same-name helpers. A switch shows single processes instead.
 - **Privileged helper (optional).** A read-only root daemon fills in data for root-owned processes and loads Background Items without a password prompt.
 
 ## A closer look
@@ -56,5 +57,5 @@ Without the helper the app runs unprivileged, and what it can't read for root-ow
 ## More
 
 - [docs/process-info-sources.md](docs/process-info-sources.md) lists where each piece of data comes from.
-- `ProcXRay --dump [--pid N]` prints a snapshot for cross-checking. `--bench` times each refresh stage.
+- `ProcXRay --dump [--pid N]` prints a snapshot for cross-checking. `--bench` times each refresh stage. `--ambient <seconds>` times the menu bar monitor's ticks, and `--groups [seconds]` prints its accounting groups.
 - Proc X-Ray aims to be very light on system resources.

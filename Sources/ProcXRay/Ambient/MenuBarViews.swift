@@ -373,13 +373,10 @@ struct TriageView: View {
                         .help("Open the process list sorted by \(topMetric.title)")
                 }
             }) {
-                let list = monitor.top[topMetric] ?? []
+                let list = monitor.topGroups[topMetric] ?? []
                 if list.isEmpty { empty("No readings yet") }
-                let peak = list.compactMap { topMetric.value($0) }.max() ?? 1
-                ForEach(list) { p in
-                    ProcRow(proc: p, detail: topMetric.value(p).map(topMetric.format) ?? "–",
-                            fraction: (topMetric.value(p) ?? 0) / max(peak, 1e-9))
-                }
+                let peak = list.compactMap { topMetric.value($0.sums) }.max() ?? 1
+                ForEach(list) { g in TopGroupRow(group: g, metric: topMetric, peak: peak) }
             }
             section("Just launched", count: monitor.launched.count, symbol: "sparkle", trailing: {
                 Button("Show All") { AppRouter.showProcessList(predicate: FilterChip.recent.source) }
@@ -521,6 +518,12 @@ struct ProcRow: View {
     var running = true
     var reason: String? = nil
     var tint: Color = .primary
+    /// For a group's row: its process count, shown in place of the pid.
+    var count: Int? = nil
+    /// "· Firefox" after the name when the process belongs to a group it doesn't lead.
+    var showGroup = true
+    /// Replaces the path-and-click tooltip.
+    var help: String? = nil
     @Environment(\.openWindow) private var openWindow
     @State private var hover = false
 
@@ -531,7 +534,16 @@ struct ProcRow: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 4) {
                     Text(verbatim: proc.name).lineLimit(1).truncationMode(.middle).foregroundStyle(running ? tint : .secondary)
-                    Text(verbatim: "\(proc.pid)").font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+                        .layoutPriority(1)
+                    if showGroup, let g = proc.groupName {
+                        Text(verbatim: "· \(g)").foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                            .help("In the accounting group (resource coalition) of \(g)")
+                    }
+                    if let count {
+                        Text(verbatim: "\(count) processes").font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+                    } else {
+                        Text(verbatim: "\(proc.pid)").font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+                    }
                     if proc.notResponding {
                         Text("NOT RESPONDING").font(.system(size: 8, weight: .bold)).foregroundStyle(.red)
                             .padding(.horizontal, 3).background(.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 2))
@@ -556,7 +568,7 @@ struct ProcRow: View {
         .contentShape(Rectangle())
         .onHover { hover = $0 }
         .onTapGesture { inspect() }
-        .help(running ? "\(proc.path ?? proc.name)\nClick to inspect." : "\(proc.path ?? proc.name)\nExited; click to see its last state if Proc X-Ray still has it.")
+        .help(help ?? (running ? "\(proc.path ?? proc.name)\nClick to inspect." : "\(proc.path ?? proc.name)\nExited; click to see its last state if Proc X-Ray still has it."))
         .contextMenu {
             Button("Inspect") { inspect() }
             Button("Show in Process List") { AppRouter.openMain(openWindow); AppRouter.shared.show(proc.pid) }.disabled(!running)
@@ -593,6 +605,50 @@ struct ProcRow: View {
             e.runModal()
         }
         AmbientMonitor.shared.tick()
+    }
+}
+
+/// A group in the top-consumer lists: its leader, process count and sum, with a chevron (for more than one
+/// process) that lists the members contributing most.
+struct TopGroupRow: View {
+    let group: AmbientGroup
+    let metric: AmbientMetric
+    let peak: Double
+    @State private var open = false
+
+    var body: some View {
+        let v = metric.value(group.sums)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 2) {
+                if group.single {
+                    Color.clear.frame(width: 12, height: 14)
+                } else {
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                        .frame(width: 12, height: 14).contentShape(Rectangle())
+                        .onTapGesture { open.toggle() }
+                        .help(open ? "Hide the members" : "Show the members that use the most")
+                }
+                ProcRow(proc: group.leader, detail: v.map { (group.sums.partial ? "≥ " : "") + metric.format($0) } ?? "–",
+                        fraction: (v ?? 0) / max(peak, 1e-9), count: group.single ? nil : group.count,
+                        help: group.single ? nil
+                          : "Accounting group (resource coalition) of \(group.count) processes, named after \(group.name)."
+                            + (group.sums.coverageNote.map { " \($0)." } ?? "") + "\nClick to inspect \(group.name).")
+            }
+            if open {
+                let top = group.members.filter { (metric.value($0) ?? 0) > 0 }
+                    .sorted { (metric.value($0) ?? 0) > (metric.value($1) ?? 0) }.prefix(5)
+                if top.isEmpty {
+                    Text("No member has a reading above zero").font(.caption).foregroundStyle(.secondary).padding(.leading, 36)
+                }
+                ForEach(Array(top)) { m in
+                    ProcRow(proc: m, detail: metric.value(m).map(metric.format) ?? "–", showGroup: false).padding(.leading, 24)
+                }
+                if group.count > top.count {
+                    Text(verbatim: "\(group.count - top.count) more").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 36)
+                }
+            }
+        }
     }
 }
 

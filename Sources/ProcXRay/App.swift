@@ -73,6 +73,15 @@ struct ProcXRayApp: App {
             }
             RunLoop.main.run()
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--groups") {
+            // --groups [seconds]: the dropdown's accounting groups, printed.
+            let secs = CommandLine.arguments.dropFirst(i + 1).compactMap(Double.init).first ?? 2
+            Thread.detachNewThread {
+                AmbientMonitor.printGroups(seconds: secs)
+                exit(0)
+            }
+            RunLoop.main.run()
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--filter"), i + 1 < CommandLine.arguments.count {
             exit(Bench.filter(CommandLine.arguments[i + 1]) ? 0 : 1)
         }

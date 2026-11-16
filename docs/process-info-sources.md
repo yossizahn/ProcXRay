@@ -152,6 +152,16 @@ All are read without privileges, once per menu bar tick (`AmbientMonitor`).
 - Disk: IORegistry `IOBlockStorageDriver` → `Statistics` bytes read and written.
 - Network: `sysctl(NET_RT_IFLIST2)` 64-bit interface counters, loopback excluded.
 
+## Accounting groups (menu bar dropdown and Triage, `AmbientGroups`)
+
+The dropdown and Triage's top consumers rank groups, built each tick from fields the monitor reads anyway plus two read once per process (`proc_pidinfo(PROC_PIDCOALITIONINFO)` for the resource coalition and `responsibility_get_pid_responsible_for_pid`). No LaunchServices, launchd, signatures or argv.
+
+- **Group:** the resource coalition. A group whose leader runs from inside another group's leader's `.app` bundle (an extension, a bundled helper) joins that group; a bundle's own main executable never does, and only one level is merged.
+- **Leader** (the name and icon): the member most members name as their responsible process; with no readable votes, or a tie, the oldest member outside an `.xpc` bundle.
+- **Sub-groups**, the first rule giving two or more members: another responsible process than the leader (a CLI session the app started), a controlling terminal, XPC services (`/XPCServices/….xpc/Contents/MacOS/`), the same name ("plugin-container ×13"). A member a rule matched alone falls through.
+- **Figures:** sums of CPU, GPU, footprint, disk and network over the members with a reading ("≥" and "Sums cover N of M" when some couldn't be read); the graph is the group's own ring, kept by coalition id.
+- Cost, measured 2026-11-16 with `--groups` on ~800 processes: ~0.5 ms a tick for the grouping (about 590 groups, 60 of more than one). Foundation's `String.range(of:)` was 3 ms of a first version's 5 ms; paths are searched as UTF-8 bytes instead.
+
 ## What else is available
 
 Grouped by how hard it is to get. "Same user" means the call worked for another process of this user (Finder) but failed for a root process (launchd); the helper would cover the rest.
