@@ -21,7 +21,7 @@ struct SandboxCard: View {
                     }
                 }
                 Divider()
-                SandboxProfileSection(proc: proc)
+                SandboxProfileSection(proc: proc, entitlements: entitlements)
             }
         }
         .task(id: proc.key) { await recheck() }
@@ -116,11 +116,13 @@ struct SandboxProbeTable: View {
 /// The profile it was compiled with: secinitd's cached copy and the inputs it was built from.
 struct SandboxProfileSection: View {
     let proc: ProcInfo
+    let entitlements: [String: Any]
     @State private var result: Result<SandboxProfileInfo, SandboxProfileInfo.Failure>?
 
     /// `preloaded`: the result already read, for rendering without running the task (Bench).
-    init(proc: ProcInfo, preloaded: Result<SandboxProfileInfo, SandboxProfileInfo.Failure>? = nil) {
+    init(proc: ProcInfo, entitlements: [String: Any] = [:], preloaded: Result<SandboxProfileInfo, SandboxProfileInfo.Failure>? = nil) {
         self.proc = proc
+        self.entitlements = entitlements
         _result = State(initialValue: preloaded)
     }
     @State private var shownSource: String?
@@ -130,9 +132,17 @@ struct SandboxProfileSection: View {
             Text("Compiled profile").font(.subheadline.weight(.semibold))
             switch result {
             case nil: ProgressView().controlSize(.small)
-            case .failure(let f)?: Text(Self.text(f)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                if case .needsFullDiskAccess = f {
-                    Button("Open Full Disk Access settings") { FullDiskAccess.openSettings() }.controlSize(.small)
+            case .failure(let f)?:
+                // A process on a named profile has no container, so the container lookup fails — with EPERM
+                // (.noContainer) or, for many daemons, ENOTSUP (.notSandboxed). When we already know it's
+                // sandboxed, ENOTSUP means "no container", not "unsandboxed", so recover the named profile.
+                if namedProfileCase(f), let named = SandboxProfileInfo.Named.resolve(entitlements: entitlements, launchdLabel: proc.launchdLabel, comm: proc.comm) {
+                    NamedProfileView(named: named)
+                } else {
+                    Text(Self.text(namedProfileCase(f) ? .noContainer : f)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if case .needsFullDiskAccess = f {
+                        Button("Open Full Disk Access settings") { FullDiskAccess.openSettings() }.controlSize(.small)
+                    }
                 }
             case .success(let i)?: details(i)
             }
@@ -141,6 +151,16 @@ struct SandboxProfileSection: View {
             guard result == nil else { return }
             let pid = proc.pid
             result = await Task.detached { SandboxProfileInfo.read(pid: pid) }.value
+        }
+    }
+
+    /// True when the failure means "sandboxed, but no container to read a profile from" — either EPERM
+    /// (.noContainer) or, for a process we already know is sandboxed, ENOTSUP (.notSandboxed).
+    private func namedProfileCase(_ f: SandboxProfileInfo.Failure) -> Bool {
+        switch f {
+        case .noContainer: return true
+        case .notSandboxed: return proc.sandboxed == true
+        default: return false
         }
     }
 
@@ -277,6 +297,48 @@ struct SandboxRulesView: View {
         }
         if lines.count == 1 && !q.isEmpty { lines.append(";; no operation matches “\(query)”") }
         return lines.joined(separator: "\n")
+    }
+}
+
+/// For a process on a named system profile (no container): the SBPL source recovered by name, shown on demand.
+struct NamedProfileView: View {
+    let named: SandboxProfileInfo.Named
+    @State private var shown = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(headline).fixedSize(horizontal: false, vertical: true)
+            if let path = named.sourcePath {
+                HStack(spacing: 6) {
+                    Button(shown ? "Hide source" : "Show source") { shown.toggle() }.controlSize(.small)
+                    Text(verbatim: path).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                        .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+                    Button("Reveal") { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") }
+                        .controlSize(.small)
+                }
+                if shown {
+                    MonoText(text: (try? String(contentsOfFile: path, encoding: .utf8)) ?? ";; Couldn't read \(path).", sbpl: true)
+                        .frame(height: 320)
+                }
+            }
+            Text(footnote).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var headline: String {
+        let how = named.fromEntitlement
+            ? "Runs under the system profile “\(named.name)”, named by its entitlement."
+            : "Runs under a named system profile. No metadata records which, but the system ships “\(named.name).sb”, whose name matches this process — most likely its profile."
+        return how
+    }
+
+    private var footnote: String {
+        if named.sourcePath == nil {
+            return "“\(named.name)” is a built-in profile: macOS compiles it in and ships no .sb source, so only its name is known."
+        }
+        return named.fromEntitlement
+            ? "This is the profile's SBPL source. The enforced policy is compiled from it plus the built-in platform profile and parameter substitution, so it isn't byte-for-byte identical."
+            : "Matched by name, so treat it as the likely profile, not a certainty. It's the SBPL source; the enforced policy is compiled from it plus the built-in platform profile and parameters."
     }
 }
 

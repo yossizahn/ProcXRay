@@ -772,9 +772,11 @@ enum Bench {
             let out = Shell.exec("/usr/bin/codesign", ["-d", "--entitlements", "-", "--xml", path], mergeStderr: false).output
             return out.data(using: .utf8).flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }
         } ?? [:]
-        let proc = Native.process(pid).map { k in
-            ProcInfo(pid: k.pid, ppid: k.ppid, pgid: k.pgid, uid: k.uid, user: "", comm: k.comm,
-                     path: Native.path(k.pid), start: k.start, stat: k.stat, pflags: k.flags)
+        let proc = Native.process(pid).map { k -> ProcInfo in
+            var p = ProcInfo(pid: k.pid, ppid: k.ppid, pgid: k.pgid, uid: k.uid, user: "", comm: k.comm,
+                             path: Native.path(k.pid), start: k.start, stat: k.stat, pflags: k.flags)
+            p.sandboxed = Native.sandboxed(k.pid, start: k.start)
+            return p
         }
         MainActor.assumeIsolated {
             if let p = proc {
@@ -788,7 +790,7 @@ enum Bench {
                 SandboxProbeTable(report: r, entitlements: ent, recheck: {})
                 if let p = proc {
                     Divider()
-                    SandboxProfileSection(proc: p, preloaded: SandboxProfileInfo.read(pid: pid))
+                    SandboxProfileSection(proc: p, entitlements: ent, preloaded: SandboxProfileInfo.read(pid: pid))
                 }
             }
             .frame(width: 560).padding(10).background(Color(nsColor: .windowBackgroundColor))

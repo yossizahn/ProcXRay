@@ -53,6 +53,47 @@ struct SandboxProfileInfo {
         case noCache(String)        // read, but it has no cached profile
     }
 
+    /// A named *system* profile, for processes that run under one instead of an App Sandbox container.
+    ///
+    /// The kernel won't hand out such a profile (`sandbox_container_path_for_pid` → EPERM), and nothing records
+    /// which profile a given pid got — daemons name it themselves in a `sandbox_init` call we can't see. But the
+    /// SBPL source for these profiles ships in `/System/Library/Sandbox/Profiles`, and a profile's name reliably
+    /// matches the process's launchd label or its executable name (e.g. `bluetoothd.sb`, `com.apple.cloudd.sb`).
+    /// So we recover the *source* by name: authoritative when an entitlement names the profile, a strong guess
+    /// when we match on the label or `comm`. The enforced policy is compiled from this plus the built-in platform
+    /// profile and parameter substitution, so it isn't byte-for-byte what runs, but it's the real rules.
+    struct Named {
+        let name: String
+        /// An entitlement named the profile outright (vs. a name matched against the process).
+        let fromEntitlement: Bool
+        /// The `.sb` source, or nil for a built-in profile that ships no source.
+        let sourcePath: String?
+
+        static let profilesDir = "/System/Library/Sandbox/Profiles"
+
+        static func resolve(entitlements: [String: Any], launchdLabel: String?, comm: String) -> Named? {
+            var entNames: [String] = []
+            for key in ["com.apple.private.sandbox.profile:macos", "com.apple.private.sandbox.profile"] {
+                if let s = entitlements[key] as? String { entNames.append(s) }
+                else if let a = entitlements[key] as? [String] { entNames += a }
+            }
+            // Entitlement names first (authoritative), then the launchd label and executable name (heuristic).
+            let candidates = entNames.map { ($0, true) } + [(launchdLabel ?? "", false), (comm, false)]
+            var seen = Set<String>()
+            for (name, auth) in candidates where !name.isEmpty && seen.insert(name).inserted {
+                let path = "\(profilesDir)/\(name).sb"
+                if FileManager.default.fileExists(atPath: path) {
+                    return Named(name: name, fromEntitlement: auth, sourcePath: path)
+                }
+            }
+            // No source on disk, but an entitlement names it: a built-in/platform profile (e.g. com.apple.sandboxd).
+            if let name = entNames.first(where: { !$0.isEmpty }) {
+                return Named(name: name, fromEntitlement: true, sourcePath: nil)
+            }
+            return nil
+        }
+    }
+
     static func read(pid: pid_t) -> Result<SandboxProfileInfo, Failure> {
         var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
         errno = 0
