@@ -35,12 +35,20 @@ enum AppActivation {
     }
 }
 
+/// Settings' tabs; the selected one is stored so the sidebar's helper status can open Helper.
+enum SettingsTab: String {
+    case general, helper, menuBar, alerts
+    static let key = "settings.tab"
+}
+
 struct SettingsView: View {
+    @AppStorage(SettingsTab.key) private var tab = SettingsTab.general.rawValue
     var body: some View {
-        TabView {
-            GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }
-            MenuBarSettings().tabItem { Label("Menu Bar", systemImage: "menubar.rectangle") }
-            AlertSettings().tabItem { Label("Alerts", systemImage: "exclamationmark.triangle") }
+        TabView(selection: $tab) {
+            GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general.rawValue)
+            HelperSettings().tabItem { Label("Helper", systemImage: "lock.shield") }.tag(SettingsTab.helper.rawValue)
+            MenuBarSettings().tabItem { Label("Menu Bar", systemImage: "menubar.rectangle") }.tag(SettingsTab.menuBar.rawValue)
+            AlertSettings().tabItem { Label("Alerts", systemImage: "exclamationmark.triangle") }.tag(SettingsTab.alerts.rawValue)
         }
         .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)

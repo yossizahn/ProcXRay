@@ -89,7 +89,7 @@ struct InspectorView: View {
             if failed && tool != .lsof {
                 out += viaHelper && platform
                     ? "\n\n— SIP prevents inspecting Apple platform binaries' memory, even as root."
-                    : (viaHelper ? "" : "\n\n— Needs task_for_pid rights. Install the privileged helper (sidebar) to run this as root.")
+                    : (viaHelper ? "" : "\n\n— Needs task_for_pid rights. Install the helper (Settings ▸ Helper) to run this as root.")
             } else if tool == .lsof && !viaHelper && proc.uid != getuid() {
                 out += "\n\n— Running as \(NSUserName()): another user's open files aren't visible. Install the helper for full output."
             }

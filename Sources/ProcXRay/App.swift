@@ -310,7 +310,7 @@ struct ProcXRayApp: App {
         .menuBarExtraStyle(.window)
 
         Settings {
-            SettingsView()
+            SettingsView().environment(store)
         }
 
         Window("Columns", id: ColumnManager.id) {
@@ -530,13 +530,9 @@ struct ContentView: View {
             }
             .navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 300)
             .safeAreaInset(edge: .bottom) {
-                VStack(alignment: .leading, spacing: 2) {
-                    SecurityBadge()
-                    HelperBadge()
-                    RefreshStats()
-                }
-                .font(.caption).foregroundStyle(.secondary).padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                StatusLine()
+                    .font(.caption).foregroundStyle(.secondary).padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .onChange(of: AppRouter.shared.reveal) { _, r in if r != nil { savedSection = .processes } }
         } detail: {
@@ -590,61 +586,97 @@ private struct InspectAtLaunch: ViewModifier {
     }
 }
 
-/// Per-refresh numbers, in their own view so that only this text re-renders on every tick.
-struct RefreshStats: View {
+/// The sidebar's one status line: "939 processes · 75 ms · helper root · SIP off". Each part's tooltip has the
+/// detail; the helper part opens Settings ▸ Helper. In its own view so that only this line re-renders on
+/// every tick.
+struct StatusLine: View {
     @Environment(Store.self) var store
-    var body: some View {
-        Text(verbatim: "\(store.procs.count) processes")
-        Text(verbatim: "snapshot \(store.refreshMillis) ms")
-        if let e = store.refreshError {
-            Text(verbatim: "\(e) — showing the last good list").foregroundStyle(.red).lineLimit(3).help("\(e) — showing the last good list")
-        }
-    }
-}
-
-/// Shown only when SIP or AMFI is relaxed, since that is when the extra features apply.
-struct SecurityBadge: View {
+    @Environment(\.openSettings) private var openSettings
+    @AppStorage(SettingsTab.key) private var settingsTab = SettingsTab.general.rawValue
     private let sec = SystemSecurity.current
+
     var body: some View {
-        if sec.sipRelaxed || sec.amfiDisabled {
-            let text = [sec.sipRelaxed ? "SIP disabled" : nil, sec.amfiDisabled ? "AMFI off" : nil].compactMap { $0 }.joined(separator: " · ")
-            HStack(spacing: 4) {
-                Image(systemName: "shield.slash").foregroundStyle(.orange)
-                Text(verbatim: text)
+        VStack(alignment: .leading, spacing: 2) {
+            // Wraps between parts, never inside one, when the sidebar is narrow.
+            FlowLayout(spacing: 0) {
+                Text(verbatim: "\(store.procs.count) processes").help("Processes in the last snapshot")
+                Text(verbatim: " · \(store.refreshMillis) ms").help("Time the last snapshot took")
+                Text(verbatim: " · ")
+                Button {
+                    settingsTab = SettingsTab.helper.rawValue
+                    openSettings()
+                    NSApp.activate(ignoringOtherApps: true)
+                } label: {
+                    Text(verbatim: helperText).foregroundStyle(store.helperState.isRunning ? Color.secondary : .orange)
+                }
+                .buttonStyle(.plain)
+                .help(store.helperState.label + ". Click for Settings ▸ Helper.")
+                if sec.sipRelaxed || sec.amfiDisabled {
+                    Text(verbatim: " · " + [sec.sipRelaxed ? "SIP off" : nil, sec.amfiDisabled ? "AMFI off" : nil].compactMap { $0 }.joined(separator: " · "))
+                        .foregroundStyle(.orange).help(sec.summary)
+                }
             }
-            .help(sec.summary)
-            .padding(.bottom, 4)
+            if let e = store.refreshError {
+                Text(verbatim: "\(e) — showing the last good list").foregroundStyle(.red).lineLimit(3).help("\(e) — showing the last good list")
+            }
+        }
+    }
+
+    private var helperText: String {
+        switch store.helperState {
+        case .running: "helper root"
+        case .notInstalled: "helper: not installed"
+        case .needsApproval: "helper: needs approval"
+        case .unreachable: "helper: unreachable"
+        case .notFound: "helper: missing"
         }
     }
 }
 
-struct HelperBadge: View {
+/// Settings ▸ Helper: the privileged helper's state and the controls for it.
+struct HelperSettings: View {
     @Environment(Store.self) var store
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 4) {
-                Circle().fill(store.helperState.isRunning ? .green : .orange).frame(width: 7, height: 7)
-                Text(verbatim: store.helperState.label).lineLimit(2).help(store.helperState.label)
+        Form {
+            SwiftUI.Section {
+                LabeledContent("Status") {
+                    HStack(spacing: 6) {
+                        Circle().fill(store.helperState.isRunning ? .green : .orange).frame(width: 7, height: 7)
+                        Text(verbatim: store.helperState.label).textSelection(.enabled)
+                    }
+                }
+                HStack {
+                    switch store.helperState {
+                    case .notInstalled:
+                        Button("Install Privileged Helper…") { store.installHelper() }
+                    case .needsApproval:
+                        Button("Open Login Items to Approve") { HelperClient.shared.openLoginItems(); store.probeHelper() }
+                    case .running, .unreachable:
+                        // Unreachable: registering again is a no-op, so offer to remove it (launchd may still point
+                        // at another copy of the app that took over the registration).
+                        Button("Uninstall Helper") { store.uninstallHelper() }
+                    case .notFound:
+                        EmptyView()
+                    }
+                    if store.helperState != .needsApproval {
+                        Button("Open Login Items") { HelperClient.shared.openLoginItems(); store.probeHelper() }
+                    }
+                }
+                if let e = store.helperError { Text(verbatim: e).foregroundStyle(.red).textSelection(.enabled) }
             }
-            switch store.helperState {
-            case .notInstalled:
-                Button("Install Privileged Helper…") { store.installHelper() }
-                    .help("Registers a root daemon (SMAppService) for reading other users' processes. macOS asks you to approve it once in Login Items.")
-            case .unreachable:
-                // Registered but not answering. Registering again is a no-op, so offer to remove it instead;
-                // e.g. launchd may still point at another copy of the app that took over the registration.
-                Button("Uninstall Helper") { store.uninstallHelper() }
-                    .help("Removes the helper's registration so it can be installed again from this copy of the app.")
-            case .needsApproval:
-                Button("Open Login Items to Approve") { HelperClient.shared.openLoginItems(); store.probeHelper() }
-            case .running:
-                Button("Uninstall Helper") { store.uninstallHelper() }
-            case .notFound:
-                EmptyView()
+            SwiftUI.Section {
+                Text("""
+                    An optional, read-only root daemon (SMAppService) that fills in data for other users' and root-owned \
+                    processes, runs a fixed allowlist of tools (lsof, vmmap, sample, launchctl procinfo, sfltool dumpbtm) \
+                    with arguments it builds itself, and accepts connections only from this build of the app. Admins can \
+                    inspect any process; other users only their own. It exits about 10 s after going idle and launchd \
+                    restarts it on demand. macOS asks you to approve it once in Login Items.
+                    """)
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            if let e = store.helperError { Text(verbatim: e).foregroundStyle(.red).lineLimit(3).help(e) }
         }
-        .padding(.bottom, 4)
+        .formStyle(.grouped)
+        .onAppear { store.probeHelper() }
     }
 }

@@ -154,7 +154,7 @@ struct SyscallTraceView: View {
 
     private var disabledReason: String? {
         if exited { return InspectorView.exitedNote }
-        if !store.helperState.isRunning { return "Tracing syscalls needs root: install the privileged helper (sidebar)." }
+        if !store.helperState.isRunning { return "Tracing syscalls needs root: install the helper (Settings ▸ Helper)." }
         return nil
     }
 

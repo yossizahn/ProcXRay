@@ -240,7 +240,7 @@ struct ThreadsView: View {
             } else if failed {
                 Text(store.helperState.isRunning
                      ? "The threads of \(proc.name) couldn't be read."
-                     : "The threads of a process owned by \(proc.user) aren't readable. Install the privileged helper (sidebar) to read them.")
+                     : "The threads of a process owned by \(proc.user) aren't readable. Install the helper (Settings ▸ Helper) to read them.")
                     .foregroundStyle(.secondary).multilineTextAlignment(.center)
             } else {
                 ProgressView().controlSize(.small)

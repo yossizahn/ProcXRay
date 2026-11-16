@@ -14,7 +14,7 @@ The app grew feature by feature and is now a kitchen sink: every piece of data i
 2. The app is for power users, but a cryptic system term is never shown bare. A label is a plain phrase followed by the system's own term in brackets: "No Dock icon (UIElement)", "Privacy permissions (TCC)". The phrase says what it means; the term is what to search for. See "Glossed terms" in Part 1.
 3. It is a Mac app: source-list sidebar, menu bar commands with shortcuts, standard controls.
 4. Language is terse. No sentence where a row will do. Nothing stated twice on one screen.
-5. Every item shows its source.
+5. Every item has its source one click away, in an info bubble on the field's name.
 6. Every piece of available information is surfaced. Tooltips may explain; they never hold data.
 
 ### Ground rules for the implementer
@@ -339,7 +339,7 @@ Cards follow Part 1's sections 4–10: CPU, GPU (when read), Memory, Disk, Netwo
 | "Energy and wakeups" | Named Energy |
 | "On behalf of other processes" card | "CPU for others" / "CPU by others" become rows of the CPU card; the two energy rows become rows of Energy. `VoucherFlowsView` goes under Energy |
 | "Other" card (Open files, Power assertions) | Deleted. Power assertions → Energy. Open files → the header line of Files & Ports and a row in IPC |
-| "Task metrics read as root through the privileged helper." footer | Deleted; Part 6's source marker says it per row |
+| "Task metrics read as root through the privileged helper." footer | Deleted; each field's info bubble (Part 6) says how it was read |
 
 There is no GPU card today although `gpu` and `gpuTime` are columns: add one (% GPU, GPU time). Likewise add rows for `compressed` (Memory) and `openFiles` (IPC). These values are optional reads (`Column.reads`, `ExtraReads`) that the snapshot makes only while something asks for them; the tab must ask while it is on screen, the way it already does for jetsam and network (`store.jetsamViewers`, `store.networkViewers` in `Model.swift`).
 
@@ -355,13 +355,14 @@ One mechanism:
 
 - A row in a fact grid becomes a struct, not a tuple: `FactRow(label:, value:, source:, via:)`, replacing `(String, KVValue)` in `FactGrid`/`KV`, and the three-string tuple in `UsageTab.section`.
 - `source` is a short token naming the API, tool or calculation: `proc_pidpath`, `csops CS_OPS_CDHASH`, `ri_phys_footprint`, `sandbox_check`, `launchctl print`, `lsappinfo`, `sfltool dumpbtm`. A derived value says so: `derived: Smart tree` for Kind, `derived: Σ members` for sums. Take the tokens from `docs/process-info-sources.md`; where that doc lacks one, read the code that produces the value and add it to the doc.
-- `via` is an enum: `.direct`, `.helper` (read as root by the helper). It renders as a small marker after the token and replaces every "as root via helper" phrase.
-- Rendering: the token trails the value in `.caption` monospaced `.tertiary` text. A View menu toggle "Show Sources" (`@AppStorage("showSources")`, default on, ⌥⌘S) hides them all.
-- Columns: the `source` field from 2.4 is the same token; the Column Manager shows it as a column of its own.
+- `via` is an enum: `.direct`, `.helper` (read as root by the helper). It replaces every "as root via helper" phrase.
+- **Rendering: an info bubble on the field name.** The source is not printed in the row. The field's name is the handle: hovering it shows an ⓘ beside it, and clicking the name or the ⓘ opens a bubble with up to four labelled lines: what the field means (`help`), Source, Read (`directly` or `as root by the helper`), and Needs when a privilege is missing. This is the pattern the process list's Name cell already uses for a row (`InfoBubble` in `UI/ProcessOutline.swift`, a transient `NSPopover` of labelled sections); reuse that type, moved out of `ProcessOutline` so SwiftUI rows can open it too. There is no global Show Sources switch and nothing to turn off.
+- Rows stay as terse as before: label, value, nothing else.
+- Columns: the header's name is the field name. A click on a header sorts, so there the same four lines are the header's tooltip (2.4), and the header's context menu gets "About This Column", which opens the bubble. The Column Manager lists the source as a column of its own.
 - Attribution keeps its confidence badge (`EXACT` / `INFERRED`); only the "Source: …" sentence moves into the row's `source`.
 - The explanatory paragraphs under Hardening, Sandbox and the compiled profile shrink to the caveat only (what the figure does *not* cover); the "From the kernel (…)" part becomes row sources.
 
-**Check:** with Show Sources on, every row of Info, Launch, Security ▸ Signature and Usage has a token. A debug assertion in `FactGrid` that `source` is non-empty catches omissions during development.
+**Check:** every field name on Info, Launch, Security ▸ Signature and Usage opens a bubble with a Source line. A debug assertion in `FactGrid` that `source` is non-empty catches omissions during development.
 
 ## 7. Wording and commands
 
@@ -418,7 +419,7 @@ There is no menu-bar menu for the selected process; its commands are split betwe
 
 Inspect ⌘I · Show Inspector Pane ⌥⌘I · Reveal in Finder ⇧⌘R · Inspect Binary · Copy PID · Copy Path · Select Parent · Select Responsible · — · Sample · Trace Syscalls · — · Terminate… · Kill… · Suspend · Resume
 
-Move "Inspect Process", "Show Inspector Pane" and "Pick Process by Window…" out of View into it. View keeps Columns, grouping, Refresh, Pause, Show Sources, Keep Groups When Sorting.
+Move "Inspect Process", "Show Inspector Pane" and "Pick Process by Window…" out of View into it. View keeps Columns, grouping, Refresh, Pause, Keep Groups When Sorting.
 
 ## 8. Sidebar and sections
 
@@ -503,7 +504,7 @@ Each step is one commit and leaves the app working. Later steps depend on earlie
 | 9 | Info tab: cards by section, argv open, tiles and Related removed; header figures | 5.2, 5.3 | Medium | 2, 8 |
 | 10 | Launch tab: merge into Lineage / Mechanism / registrations / Related | 5.4 | Medium | 8 |
 | 11 | Security renames; Usage card moves; GroupInspector kept in step | 5.5, 5.6 | Medium | 8 |
-| 12 | `FactRow` with `source` and `via`; column `help`/`source`/`needs`; Show Sources | 2.4, 6 | Large | 9–11 (rows have settled) |
+| 12 | `FactRow` with `source` and `via`; column `help`/`source`/`needs`; info bubble on field names | 2.4, 6 | Large | 9–11 (rows have settled) |
 | 13 | Null states; sentences to rows; tooltip-held data into the UI; badges | 7.1–7.4 | Medium | 12 |
 | 14 | Process menu; "Inspect" everywhere | 7.5, 7.6 | Small | — |
 | 15 | Saved filters; fold Left Behind and LaunchServices Apps; sidebar groups | 8.1–8.3 | Medium | 3, predicate feature committed |
