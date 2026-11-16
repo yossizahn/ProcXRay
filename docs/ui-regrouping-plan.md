@@ -11,7 +11,7 @@ The app grew feature by feature and is now a kitchen sink: every piece of data i
 ### Principles (the owner's, in priority order for this work)
 
 1. Grouping is logical. Logic matters more than looks.
-2. The app is for power users: use the system's own terms (`UIElement`, TCC, cdhash), not friendly paraphrases.
+2. The app is for power users, but a cryptic system term is never shown bare. A label is a plain phrase followed by the system's own term in brackets: "No Dock icon (UIElement)", "Privacy permissions (TCC)". The phrase says what it means; the term is what to search for. See "Glossed terms" in Part 1.
 3. It is a Mac app: source-list sidebar, menu bar commands with shortcuts, standard controls.
 4. Language is terse. No sentence where a row will do. Nothing stated twice on one screen.
 5. Every item shows its source.
@@ -19,12 +19,7 @@ The app grew feature by feature and is now a kitchen sink: every piece of data i
 
 ### Ground rules for the implementer
 
-- **The filter-predicate feature may still be in flight.** When this plan was written (2026-11-16) it was uncommitted and being edited: `Predicate.swift`, `PredicateFields.swift`, `UI/PredicateBar.swift` new, and edits to `App.swift`, `Bench.swift`, `Model.swift`, `TreeFilters.swift`, `UI/ProcessOutline.swift`, `UI/ProcessesView.swift`. It gives the process list a filter language whose fields are the column ids, turns the filter chips into presets that toggle a predicate clause, and adds named saved predicates. It belongs to the owner. Check `git status` and `git log` first: if it is still uncommitted, do not revert, reformat or restructure it, and ask the owner to commit it before you start. Part 8 builds on it.
-- **Build and check** as `AGENTS.md` says: `./build-app.sh`, then run the bundle's binary for the CLI checks below. `ProcXRay --dump` verifies that every grouping places each process exactly once and prints the Smart tree's shape and every group row's values; `--tree-stats` prints row counts; `--filter '<predicate>'` tests a predicate.
-- **Measure, don't eyeball.** Every step has a check that is a command or a count. Report the before and after output.
 - **One step per commit**, in the order of Part 9. Each step leaves the app working.
-- **Don't change persisted ids.** Column ids (`Column.id`), `@AppStorage` keys and `Grouping` raw values are saved in users' defaults. Titles and sections can change freely; ids cannot. Where a persisted value must change (inspector tabs, sidebar section), the step says how to migrate it.
-- **Markdown:** don't hard-wrap lines.
 - **Open decisions** are listed in Part 10 with a default. Use the default unless the owner says otherwise; don't stop to ask.
 
 ### What was measured
@@ -46,6 +41,28 @@ Of 108 running `.appex` processes, 89 run from `/System` and 19 from elsewhere.
 ## 1. The taxonomy
 
 The app has four groupings of the same facts that don't agree: 10 column sections (`Column.Section`), 6 inspector tabs, 9 cards in the Usage pane, and the by-API grouping in `docs/process-info-sources.md`. Replace the first three with one list. The sources doc stays by-API; it is the lookup table for Part 6.
+
+**Glossed terms.** Principle 2's rule, applied to the terms this plan touches. Use these exact labels wherever the term appears as a label (group title, card title, row label, column title, badge):
+
+| System term | Label |
+|---|---|
+| `UIElement` | No Dock icon (UIElement) |
+| `BackgroundOnly` | No UI (BackgroundOnly) |
+| TCC | Privacy permissions (TCC) |
+| cdhash | Code hash (cdhash) |
+| ASN | LaunchServices instance (ASN) |
+| BTM | Background item (BTM) |
+| send-once right | Replies owed (send-once) |
+| jetsam band | Memory-kill band (jetsam) |
+| jetsam coalition | Memory-kill group (jetsam coalition) |
+| resource coalition | Accounting group (resource coalition) |
+| pid domain | Per-process launchd domain (pid domain) |
+| dirty tracking | Idle exit (dirty tracking) |
+
+- Apply the same pattern to any other term of this kind you meet while editing a label: one a Mac developer would have to look up in xnu or a man page. Terms in everyday use need no gloss: PID, TTY, launchd, XPC, sandbox, QoS, Mach port, entitlement.
+- The app already does this in places ("Same binary (same CDHash)", "Replies owed (send-once)"). Keep those; make the rest match.
+- Where the bracketed form doesn't fit (a narrow column header), the title is the plain phrase and the term goes first in the tooltip and into the Column Manager's list.
+- Values are data, not labels, and stay verbatim in table cells: the LS type column shows `UIElement`, so it matches what `lsappinfo` prints and what a predicate compares against (`lsType == UIElement`). In the inspector, where there is room, a row's value is glossed too: `Type  No Dock icon (UIElement)`. See decision D8.
 
 **Sections, in this order, everywhere:**
 
@@ -76,9 +93,9 @@ This list drives: the header menu and View ▸ Columns submenus, the Column Mana
 | Disk I/O | "Disk read + written" (tile) |
 | Power | "CPU energy" as the name of the watts figure (Usage row). "Energy" stays the name of the joules total. |
 | Signer | "Signed" (Overview row) |
-| Resource coalition | "Res. coalition" (column) |
+| Accounting group (resource coalition) | "Res. coalition" (column), "Same resource coalition" (Related) |
 | Wakeups | "Wakeups (idle + interrupt)"; the parenthesis goes to the tooltip |
-| Replies owed | "Replies owed (send-once)"; same |
+| Replies owed (send-once) | "Replies owed" alone (column title). The Usage row already has the bracketed form |
 
 ## 2. Columns
 
@@ -108,15 +125,15 @@ Ids do not change, so saved column sets, shown columns and widths survive. `Colu
 
 | id | Title | Value | Group rule | Why |
 |---|---|---|---|---|
-| `lsType` | LS type | `ProcInfo.lsType` (`Foreground`, `UIElement`, `BackgroundOnly`), empty when not registered | `.same` | The Smart tree's categories are derived from it, and it is visible nowhere as a raw field. Needed for step 8. |
-| `lsState` | LS state | `ProcInfo.lsTags` joined with a space | blank | The LaunchServices Apps section's "State" column, for step 8. |
+| `lsType` | LaunchServices type | `ProcInfo.lsType` (`Foreground`, `UIElement`, `BackgroundOnly`), empty when not registered | `.same` | The Smart tree's categories are derived from it, and it is visible nowhere as a raw field. Needed for step 8. |
+| `lsState` | LaunchServices state | `ProcInfo.lsTags` joined with a space | blank | The LaunchServices Apps section's "State" column, for step 8. |
 | `leftBehind` | Left behind | `ProcInfo.leftBehindText` (the exited app's name), empty otherwise | `.same` | Makes "left behind" a predicate field and a sortable column, for step 8. |
 
 `PredicateFields` picks them up automatically from `Column.all`.
 
 ### 2.3 Titles
 
-Apply the renames of Part 1 to column titles (`coalition` → "Resource coalition", `ipc` → "Instr/cycle", `waiting` → "Runnable wait"). `PredicateFields.lookup` is keyed by both title and id, so old ids keep working in saved predicates; a predicate typed with an old title will stop resolving. That is acceptable while the feature is unreleased.
+Apply the renames of Part 1 to column titles (`ipc` → "Instr/cycle", `waiting` → "Runnable wait") and the glossed terms. A column header is narrow, so the title is the plain phrase and the term leads the tooltip: `coalition` → "Accounting group", `jetsam` → "Memory-kill group", `jetsamBand` → "Memory-kill band", `machRepliesOwed` stays "Replies owed". The Column Manager, which has room, lists the full bracketed label. `PredicateFields.lookup` is keyed by both title and id, so old ids keep working in saved predicates; a predicate typed with an old title will stop resolving. That is acceptable while the feature is unreleased.
 
 ### 2.4 Tooltips
 
@@ -141,7 +158,7 @@ File: `Sources/ProcXRay/SmartTree.swift`. The two-pass design (attach to an owne
 - **Vendor splits some kinds and not others.** Background apps and services divide into Apple and third-party; Extensions does not. Extensions is the second-largest category (104 rows) and is 84 % Apple, so the third-party extensions a user would look for are buried.
 - **System interface is misnamed.** `category(ofRoot:)` sends every Apple process with LS type `UIElement` *or* `BackgroundOnly` there. `BackgroundOnly` means no UI (`chronod`, `sharingd`, `universalaccessd`).
 - **The biggest category has no structure.** System services holds 535 of 939 processes as one flat list, while Third-party services (16 processes) is split into Agents and Daemons.
-- **Invented labels.** "No Dock icon" and "Background only" stand for the LS types `UIElement` and `BackgroundOnly`.
+- **Labels without their term.** "No Dock icon" and "Background only" stand for the LS types `UIElement` and `BackgroundOnly`, but nothing on screen says so, and "Background only" beside the category "Background apps" and the sidebar's "Background Items" reads as a third meaning of the same word.
 
 ### 3.2 New rules
 
@@ -160,7 +177,7 @@ File: `Sources/ProcXRay/SmartTree.swift`. The two-pass design (attach to an owne
 
 | Category | Sub-groups |
 |---|---|
-| Background apps | **`UIElement`**, **`BackgroundOnly`** (the LS type, verbatim) |
+| Background apps | **No Dock icon (UIElement)**, **No UI (BackgroundOnly)** |
 | Extensions | Extension point title (unchanged) |
 | Third-party services | Daemons, Agents (unchanged rule) |
 | System services | **Extensions** (`isExtension`), **Daemons**, **Agents** (same rule as Third-party services; see decision D2) |
@@ -293,10 +310,10 @@ New cards, in this order:
 | Lineage | Parent chain as one line, root first (`kernel_task › launchd › firefox`); Responsible; Requested by (the launch-log hops); Parent app (LS `parentASN`); Loaded on behalf of (launchd's attribution); Inherited environment (Claude session, terminal, working directory) | Parent chain, Responsible, and the "who" parts of Attribution and Launched by |
 | Mechanism | One row per `LaunchMechanism` line (how it was started), and "Started because" (launchd's `immediate reason`) | Attribution, Launched by |
 | launchd job | Label, Domain, Type, Properties, Runs / last exit, Plist path, Registered by (SMAppService), pid-domain host; then the collapsed raw `launchctl print` and `launchctl procinfo` | Launched by |
-| LaunchServices | Name, Type, ASN, State tags; then the collapsed raw record | Launched by |
+| LaunchServices | Name, Type (glossed: "No Dock icon (UIElement)"), LaunchServices instance (ASN), State tags; then the collapsed raw record | Launched by |
 | Background item | Item, Developer, State, Type, Parent item | Installed by |
 | Extension | Extension point, Containing app | Launched by |
-| Related | Children, Responsible for, In its pid domain, Same resource coalition, Same jetsam coalition, Same bundle, Same cdhash, Same team | Related processes, plus "Same team" from Trust |
+| Related | Children, Responsible for, In its launchd domain (pid domain), Same accounting group (resource coalition), Same memory-kill group (jetsam coalition), Same bundle, Same binary (cdhash), Same team | Related processes, plus "Same team" from Trust |
 
 A card whose record does not exist is not drawn as a sentence. Instead the tab ends with one row: `Not registered with: Background Items, LaunchServices`. This replaces "No Background Items record for this executable or label.", "Not the main process of a launchd job in your domains, not a LaunchServices app." and "Parent is launchd: launchd started it (a launchd job or an app launch), or the process that started it has exited."
 
@@ -306,7 +323,8 @@ The grouping is sound. Changes:
 
 - Rename the "Runtime hardening" card to "Hardened process (kernel)". It sits under a headline that can read "…, hardened runtime" and then says "0 of 5 … not a hardened process": two different mechanisms with near-identical names.
 - In that card, move each row's sentence ("security-critical settings for the system memory allocator") to the row's tooltip, and give the status glyph a text value (`on` / `off`) so it is not a bare circle.
-- Rename the "Privacy & Security" card to "TCC".
+- Rename the "Privacy & Security" card to "Privacy permissions (TCC)".
+- Signature row "CDHash" becomes "Code hash (cdhash)".
 - "Same team" moves to Launch ▸ Related.
 - Signature rows: rename "Valid now" to "Valid", "Requirement" to "Designated requirement".
 
@@ -387,7 +405,8 @@ Move these into the UI proper (a column, a row or a detail line):
 
 - Name-column badges `SBX`, `LEFT`: spell them `sandboxed`, `left behind`, or drop `SBX` in favour of the Sandboxed column (decision D5).
 - `†` before an exited responsible: write `exited` after the name instead.
-- LS state tags such as `!signalled`: keep verbatim (they are lsappinfo's own), but the column tooltip says so.
+- LS state tags such as `!signalled`: keep verbatim (they are values, and lsappinfo's own), but the column tooltip says so.
+- Every other bare system term in a label gets its plain phrase, per "Glossed terms" in Part 1.
 
 ### 7.5 One name per command
 
@@ -505,6 +524,7 @@ Steps 1–7 touch the process list only; 8–13 the inspector; 14–17 the windo
 | D5 | `SBX` badge on the Name column | Remove; the Sandboxed column and the header say it, and about two thirds of all processes carry it (624 of 946 in the `--tree-stats` run) | Spell out as `sandboxed` |
 | D6 | Sidebar name of the Left Behind filter | Keep "Left Behind" | "Orphans": shorter, but in Unix it means reparented to launchd, which is not the test used here |
 | D7 | Top-level categories | Keep seven and fix the rules (Part 3) | Merge System interface, System services and Apple extensions under one "macOS" category with sub-groups |
+| D8 | Glossing values, not only labels | Table cells show the system's value verbatim (`UIElement`); labels everywhere and values in inspector rows are glossed | Gloss cell values too. Wider columns, and the cell no longer reads the same as the predicate that matches it |
 
 ## 11. Out of scope
 
