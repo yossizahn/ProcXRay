@@ -30,7 +30,7 @@ struct InspectorView: View {
             Group {
                 switch tab.wrappedValue {
                 case .info: InfoTab(proc: proc, exited: exited, sign: sign)
-                case .launch: OriginTab(proc: proc, exited: exited)
+                case .launch: LaunchTab(proc: proc, exited: exited)
                 case .security: TrustTab(proc: proc, sign: sign, exited: exited)
                 case .usage: UsageTab(proc: proc, exited: exited)
                 case .threads: ThreadsView(proc: proc, exited: exited)

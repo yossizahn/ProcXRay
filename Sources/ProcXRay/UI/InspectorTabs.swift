@@ -735,10 +735,11 @@ extension View {
     func readsNetwork() -> some View { modifier(ReadsNetwork()) }
 }
 
-// MARK: - Origin
+// MARK: - Launch
 
-/// Why is it running, and who does it belong to: a chain read top to bottom, then the reverse relations.
-struct OriginTab: View {
+/// Who it belongs to and how it was started: lineage, mechanism, then each registry's record, then the
+/// processes related to it.
+struct LaunchTab: View {
     @Environment(Store.self) var store
     let proc: ProcInfo
     var exited = false
@@ -751,11 +752,13 @@ struct OriginTab: View {
 
     var body: some View {
         let p = proc
+        let ls = store.lsApps.first { $0.pid == p.pid }
+        let jobNodes = job.map { LaunchctlParser.parse($0.text) } ?? []
+        let jobFacts = Dictionary(jobNodes.map { ($0.key, $0.value ?? "") }, uniquingKeysWith: { a, _ in a })
+        let item = store.btmLoaded ? btmItem(p) : nil
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                installedBy(p)
-                launchedBy(p)
-                attribution(p)
+                lineage(p, ls: ls)
                     // launchd's attribution record costs ~2 s (see LaunchdAttribution): once per job shown, not per refresh.
                     .task(id: "\(p.key)|\(p.launchdLabel ?? "")") {
                         guard !exited, p.ppid == 1, let label = p.launchdLabel, !label.hasPrefix("application."),
@@ -765,15 +768,20 @@ struct OriginTab: View {
                         guard !Task.isCancelled else { return }
                         launchdAttr = (key, r)
                     }
-                Card(title: "Parent chain", systemImage: "arrow.up.to.line") {
-                    let chain = ancestors(p)
-                    if chain.isEmpty { Text("No running parent.").foregroundStyle(.secondary) } else { ChipFlow(procs: chain) }
-                }
-                Card(title: "Responsible", systemImage: "person.crop.square") {
-                    if let rp = store.responsibleProcess(p) { ProcessChip(proc: rp) }
-                    else { Text(store.responsibleDescription(p)).foregroundStyle(.secondary).textSelection(.enabled) }
+                mechanism(p, ls: ls, jobFacts: jobFacts)
+                if p.launchdLabel != nil || p.domainOwner != nil { launchdJob(p, nodes: jobNodes, top: jobFacts) }
+                if let ls { launchServices(ls) }
+                if let item { backgroundItem(item) }
+                if let e = p.extensionPoint {
+                    Card(title: "Extension", systemImage: "puzzlepiece.extension") {
+                        FactGrid(rows: [
+                            ("Extension point", .text("\(ExtensionInfo.title(e))  (\(e))")),
+                            ("Containing app", .text(p.containingAppName ?? "—")),
+                        ])
+                    }
                 }
                 relations(p)
+                unregistered(p, ls: ls, item: item)
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -797,134 +805,42 @@ struct OriginTab: View {
         }
     }
 
-    // 1. Installed by: the Background Task Management record, matched exactly on executable path or label.
-    @ViewBuilder private func installedBy(_ p: ProcInfo) -> some View {
-        Card(title: "Installed by", systemImage: "shippingbox") {
-            if !store.btmLoaded {
-                HStack {
-                    Text("Background Items aren't loaded.").foregroundStyle(.secondary)
-                    Button(store.btmLoading ? "Loading…" : "Load") { store.loadBTM() }
-                        .controlSize(.small).disabled(store.btmLoading)
-                        .help(store.helperState.isRunning ? "Reads `sfltool dumpbtm` through the helper."
-                                                          : "Runs `sfltool dumpbtm`, which asks for an administrator password.")
-                }
-            } else if let item = btmItem(p) {
-                FactGrid(rows: [
-                    ("Item", .text(item.name)),
-                    ("Developer", .text([item.developer, item.teamID].filter { !$0.isEmpty }.joined(separator: " · ").ifEmpty("—"))),
-                    ("State", .text((item.enabled ? "enabled" : "disabled") + ", " + (item.allowed ? "allowed" : "not allowed"))),
-                    ("Type", .text(item.type)),
-                    ("Parent item", .text(item.parent.ifEmpty("—"))),
-                ])
-            } else {
-                Text("No Background Items record for this executable or label.").foregroundStyle(.secondary)
+    /// A label and its value, for cards whose values are views rather than text.
+    private struct Row<V: View>: View {
+        let label: String
+        @ViewBuilder let value: V
+        init(_ label: String, @ViewBuilder value: () -> V) { self.label = label; self.value = value() }
+        var body: some View {
+            GridRow(alignment: .firstTextBaseline) {
+                Text(label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                VStack(alignment: .leading, spacing: 2) { value }
             }
         }
     }
 
-    private func btmItem(_ p: ProcInfo) -> BTMItem? {
-        store.btm.first { item in
-            (p.path != nil && item.executable == p.path)
-                || (p.launchdLabel != nil && (item.identifier == p.launchdLabel || item.identifier.hasSuffix("." + p.launchdLabel!)))
-        }
-    }
-
-    // 2. Launched by: the launchd job, LaunchServices, or the extension point.
-    @ViewBuilder private func launchedBy(_ p: ProcInfo) -> some View {
-        Card(title: "Launched by", systemImage: "bolt.horizontal") {
-            VStack(alignment: .leading, spacing: 8) {
-                // Who actually spawned it. Registering with LaunchServices (below) says nothing about this:
-                // every app checks in on startup, however it was started.
-                if p.ppid > 1, let parent = store.procs[p.ppid] {
-                    HStack(spacing: 6) {
-                        Text("Started directly by")
-                        ProcessChip(proc: parent)
-                        Text("(its parent process)").foregroundStyle(.secondary)
-                    }
-                } else if p.ppid == 1 {
-                    Text("Parent is launchd: launchd started it (a launchd job or an app launch), or the process that started it has exited.")
-                        .foregroundStyle(.secondary)
-                }
-                if let ls = store.lsApps.first(where: { $0.pid == p.pid }) {
-                    Text("Registered with LaunchServices as the app \u{201C}\(ls.name)\u{201D} (\(ls.type ?? "?")).")
-                    Collapsible(title: "LaunchServices record", startsOpen: false) { LSRecordContent(raw: ls.raw, filter: "") }
-                }
-                if let e = p.extensionPoint {
-                    Text("App extension for \(ExtensionInfo.title(e)) (\(e))\(p.containingAppName.map { ", inside \($0)" } ?? "").")
-                }
-                if let o = p.domainOwner, let host = store.procs[o] {
-                    HStack(spacing: 6) {
-                        Text("Started by launchd for")
-                        ProcessChip(proc: host)
-                        Text("(runs in its pid domain)").foregroundStyle(.secondary)
-                    }
-                    .help("launchctl print pid/\(o) lists this process among the services it launched.")
-                }
-                if let label = p.launchdLabel {
-                    let nodes = job.map { LaunchctlParser.parse($0.text) } ?? []
-                    let top = Dictionary(nodes.map { ($0.key, $0.value ?? "") }, uniquingKeysWith: { a, _ in a })
-                    FactGrid(rows: [
-                        ("launchd job", .text(label)),
-                        ("Domain", .text(p.launchdDomain ?? top["domain"] ?? "—")),
-                        ("Type", .text(top["type"] ?? "—")),
-                        ("Properties", .text(top["properties"] ?? "—")),
-                        ("Runs / last exit", .text("\(top["runs"] ?? "—") / \(top["last exit code"] ?? "—")")),
-                        ("Started because", .text(top["immediate reason"].map(Self.reasonText) ?? "—")),
-                    ])
-                    // Set by launchd only for jobs an app registered through SMAppService.
-                    if let bid = top["parent bundle identifier"], !bid.isEmpty {
-                        HStack(spacing: 6) {
-                            Text("Registered by the app")
-                            if let a = store.lsApps.first(where: { $0.bundleID == bid && $0.pid != nil }),
-                               let host = store.procs[a.pid!] { ProcessChip(proc: host) }
-                            Text(bid).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
-                        }
-                        .help("launchctl print: parent bundle identifier (an SMAppService registration).")
-                    }
-                    if let plist = top["path"], !plist.isEmpty {
-                        PathText(path: plist)
-                    }
-                    if let job {
-                        Collapsible(title: job.title, startsOpen: false) {
-                            if nodes.count > 1 { KVTreeContent(nodes: nodes, filter: "") } else { Text(job.text).foregroundStyle(.secondary) }
-                        }
-                    }
-                } else if store.lsApps.first(where: { $0.pid == p.pid }) == nil, p.extensionPoint == nil, p.domainOwner == nil {
-                    Text("Not the main process of a launchd job in your domains, not a LaunchServices app.")
-                        .foregroundStyle(.secondary)
-                }
-                if let procinfo {
-                    Collapsible(title: procinfo.title, startsOpen: false) {
-                        let n = LaunchctlParser.parse(procinfo.text)
-                        if n.count > 1 { KVTreeContent(nodes: n, filter: "") } else { Text(procinfo.text).foregroundStyle(.secondary) }
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Attribution: how it was launched and who asked, each with where that comes from.
-    @ViewBuilder private func attribution(_ p: ProcInfo) -> some View {
+    // Lineage: who it belongs to.
+    @ViewBuilder private func lineage(_ p: ProcInfo, ls: LSApp?) -> some View {
         let record = LaunchWatcher.shared.record(pid: p.pid, start: p.start)
-        let ls = store.lsApps.first { $0.pid == p.pid }
         let parentApp = ls?.parentASNID.flatMap { id in store.lsApps.first { $0.asn == id } }
         let env = p.ppid == 1 ? envAttr : nil
-        let jobFacts = job.map { Dictionary(LaunchctlParser.parse($0.text).map { ($0.key, $0.value ?? "") }, uniquingKeysWith: { a, _ in a }) } ?? [:]
-        let mechanisms = LaunchMechanism.describe(ppid: p.ppid, parentName: store.procs[p.ppid]?.name, record: record,
-                                                  parentASN: ls?.parentASN ?? parentApp?.name, env: env, launchdLabel: p.launchdLabel,
-                                                  job: jobFacts)
-        Card(title: "Attribution", systemImage: "point.3.connected.trianglepath.dotted") {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(mechanisms, id: \.self) { m in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(verbatim: m.how).fontWeight(.medium)
-                        if let d = m.detail { Text(verbatim: d).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
-                        sourceLine(m.source, m.confidence)
+        Card(title: Column.Section.lineage.title, systemImage: "arrow.up.to.line") {
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+                Row("Parent chain") {
+                    // Root first: kernel_task › launchd › … › this process.
+                    FlowLayout(spacing: 4) {
+                        ForEach(ancestors(p).reversed(), id: \.key) { a in
+                            ProcessChip(proc: a)
+                            Text("›").foregroundStyle(.tertiary)
+                        }
+                        Text(p.name).fontWeight(.medium)
                     }
                 }
+                Row("Responsible") {
+                    if let rp = store.responsibleProcess(p) { ProcessChip(proc: rp) }
+                    else { Text(store.responsibleDescription(p)).foregroundStyle(.secondary).textSelection(.enabled) }
+                }
                 if let r = record, !r.launcher.isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Requested by").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Row("Requested by") {
                         FlowLayout(spacing: 4) {
                             ForEach(Array(r.launcher.enumerated()), id: \.offset) { i, hop in
                                 if i > 0 { Text("←").foregroundStyle(.tertiary) }
@@ -937,23 +853,159 @@ struct OriginTab: View {
                     }
                 }
                 if let parentApp, let pid = parentApp.pid, let host = store.procs[pid] {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) { Text("Parent app"); ProcessChip(proc: host) }
+                    Row("Parent app") {
+                        ProcessChip(proc: host)
                         sourceLine("LaunchServices parentASN \(parentApp.asn)", .exact)
                     }
                 }
-                if p.ppid == 1, let label = p.launchdLabel, !label.hasPrefix("application.") { launchdAttribution(label, p) }
-                if let e = env, e.fromShell { envRows(e, p) }
-                if mechanisms.isEmpty && record == nil && env == nil {
-                    Text("Nothing records how this process was started.").foregroundStyle(.secondary)
+                if p.ppid == 1, let label = p.launchdLabel, !label.hasPrefix("application.") {
+                    Row("Loaded on behalf of") { launchdAttribution(label, p) }
                 }
-                if p.ppid == 1, record == nil {
-                    Text(LaunchWatcher.shared.since.map { "Launches are traced from \(Fmt.date.string(from: $0)) (when Proc X-Ray started); this one wasn't seen." }
-                         ?? "Launch tracing isn't running.")
-                        .font(.caption).foregroundStyle(.tertiary)
+                if let e = env, e.fromShell {
+                    Row("Inherited environment") { envRows(e, p) }
                 }
             }
         }
+    }
+
+    // Mechanism: how it was started.
+    @ViewBuilder private func mechanism(_ p: ProcInfo, ls: LSApp?, jobFacts: [String: String]) -> some View {
+        let record = LaunchWatcher.shared.record(pid: p.pid, start: p.start)
+        let parentApp = ls?.parentASNID.flatMap { id in store.lsApps.first { $0.asn == id } }
+        let env = p.ppid == 1 ? envAttr : nil
+        let mechanisms = LaunchMechanism.describe(ppid: p.ppid, parentName: store.procs[p.ppid]?.name, record: record,
+                                                  parentASN: ls?.parentASN ?? parentApp?.name, env: env, launchdLabel: p.launchdLabel,
+                                                  job: jobFacts)
+        Card(title: "Mechanism", systemImage: "bolt.horizontal") {
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+                ForEach(mechanisms, id: \.self) { m in
+                    Row("How") {
+                        Text(verbatim: m.how).fontWeight(.medium)
+                        if let d = m.detail { Text(verbatim: d).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+                        sourceLine(m.source, m.confidence)
+                    }
+                }
+                if mechanisms.isEmpty {
+                    Row("How") { Text("—").foregroundStyle(.secondary).help("Nothing records how this process was started.") }
+                }
+                if let reason = jobFacts["immediate reason"] {
+                    Row("Started because") { Text(Self.reasonText(reason)).textSelection(.enabled) }
+                }
+            }
+            if p.ppid == 1, record == nil {
+                Text(LaunchWatcher.shared.since.map { "Launch log traced from \(Fmt.date.string(from: $0)); this launch wasn't seen." }
+                     ?? "Launch tracing isn't running.")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    // The launchd job: its record, then the raw launchctl output.
+    @ViewBuilder private func launchdJob(_ p: ProcInfo, nodes: [KVNode], top: [String: String]) -> some View {
+        Card(title: "launchd job", systemImage: "gearshape.2") {
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                if let label = p.launchdLabel {
+                    Row("Label") { Text(label).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
+                    Row("Domain") { Text(p.launchdDomain ?? top["domain"] ?? "—") }
+                    Row("Type") { Text(top["type"] ?? "—") }
+                    Row("Properties") { Text(top["properties"] ?? "—").textSelection(.enabled) }
+                    Row("Runs / last exit") { Text("\(top["runs"] ?? "—") / \(top["last exit code"] ?? "—")") }
+                    if let plist = top["path"], !plist.isEmpty { Row("Plist") { PathText(path: plist) } }
+                    // Set by launchd only for jobs an app registered through SMAppService.
+                    if let bid = top["parent bundle identifier"], !bid.isEmpty {
+                        Row("Registered by (SMAppService)") {
+                            HStack(spacing: 6) {
+                                if let a = store.lsApps.first(where: { $0.bundleID == bid && $0.pid != nil }),
+                                   let host = store.procs[a.pid!] { ProcessChip(proc: host) }
+                                Text(bid).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+                if let o = p.domainOwner, let host = store.procs[o] {
+                    Row("Per-process launchd domain (pid domain)") {
+                        ProcessChip(proc: host)
+                            .help("launchctl print pid/\(o) lists this process among the services it launched.")
+                    }
+                }
+            }
+            if let job {
+                Collapsible(title: job.title, startsOpen: false) {
+                    if nodes.count > 1 { KVTreeContent(nodes: nodes, filter: "") } else { Text(job.text).foregroundStyle(.secondary) }
+                }
+            }
+            if let procinfo {
+                Collapsible(title: procinfo.title, startsOpen: false) {
+                    let n = LaunchctlParser.parse(procinfo.text)
+                    if n.count > 1 { KVTreeContent(nodes: n, filter: "") } else { Text(procinfo.text).foregroundStyle(.secondary) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func launchServices(_ ls: LSApp) -> some View {
+        Card(title: "LaunchServices", systemImage: "app.badge") {
+            FactGrid(rows: [
+                ("Name", .text(ls.name)),
+                ("Type", .text(ls.type.map(Self.lsTypeLabel) ?? "—")),
+                ("LaunchServices instance (ASN)", .text(ls.asn)),
+                ("State tags", .text(ls.stateTags.joined(separator: " ").ifEmpty("—"))),
+            ])
+            Collapsible(title: "lsappinfo record", startsOpen: false) { LSRecordContent(raw: ls.raw, filter: "") }
+        }
+    }
+
+    /// An LS type with its plain phrase: "No Dock icon (UIElement)".
+    static func lsTypeLabel(_ t: String) -> String {
+        switch t {
+        case "Foreground": "Dock icon (Foreground)"
+        case "UIElement": "No Dock icon (UIElement)"
+        case "BackgroundOnly": "No UI (BackgroundOnly)"
+        default: t
+        }
+    }
+
+    @ViewBuilder private func backgroundItem(_ item: BTMItem) -> some View {
+        Card(title: "Background item (BTM)", systemImage: "shippingbox") {
+            FactGrid(rows: [
+                ("Item", .text(item.name)),
+                ("Developer", .text([item.developer, item.teamID].filter { !$0.isEmpty }.joined(separator: " · ").ifEmpty("—"))),
+                ("State", .text((item.enabled ? "enabled" : "disabled") + ", " + (item.allowed ? "allowed" : "not allowed"))),
+                ("Type", .text(item.type)),
+                ("Parent item", .text(item.parent.ifEmpty("—"))),
+            ])
+        }
+    }
+
+    private func btmItem(_ p: ProcInfo) -> BTMItem? {
+        store.btm.first { item in
+            (p.path != nil && item.executable == p.path)
+                || (p.launchdLabel != nil && (item.identifier == p.launchdLabel || item.identifier.hasSuffix("." + p.launchdLabel!)))
+        }
+    }
+
+    /// One row for the registries that have no record of it, instead of a sentence per missing card.
+    @ViewBuilder private func unregistered(_ p: ProcInfo, ls: LSApp?, item: BTMItem?) -> some View {
+        let missing = [p.launchdLabel == nil && p.domainOwner == nil ? "launchd" : nil,
+                       ls == nil ? "LaunchServices" : nil,
+                       store.btmLoaded && item == nil ? "Background Items" : nil].compactMap { $0 }
+        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+            if !missing.isEmpty {
+                Row("Not registered with") { Text(missing.joined(separator: ", ")) }
+            }
+            if !store.btmLoaded {
+                Row("Background item") {
+                    HStack(spacing: 6) {
+                        Text("not loaded").foregroundStyle(.secondary)
+                        Button(store.btmLoading ? "Loading…" : "Load") { store.loadBTM() }
+                            .controlSize(.small).disabled(store.btmLoading)
+                            .help(store.helperState.isRunning ? "Reads `sfltool dumpbtm` through the helper."
+                                                              : "Runs `sfltool dumpbtm`, which asks for an administrator password.")
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 10)
     }
 
     /// The app launchd attributes the job to: whose coalition loaded it.
@@ -1064,15 +1116,19 @@ struct OriginTab: View {
         let sameBundle = bundle.map { b in all.filter { $0.bundlePath == b && $0.pid != p.pid }.sorted(by: byPid) } ?? []
         let sameBinary = p.cdhash.map { h in all.filter { $0.cdhash == h && $0.pid != p.pid }.sorted(by: byPid) } ?? []
         let hosted = all.filter { $0.domainOwner == p.pid && $0.pid != p.pid }.sorted(by: byPid)
-        Card(title: "Related processes", systemImage: "circle.grid.cross") {
+        let team = store.signInfo(for: p)?.teamID.map { t in
+            all.filter { $0.pid != p.pid && store.signInfo(for: $0)?.teamID == t }.sorted(by: byPid)
+        } ?? []
+        Card(title: "Related", systemImage: "circle.grid.cross") {
             VStack(alignment: .leading, spacing: 8) {
                 group("Children", children)
                 group("Responsible for", attributed)
-                if !hosted.isEmpty { group("Running in its pid domain", hosted) }
-                group("Same resource coalition", coal)
-                group("Same jetsam coalition, other resource coalitions", jet)
-                group("Same app bundle", sameBundle)
-                group("Same binary (same CDHash)", sameBinary)
+                if !hosted.isEmpty { group("In its launchd domain (pid domain)", hosted) }
+                group("Same accounting group (resource coalition)", coal)
+                group("Same memory-kill group (jetsam coalition), other accounting groups", jet)
+                group("Same bundle", sameBundle)
+                group("Same binary (cdhash)", sameBinary)
+                group("Same team" + (store.signInfo(for: p)?.teamID.map { " (\($0))" } ?? ""), team)
             }
         }
     }
@@ -1128,9 +1184,6 @@ struct TrustTab: View {
         let verdict = TrustVerdict(s)
         let dict: [String: Any] = s.entitlementsXML.flatMap { $0.data(using: .utf8) }
             .flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] } ?? [:]
-        let team = s.teamID.map { t in
-            store.procs.values.filter { $0.pid != proc.pid && store.signInfo(for: $0)?.teamID == t }.sorted { $0.pid < $1.pid }
-        } ?? []
         return ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Label(verdict.long, systemImage: s.unsigned || s.valid == false ? "xmark.seal" : "checkmark.seal")
@@ -1142,9 +1195,6 @@ struct TrustTab: View {
                 SandboxCard(proc: proc, exited: exited, entitlements: dict)
                 TCCCard(proc: proc, responsible: store.responsibleProcess(proc), entitlements: dict)
                 entitlements(dict, platform: s.isPlatform || s.isAppleSigned)
-                if !team.isEmpty, let t = s.teamID {
-                    Card(title: "Same team (\(t))", systemImage: "person.3", trailing: "\(team.count)") { ChipFlow(procs: team) }
-                }
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
