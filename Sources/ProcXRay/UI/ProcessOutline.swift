@@ -11,9 +11,10 @@ struct ProcessOutline: NSViewRepresentable {
     let store: Store
     let grouping: Grouping
     let filter: String
-    var chips: Set<FilterChip> = []
-    /// The search text and chips together: what decides whether groups open to show matches.
-    var filterKey: String { chips.isEmpty ? filter : filter + "\u{1}" + FilterChip.encode(chips) }
+    /// The filter predicate's source (PredicateCompiler); "" for none.
+    var predicate: String = ""
+    /// The search text and predicate together: what decides whether groups open to show matches.
+    var filterKey: String { predicate.isEmpty ? filter : filter + "\u{1}" + predicate }
     @Binding var selection: ProcNode.ID?
     /// nil: no column sort, the chosen grouping in its natural order (by pid). See ProcessesView.savedSort.
     @Binding var sort: ColumnSort?
@@ -353,7 +354,8 @@ struct ProcessOutline: NSViewRepresentable {
             defer { updating = false }
             syncSortIndicators(outline)
             syncShown(outline)
-            let nodes = parent.store.nodes(grouping: parent.grouping, filter: parent.filter, chips: parent.chips, sort: parent.sort ?? .pid,
+            let nodes = parent.store.nodes(grouping: parent.grouping, filter: parent.filter,
+                                           predicate: parent.predicate, sort: parent.sort ?? .pid,
                                            columns: parent.shownColumns)
             procs = parent.store.procs
             if parent.store.nodesVersion != appliedVersion {

@@ -1,7 +1,6 @@
 import Foundation
 
-/// Quick filters above the process tree. They combine with the search text and with each other (all must
-/// hold), and are judged on process rows only: a group stays when any process under it passes.
+/// Quick filters above the process tree: presets that add a clause to the filter predicate (PredicateBar).
 enum FilterChip: String, CaseIterable, Identifiable, Sendable {
     case recent, nonAppleRoot, unsigned, notSandboxed, rosetta, busy, notResponding
 
@@ -29,21 +28,23 @@ enum FilterChip: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    func matches(_ p: ProcInfo, now: Date) -> Bool {
+    /// What the chip adds to the predicate. Clicking the chip adds this clause with `and`, or takes it out.
+    var source: String {
         switch self {
-        case .recent: now.timeIntervalSince(p.start) < 300
-        case .nonAppleRoot: p.uid == 0 && p.pid != 0 && !SmartTree.isApple(p)
-        case .unsigned: p.signer == "unsigned" || p.signer == "ad-hoc"
-        case .notSandboxed: p.sandboxed == false
-        case .rosetta: p.isTranslated
-        case .busy: (p.cpuPercent ?? 0) > 5
-        case .notResponding: p.notResponding
+        case .recent: "started < 5m"
+        case .nonAppleRoot: "uid == 0 and not apple"
+        case .unsigned: "signer in (unsigned, ad-hoc)"
+        case .notSandboxed: "sandboxed == no"
+        case .rosetta: "rosetta"
+        case .busy: "cpu > 5"
+        case .notResponding: "hung"
         }
     }
 
-    /// Persisted as a comma-separated list of raw values.
-    static func parse(_ s: String) -> Set<FilterChip> { Set(s.split(separator: ",").compactMap { FilterChip(rawValue: String($0)) }) }
-    static func encode(_ c: Set<FilterChip>) -> String { allCases.filter(c.contains).map(\.rawValue).joined(separator: ",") }
+    /// The chips an older version saved as a set ("recent,busy"), as a predicate.
+    static func migrate(_ s: String) -> String {
+        allCases.filter { s.split(separator: ",").map(String.init).contains($0.rawValue) }.map(\.source).joined(separator: " and ")
+    }
 }
 
 enum TreeExtras {
@@ -106,17 +107,17 @@ enum TreeExtras {
         return out + mapped.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
     }
 
-    // MARK: Pruning by search text and chips
+    // MARK: Pruning by search text, chips and the filter predicate
 
-    /// Without chips, as before: a row matching the text keeps its whole subtree. With chips, a process row
-    /// must also pass every chip, and groups keep only the rows under them that do.
-    static func prune(_ nodes: [ProcNode], text: String, chips: Set<FilterChip>, now: Date) -> [ProcNode] {
+    /// Without `keep` (no predicate), as before: a row matching the text keeps its whole subtree.
+    /// With it, a process row must also pass `keep`, and groups keep only the rows under them that do.
+    static func prune(_ nodes: [ProcNode], text: String, keep: ((ProcInfo) -> Bool)?) -> [ProcNode] {
         nodes.compactMap { n in
-            if chips.isEmpty, !text.isEmpty, n.matches(text) { return n }
-            let kept = n.children.map { prune($0, text: text, chips: chips, now: now) } ?? []
+            if keep == nil, !text.isEmpty, n.matches(text) { return n }
+            let kept = n.children.map { prune($0, text: text, keep: keep) } ?? []
             let selfPasses: Bool = {
-                guard !chips.isEmpty, let p = n.proc else { return false }
-                return (text.isEmpty || n.matches(text)) && chips.allSatisfy { $0.matches(p, now: now) }
+                guard let keep, let p = n.proc else { return false }
+                return (text.isEmpty || n.matches(text)) && keep(p)
             }()
             if kept.isEmpty && !selfPasses { return nil }
             var m = n

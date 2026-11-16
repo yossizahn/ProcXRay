@@ -286,8 +286,12 @@ final class Store {
     @ObservationIgnored var kindCache: (gen: Int, map: [pid_t: String], roots: [pid_t: pid_t])?
     /// Bumps each time nodes() actually rebuilds, so views can skip work when it returned the cached tree.
     @ObservationIgnored private(set) var nodesVersion = 0
-    @ObservationIgnored private var nodesCache: (gen: Int, grouping: Grouping, filter: String, chips: Set<FilterChip>,
-                                                 sort: ColumnSort, columns: Set<String>, nodes: [ProcNode])?
+    @ObservationIgnored private var nodesCache: (gen: Int, grouping: Grouping, filter: String,
+                                                 predicate: String, sort: ColumnSort, columns: Set<String>, nodes: [ProcNode])?
+    /// Filter predicates compiled so far, by trimmed source (nil: doesn't parse). See predicate(_:).
+    @ObservationIgnored var compiledPredicates: [String: PredicateFields.Compiled?] = [:]
+    /// The extra reads the filter predicate's fields need, read as if their columns were shown.
+    @ObservationIgnored var predicateReads: ExtraReads = []
 
     private(set) var signCache: [String: SignInfo] = [:]
     /// Each process's command line, by codeKey: read once per process (and again after it execs), since
@@ -469,7 +473,7 @@ final class Store {
         let argv = argvCache
         let jobParents = jobParentCache
         let hosts = domainHostOf
-        let extras = extraReads.union(networkViewers > 0 ? .network : []).union(jetsamViewers > 0 ? .jetsam : [])
+        let extras = extraReads.union(predicateReads).union(networkViewers > 0 ? .network : []).union(jetsamViewers > 0 ? .jetsam : [])
         let useHelper = helperState.isRunning
         let readSlow = full || ticksSinceSlow + 1 >= Self.slowEvery || lsApps.isEmpty
         ticksSinceSlow = readSlow ? 0 : ticksSinceSlow + 1
@@ -910,18 +914,20 @@ final class Store {
     }
 
     /// `columns`: the shown columns, whose group-row values are worked out (the others cost nothing).
-    func nodes(grouping: Grouping, filter: String, chips: Set<FilterChip> = [], sort: ColumnSort,
+    /// `predicate`: a filter in the PredicateCompiler language; one that doesn't parse filters nothing.
+    func nodes(grouping: Grouping, filter: String, predicate: String = "", sort: ColumnSort,
                columns: Set<String> = []) -> [ProcNode] {
-        if let c = nodesCache, c.gen == dataGen, c.grouping == grouping, c.filter == filter, c.chips == chips,
-           c.sort == sort, c.columns == columns { return c.nodes }
-        let out = buildNodes(grouping: grouping, filter: filter, chips: chips, sort: sort, columns: columns)
-        nodesCache = (dataGen, grouping, filter, chips, sort, columns, out)
+        if let c = nodesCache, c.gen == dataGen, c.grouping == grouping, c.filter == filter,
+           c.predicate == predicate, c.sort == sort, c.columns == columns { return c.nodes }
+        let out = buildNodes(grouping: grouping, filter: filter, predicate: self.predicate(predicate),
+                             sort: sort, columns: columns)
+        nodesCache = (dataGen, grouping, filter, predicate, sort, columns, out)
         nodesVersion &+= 1
         return out
     }
 
-    private func buildNodes(grouping: Grouping, filter: String, chips: Set<FilterChip>, sort: ColumnSort,
-                            columns: Set<String>) -> [ProcNode] {
+    private func buildNodes(grouping: Grouping, filter: String,
+                            predicate: PredicateFields.Compiled?, sort: ColumnSort, columns: Set<String>) -> [ProcNode] {
         let all = Array(procs.values)
         var roots: [ProcNode]
         switch grouping {
@@ -982,7 +988,10 @@ final class Store {
         }
         if grouping != .flat { roots = TreeExtras.collapseIdentical(roots) }
         roots = roots.map(Self.counted)
-        if !filter.isEmpty || !chips.isEmpty { roots = TreeExtras.prune(roots, text: filter, chips: chips, now: Date()) }
+        if !filter.isEmpty || predicate != nil {
+            let now = Date()
+            roots = TreeExtras.prune(roots, text: filter, keep: predicate.map { p in { p.test($0, now) } })
+        }
         let shown = Column.all.filter { columns.contains($0.id) && $0.id != "name" && $0.id != "context" }
         return sorted(roots, sort, shown: shown, sortColumn: Column.byID[sort.id], memo: ColumnMemo()).nodes
     }

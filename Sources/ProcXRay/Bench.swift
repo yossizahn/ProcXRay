@@ -638,10 +638,39 @@ enum Bench {
         }
         let now = Date()
         for c in FilterChip.allCases {
-            let n = procs.values.filter { c.matches($0, now: now) }.count
-            let shown = store.nodes(grouping: .smart, filter: "", chips: [c], sort: .pid)
+            guard let p = store.compiledPredicate(c.source) else { print("chip \(c.title): doesn't parse"); continue }
+            let n = procs.values.filter { p.test($0, now) }.count
+            let shown = store.nodes(grouping: .smart, filter: "", predicate: c.source, sort: .pid)
             print("chip \(c.title): \(n) processes; Smart tree keeps \(rows(shown)) rows")
         }
+    }
+
+    /// `ProcXRay --filter <predicate>`: the processes a filter predicate keeps, on a snapshot with CPU % and
+    /// signatures read, and what it costs per process. False when it doesn't parse.
+    @MainActor static func filter(_ source: String) -> Bool {
+        let store = Store()
+        let p: PredicateFields.Compiled?
+        do { p = try PredicateFields.compile(source, store: store) } catch let e as PredicateError {
+            print("error at \(e.offset + 1): \(e.message)")
+            return false
+        } catch { return false }
+        guard let p else { print("blank predicate"); return true }
+        let reads = PredicateFields.reads(p)
+        let s1 = Store.snapshot(prev: [:], signCache: [:], extras: reads)
+        Thread.sleep(forTimeInterval: 1)
+        var procs = Store.snapshot(prev: s1.samples, signCache: [:], extras: reads).procs
+        for (pid, q) in procs { procs[pid]!.signer = CodeSign.inspect(pid: pid, path: q.path).shortSigner }
+        store.procs = procs
+        let now = Date()
+        let t0 = Date()
+        let rounds = 20
+        var hits: [ProcInfo] = []
+        for _ in 0..<rounds { hits = procs.values.filter { p.test($0, now) } }
+        let us = -t0.timeIntervalSinceNow / Double(rounds * max(1, procs.count)) * 1e6
+        print("fields: \(p.fields.sorted().joined(separator: ", "))")
+        for h in hits.sorted(by: { $0.pid < $1.pid }) { print(String(format: "%6d  %@", h.pid, h.name)) }
+        print(String(format: "%d of %d processes; %.2f µs per process", hits.count, procs.count, us))
+        return true
     }
 
     /// `ProcXRay --extras [--root]`: what each extra read adds to a snapshot, and how many processes get a value.

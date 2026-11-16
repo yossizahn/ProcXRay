@@ -71,6 +71,9 @@ struct ProcXRayApp: App {
             }
             RunLoop.main.run()
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--filter"), i + 1 < CommandLine.arguments.count {
+            exit(Bench.filter(CommandLine.arguments[i + 1]) ? 0 : 1)
+        }
         if CommandLine.arguments.contains("--bench") {
             Bench.run()
             exit(0)

@@ -22,8 +22,14 @@ struct ProcessesView: View {
     @AppStorage(InspectorPaneKey.name) private var showPane = false
     @AppStorage(ColumnPrefs.key) private var shownColumns = ColumnPrefs.defaultShown
     @State private var search = ""
-    @AppStorage("processes.chips") private var savedChips = ""
-    private var chips: Set<FilterChip> { FilterChip.parse(savedChips) }
+    /// Chips saved by an older version, moved into the predicate once.
+    @AppStorage("processes.chips") private var oldChips = ""
+    /// The filter predicate in force (only ever one that parses; see PredicateBar).
+    @AppStorage("processes.predicate") private var predicate = ""
+    /// Saved predicates, shown as chips (SavedPredicate.encode).
+    @AppStorage(SavedPredicate.key) private var savedPredicates = ""
+    /// The predicate row was opened with its button. It also shows, whatever this says, while a predicate is on.
+    @State private var predicateOpen = false
     @State private var selection: ProcNode.ID?
     /// The column sort, or "" for none. As in Process Hacker: with no column sort the list shows the chosen
     /// grouping in its natural order; sorting by a column shows the flat list sorted by it. Clicking a header
@@ -63,9 +69,13 @@ struct ProcessesView: View {
     var body: some View {
         SplitPane(id: "processes", defaultFraction: 0.6, showsBottom: showPane) {
           VStack(spacing: 0) {
-            FilterChipBar(saved: $savedChips)
+            FilterChipBar(predicate: $predicate, predicateOpen: $predicateOpen,
+                          savedPredicates: $savedPredicates)
+            if predicateOpen || !predicate.isEmpty {
+                PredicateBar(applied: $predicate, open: $predicateOpen, saved: $savedPredicates)
+            }
             Divider()
-            ProcessOutline(store: store, grouping: shownGrouping, filter: search, chips: chips,
+            ProcessOutline(store: store, grouping: shownGrouping, filter: search, predicate: predicate,
                            selection: $selection, sort: sort, shownColumns: ColumnPrefs.parse(shownColumns),
                            onOpen: { p in inspect(p) },
                            onSignal: { p, sig, label in
@@ -76,8 +86,8 @@ struct ProcessesView: View {
                 .id(shownGrouping)
           }
         } bottom: {
-            SelectedProcessPane(selection: $selection, nav: paneNav, grouping: shownGrouping, filter: search, chips: chips,
-                                sort: sort.wrappedValue ?? .pid,
+            SelectedProcessPane(selection: $selection, nav: paneNav, grouping: shownGrouping, filter: search,
+                                predicate: predicate, sort: sort.wrappedValue ?? .pid,
                                 columns: ColumnPrefs.parse(shownColumns))
         }
         .focusedSceneValue(\.inspectProcess, hasProcessSelected ? { inspectSelected() } : nil)
@@ -117,6 +127,12 @@ struct ProcessesView: View {
             }
         }
         .navigationTitle("Processes")
+        .onAppear {
+            guard !oldChips.isEmpty else { return }
+            let old = FilterChip.migrate(oldChips)
+            if !old.isEmpty { predicate = predicate.isEmpty ? old : PredicateCompiler.toggling(old, in: predicate) }
+            oldChips = ""
+        }
         .onChange(of: AppRouter.shared.reveal, initial: true) { _, r in if let r { reveal(r.pid, tries: 4) } }
         .confirmationDialog(pendingSignal.map { "Send \($0.2) to \($0.0.name) (pid \($0.0.pid))?" } ?? "",
                             isPresented: Binding(get: { pendingSignal != nil }, set: { if !$0 { pendingSignal = nil } })) {
@@ -132,7 +148,9 @@ struct ProcessesView: View {
     /// last snapshot isn't listed yet: refresh, and try again shortly.
     private func reveal(_ pid: pid_t, tries: Int) {
         if store.procs[pid] != nil {
-            if !search.isEmpty || !chips.isEmpty { search = ""; savedChips = "" }   // never hide the target
+            if !search.isEmpty || !predicate.isEmpty {   // never hide the target
+                search = ""; predicate = ""
+            }
             selection = Int(pid)
             return
         }
@@ -171,7 +189,7 @@ struct SelectedProcessPane: View {
     let nav: InspectorNavigation
     var grouping: Grouping
     var filter: String
-    var chips: Set<FilterChip> = []
+    var predicate: String = ""
     var sort: ColumnSort
     var columns: Set<String>
 
@@ -195,7 +213,7 @@ struct SelectedProcessPane: View {
         Group {
             // Reading store.procs makes the summary follow each refresh.
             if let id = selection, id < 0, !store.procs.isEmpty,
-               let n = Self.find(id, in: store.nodes(grouping: grouping, filter: filter, chips: chips, sort: sort, columns: columns)) {
+               let n = Self.find(id, in: store.nodes(grouping: grouping, filter: filter, predicate: predicate, sort: sort, columns: columns)) {
                 GroupInspectorView(node: n).environment(\.inspectorLinks, links)
             } else if selection.map({ $0 < 0 }) == true {
                 placeholder("This group isn't in the list any more.")
@@ -260,46 +278,80 @@ struct ProcessWindow: View {
     }
 }
 
-/// The quick filters above the tree. Reads per-refresh data for its counts, so it re-renders on each tick
-/// by itself rather than making ProcessesView do so (see the note there).
+/// The quick filters above the tree: presets that add their clause to the predicate or take it out, then the
+/// saved filters, then the button that opens the predicate row. Reads per-refresh data for its counts, so it
+/// re-renders on each tick by itself rather than making ProcessesView do so (see the note there).
 struct FilterChipBar: View {
     @Environment(Store.self) var store
-    @Binding var saved: String
+    @Binding var predicate: String
+    @Binding var predicateOpen: Bool
+    @Binding var savedPredicates: String
 
     var body: some View {
-        let on = FilterChip.parse(saved)
         let now = Date()
         let procs = Array(store.procs.values)
+        let filters = SavedPredicate.parse(savedPredicates)
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(FilterChip.allCases) { c in
-                    let active = on.contains(c)
-                    let count = procs.reduce(0) { $0 + (c.matches($1, now: now) ? 1 : 0) }
-                    Button {
-                        var s = on
-                        if active { s.remove(c) } else { s.insert(c) }
-                        saved = FilterChip.encode(s)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(c.title)
-                            Text(verbatim: "\(count)").monospacedDigit().foregroundStyle(active ? Color.white.opacity(0.85) : .secondary)
-                        }
-                        .font(.system(size: 11))
-                        .padding(.horizontal, 8).frame(height: 20)
-                        .foregroundStyle(active ? Color.white : Color.primary)
-                        .background(active ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.secondary.opacity(0.12)), in: Capsule())
-                        .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .help(c.help + " Chips combine: a process must pass every chip that is on.")
-                    .accessibilityAddTraits(active ? .isSelected : [])
-                    .accessibilityValue("\(count) processes")
+                    let count = store.compiledPredicate(c.source).map { p in procs.reduce(0) { $0 + (p.test($1, now) ? 1 : 0) } }
+                    chip(c.title, icon: nil, clause: c.source, count: count,
+                         help: c.help + " Adds “\(c.source)” to the predicate; chips combine with “and”.")
                 }
-                if !on.isEmpty { Button("Clear") { saved = "" }.controlSize(.small) }
+                if !filters.isEmpty {
+                    Divider().frame(height: 14)
+                    ForEach(filters) { f in
+                        chip(f.name, icon: "bookmark", clause: f.source, count: nil, help: "Saved filter: \(f.source)")
+                            .contextMenu {
+                                Button("Delete", role: .destructive) {
+                                    savedPredicates = SavedPredicate.encode(filters.filter { $0.id != f.id })
+                                }
+                            }
+                    }
+                }
+                let on = !predicate.isEmpty
+                let open = predicateOpen || on
+                // While a predicate is on, the row stays: this does nothing then, and the row's ✕ clears it.
+                Button { if !on { predicateOpen.toggle() } } label: {
+                    Image(systemName: "line.3.horizontal.decrease")
+                        .font(.system(size: 11))
+                        .frame(width: 28, height: 20)
+                        .foregroundStyle(on ? Color.white : Color.primary)
+                        .background(on ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.secondary.opacity(open ? 0.25 : 0.12)), in: Capsule())
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(on ? "A predicate is on. Clear it with ✕ in its row."
+                         : open ? "Hide the predicate row" : "Filter with an expression, such as cpu > 5 and not sandboxed. Combines with the search.")
+                .accessibilityLabel("Predicate filter")
+                .accessibilityAddTraits(on ? .isSelected : [])
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
         }
         .frame(height: 30)
+    }
+
+    /// A chip that's on while `clause` is one of the predicate's top-level `and` clauses, however it got there.
+    private func chip(_ title: String, icon: String?, clause: String, count: Int?, help: String) -> some View {
+        let active = PredicateCompiler.contains(predicate, clause: clause)
+        return Button { predicate = PredicateCompiler.toggling(clause, in: predicate) } label: {
+            HStack(spacing: 4) {
+                if let icon { Image(systemName: icon) }
+                Text(title)
+                if let count {
+                    Text(verbatim: "\(count)").monospacedDigit().foregroundStyle(active ? Color.white.opacity(0.85) : .secondary)
+                }
+            }
+            .font(.system(size: 11))
+            .padding(.horizontal, 8).frame(height: 20)
+            .foregroundStyle(active ? Color.white : Color.primary)
+            .background(active ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.secondary.opacity(0.12)), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityAddTraits(active ? .isSelected : [])
+        .accessibilityValue(count.map { "\($0) processes" } ?? "")
     }
 }
