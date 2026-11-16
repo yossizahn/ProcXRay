@@ -399,7 +399,7 @@ enum SmartTree {
             let rp = procs[r]!
             let n = unitNode(r, ms)
             if let g = rp.leftBehindGroup {
-                ghosts[g, default: ("† \(rp.leftBehindText ?? "exited app") — exited", [])].nodes.append(n)
+                ghosts[g, default: ("\(rp.leftBehindText ?? "app") (exited)", [])].nodes.append(n)
                 continue
             }
             let c = category(ofRoot: rp)

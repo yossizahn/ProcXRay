@@ -8,7 +8,7 @@ import SwiftUI
 /// What one cell shows, and how it sorts.
 enum CellValue: Equatable, Sendable {
     case empty
-    /// Couldn't be read ("—"); sorts with `empty`, after every real value.
+    /// Couldn't be read ("?", the reason in the cell's tooltip); sorts with `empty`, after every real value.
     case unknown
     case text(String, Tint = .normal)
     case number(Double, String, Tint = .normal)
@@ -19,7 +19,7 @@ enum CellValue: Equatable, Sendable {
     var display: String {
         switch self {
         case .empty: ""
-        case .unknown: "—"
+        case .unknown: "?"
         case .text(let s, _), .number(_, let s, _), .date(_, let s): s
         }
     }
@@ -276,7 +276,7 @@ let siFormat: (Double) -> String = { v in
     if i == 0 { return String(format: "%.0f", x) }
     return String(format: x.magnitude < 9.995 ? "%.2f" : x.magnitude < 99.95 ? "%.1f" : "%.0f", x) + units[i]
 }
-private let rateNote = " Over the last refresh; — for a process's first refresh."
+private let rateNote = " Over the last refresh; ? for a process's first refresh."
 
 /// "all", "none" or "n of m" over the processes whose answer is known.
 @MainActor private func share(_ members: [ProcInfo], _ test: (ProcInfo) -> Bool?) -> CellValue {
@@ -315,7 +315,7 @@ private func state(_ p: ProcInfo) -> CellValue {
 private let catalogue: [Column] = [
     // Identity
     Column(id: "name", title: "Name",
-           help: "Process name, or a group row's title. Badges: LEFT (outlived its app), ZOMBIE, ROSETTA, SBX (sandboxed), EXITED.", source: "kinfo_proc p_comm",
+           help: "Process name, or a group row's title. Badges: LEFT BEHIND (outlived its app), ZOMBIE, ROSETTA, EXITED.", source: "kinfo_proc p_comm",
            section: .identity, minWidth: 180, width: 280, rule: .blank) { p, _ in .text(p.name) },
     Column(id: "pid", title: "PID", help: "Process ID.", source: "kinfo_proc p_pid",
            section: .identity, unitShowsRoot: true, minWidth: 44, width: 56, numeric: true, rule: .blank) { p, _ in .number(Double(p.pid), String(p.pid)) },
@@ -328,7 +328,7 @@ private let catalogue: [Column] = [
            help: "Bundle identifier of the app or extension bundle that holds the executable.", source: "lsappinfo; Info.plist CFBundleIdentifier",
            section: .identity, unitShowsRoot: true, width: 180, rule: .blank) { p, s in text(s.bundleID(of: p)) },
     Column(id: "commandLine", title: "Command line",
-           help: "The arguments the process was started with (argv), read once per process; — when they couldn't be read.", source: "sysctl KERN_PROCARGS2",
+           help: "The arguments the process was started with (argv), read once per process; ? when they couldn't be read.", source: "sysctl KERN_PROCARGS2",
            section: .identity, unitShowsRoot: true, needs: "helper, for other users' processes", minWidth: 120, width: 360, rule: .blank) { p, _ in
         if let c = p.commandLine { return .text(c) }
         return p.commandLineRead ? .unknown : .empty
@@ -381,13 +381,13 @@ private let catalogue: [Column] = [
         return .text("\(par.name) (\(p.ppid))")
     },
     Column(id: "responsible", title: "Responsible",
-           help: "The process macOS holds responsible for this one (for privacy prompts and energy). † marks one that has exited.", source: "responsibility_get_pid_responsible_for_pid",
+           help: "The process macOS holds responsible for this one (for privacy prompts and energy), or the app that exited and left it running.", source: "responsibility_get_pid_responsible_for_pid",
            section: .lineage, unitShowsRoot: true, minWidth: 80, width: 130, rule: .blank) { p, s in
-        if let t = p.leftBehindText { return .text("† \(t)", .warning) }
+        if let t = p.leftBehindText { return .text("\(t) (exited)", .warning) }
         guard let r = p.responsible else { return .empty }
         if r == p.pid { return .text("self", .secondary) }
         if let rp = s.procs[r] { return .text("\(rp.name) (\(r))") }
-        return .text("† gone (\(r))", .warning)
+        return .text("exited (\(r))", .warning)
     },
     Column(id: "label", title: "launchd label", help: "Label of the launchd job this process is the main process of.", source: "launchctl list",
            section: .lineage, unitShowsRoot: true, width: 200, rule: .blank) { p, _ in text(p.launchdLabel) },
@@ -547,7 +547,7 @@ private let catalogue: [Column] = [
     .amount(id: "diskWritten", title: "Disk written", help: "Bytes written to disk since the process started.", source: "rusage ri_diskio_byteswritten",
             section: .disk, width: 76, format: bytesFormat) { $0.diskWrite.map { Double($0) } },
     .amount(id: "disk", title: "Disk I/O",
-            help: "Bytes read plus written since the process started; — when neither could be read.", source: "rusage ri_diskio_bytesread + ri_diskio_byteswritten",
+            help: "Bytes read plus written since the process started; ? when neither could be read.", source: "rusage ri_diskio_bytesread + ri_diskio_byteswritten",
             section: .disk, minWidth: 56, width: 70, format: bytesFormat) { p in
         let d = ProcNode.disk(p)
         return d < 0 ? nil : Double(d)
@@ -570,16 +570,16 @@ private let catalogue: [Column] = [
     .amount(id: "machMsgRate", title: "Mach messages/s", help: "Mach messages sent plus received per second." + rateNote, source: "proc_taskinfo pti_messages_sent + pti_messages_received, Δ",
             section: .ipc, width: 90, format: perSecFormat) { $0.rates?.machMsgs },
     .amount(id: "machPorts", title: "Ports",
-            help: "Mach port names in the process's port space: send, receive and send-once rights, port sets and dead names (Activity Monitor's Ports). Read about every 30 s while a Mach ports column is shown; — for a process started since.", source: "lsmp, run as root",
+            help: "Mach port names in the process's port space: send, receive and send-once rights, port sets and dead names (Activity Monitor's Ports). Read about every 30 s while a Mach ports column is shown; ? for a process started since.", source: "lsmp, run as root",
             section: .ipc, needs: "helper (admins only)", width: 62, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.total) } },
     .amount(id: "machDeadNames", title: "Dead names",
-            help: "Rights the process still holds to ports whose receiver has died. Thousands that keep growing are a leak: the process never deallocates them. Read about every 30 s while a Mach ports column is shown; — for a process started since.", source: "lsmp, run as root",
+            help: "Rights the process still holds to ports whose receiver has died. Thousands that keep growing are a leak: the process never deallocates them. Read about every 30 s while a Mach ports column is shown; ? for a process started since.", source: "lsmp, run as root",
             section: .ipc, needs: "helper (admins only)", width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.deadNames) } },
     .amount(id: "machRepliesOwed", title: "Replies owed",
-            help: "Send-once rights the process holds: mostly replies it owes to processes that sent it a request. Thousands that keep growing are requests it never answers. Read about every 30 s while a Mach ports column is shown; — for a process started since.", source: "lsmp, run as root",
+            help: "Send-once rights the process holds: mostly replies it owes to processes that sent it a request. Thousands that keep growing are requests it never answers. Read about every 30 s while a Mach ports column is shown; ? for a process started since.", source: "lsmp, run as root",
             section: .ipc, term: "send-once", needs: "helper (admins only)", width: 76, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.sendOnce) } },
     .amount(id: "machFullQueues", title: "Full queues",
-            help: "Ports the process receives on whose message queue is full: senders block or time out until it receives. Read about every 30 s while a Mach ports column is shown; — for a process started since.", source: "lsmp, run as root",
+            help: "Ports the process receives on whose message queue is full: senders block or time out until it receives. Read about every 30 s while a Mach ports column is shown; ? for a process started since.", source: "lsmp, run as root",
             section: .ipc, needs: "helper (admins only)", width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.fullQueues) } },
     .amount(id: "openFiles", title: "Open files",
             help: "Open file descriptors: files, sockets, pipes.", source: "proc_pidinfo PROC_PIDLISTFDS",

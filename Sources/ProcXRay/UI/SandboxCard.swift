@@ -11,7 +11,13 @@ struct SandboxCard: View {
 
     var body: some View {
         Card(title: "Sandbox", systemImage: "square.dashed") {
-            Text(Self.summary(proc.sandboxed, entitlements: entitlements)).fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(Self.summary(proc.sandboxed, entitlements: entitlements))
+                    .help(proc.sandboxed == true && !Self.isAppSandbox(entitlements)
+                          ? "Sandboxed, but not by the App Sandbox entitlement: a system profile, one inherited from its parent, or sandbox-exec."
+                          : "")
+                SourceTag(source: "sandbox_check")
+            }
             if proc.sandboxed == true && !exited {
                 if gone {
                     Text("The process exited before its sandbox could be checked.").foregroundStyle(.secondary)
@@ -29,11 +35,9 @@ struct SandboxCard: View {
 
     static func summary(_ sandboxed: Bool?, entitlements: [String: Any]) -> String {
         switch sandboxed {
-        case true?:
-            isAppSandbox(entitlements) ? "Sandboxed (App Sandbox)."
-                : "Sandboxed, but not by the App Sandbox entitlement: a system profile, one inherited from its parent, or sandbox-exec."
-        case false?: "Not sandboxed."
-        case nil: "Unknown: the sandbox state couldn't be read."
+        case true?: isAppSandbox(entitlements) ? "Sandbox on · App Sandbox" : "Sandbox on · profile: system, inherited or sandbox-exec"
+        case false?: "Sandbox off"
+        case nil: "Sandbox ?"
         }
     }
 

@@ -28,6 +28,8 @@ struct ThreadsView: View {
         var userKey: UInt64 { t.userNanos }
         var systemKey: UInt64 { t.systemNanos }
         var priorityKey: Int32 { t.curPriority }
+        var basePriorityKey: Int32 { t.basePriority }
+        var maxPriorityKey: Int32 { t.maxPriority }
         var stateKey: String { t.stateText }
         var policyKey: String { t.policyText }
         var queueKey: String { detail?.queue ?? "" }
@@ -273,19 +275,26 @@ struct ThreadsView: View {
             .width(min: 60, ideal: 64, max: 90)
             TableColumn("CPU time", value: \Row.timeKey) { r in
                 Text(Fmt.secs(r.t.cpuNanos)).monospacedDigit().frame(maxWidth: .infinity, alignment: .trailing)
-                    .help("User \(Fmt.secs(r.t.userNanos)), system \(Fmt.secs(r.t.systemNanos))")
             }
             .width(min: 60, ideal: 80, max: 110)
+            TableColumn("User time", value: \Row.userKey) { r in
+                Text(Fmt.secs(r.t.userNanos)).monospacedDigit().foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .width(min: 50, ideal: 70, max: 110)
+            TableColumn("System time", value: \Row.systemKey) { r in
+                Text(Fmt.secs(r.t.systemNanos)).monospacedDigit().foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .width(min: 50, ideal: 70, max: 110)
           }
           Group {
-            TableColumn("P cores", value: \Row.perfKey) { r in
+            TableColumn("P-core share", value: \Row.perfKey) { r in
                 Text(r.t.perfShare.map { "\(Fmt.pct($0)) %" } ?? "—").monospacedDigit()
                     .foregroundStyle(r.t.perfShare == nil ? .secondary : .primary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .help(Self.coresHelp(r.t))
             }
             .width(min: 50, ideal: 60, max: 90)
-            TableColumn("IPC", value: \Row.ipcKey) { r in
+            TableColumn("Instr/cycle", value: \Row.ipcKey) { r in
                 Text(r.t.ipc.map { $0.formatted(.number.precision(.fractionLength(2))) } ?? "—").monospacedDigit()
                     .foregroundStyle(r.t.ipc == nil ? .secondary : .primary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
@@ -324,12 +333,21 @@ struct ThreadsView: View {
                 Text(r.t.stateText).foregroundStyle(Self.stateColor(r.t.runState))
             }
             .width(min: 50, ideal: 64, max: 110)
+          }
+          Group {
             TableColumn("Priority", value: \Row.priorityKey) { r in
-                Text(r.t.curPriority == r.t.basePriority ? "\(r.t.curPriority)" : "\(r.t.curPriority) (base \(r.t.basePriority))")
-                    .monospacedDigit()
-                    .help("Current \(r.t.curPriority), base \(r.t.basePriority), max \(r.t.maxPriority). Higher runs first; 31 is the default, 46–47 is user-interactive work.")
+                Text("\(r.t.curPriority)").monospacedDigit()
+                    .help("Current priority. Higher runs first; 31 is the default, 46–47 is user-interactive work.")
             }
-            .width(min: 44, ideal: 56, max: 110)
+            .width(min: 44, ideal: 56, max: 90)
+            TableColumn("Base priority", value: \Row.basePriorityKey) { r in
+                Text("\(r.t.basePriority)").monospacedDigit().foregroundStyle(r.t.basePriority == r.t.curPriority ? .secondary : .primary)
+            }
+            .width(min: 44, ideal: 56, max: 90)
+            TableColumn("Max priority", value: \Row.maxPriorityKey) { r in
+                Text("\(r.t.maxPriority)").monospacedDigit().foregroundStyle(.secondary)
+            }
+            .width(min: 44, ideal: 56, max: 90)
             TableColumn("Policy", value: \Row.policyKey) { r in
                 Text(r.t.policyText).foregroundStyle(r.t.policy == 1 ? .secondary : .primary)
                     .help(r.t.policy == 1 ? "Timesharing: the usual policy." : "Fixed-priority policy, as real-time threads (audio, for example) use.")

@@ -650,9 +650,9 @@ private struct LibraryRow: View {
                 if d.kind != .load { Pill(text: d.kind.rawValue, color: d.isWeak ? .gray : .blue) }
                 else if d.isWeak { Pill(text: "weak", color: .gray) }
                 Text(verbatim: d.path).font(mono).textSelection(.enabled)
-                Text(verbatim: MachONames.version(d.current)).foregroundStyle(.secondary).monospacedDigit()
-                    .help("Current version \(MachONames.version(d.current)), compatibility \(MachONames.version(d.compat))"
-                          + (d.useFlags.map { "\nUse flags: " + MachONames.bits($0, MachONames.dylibUseFlags) } ?? ""))
+                Text(verbatim: "current \(MachONames.version(d.current)) · compatibility \(MachONames.version(d.compat))"
+                     + (d.useFlags.map { " · use flags " + MachONames.bits($0, MachONames.dylibUseFlags) } ?? ""))
+                    .foregroundStyle(.secondary).monospacedDigit()
             }
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Spacer().frame(width: 26)

@@ -987,12 +987,12 @@ final class Store {
             for (dead, gid) in ghostIDs where leftGroups[gid] == nil {
                 let kids = byParent[gid]?.flatMap { $0.children ?? [] } ?? []
                 let name = lsByPid[dead]?.name ?? "?"
-                extra.append(ProcNode(id: gid, proc: nil, title: "† \(name) — exited pid \(dead)",
+                extra.append(ProcNode(id: gid, proc: nil, title: "\(name) (exited, pid \(dead))",
                                       subtitle: "responsible process is gone", isGhost: true, children: kids))
             }
             for (gid, text) in leftGroups {
                 let kids = byParent[gid]?.flatMap { $0.children ?? [] } ?? []
-                extra.append(ProcNode(id: gid, proc: nil, title: "† \(text) — exited",
+                extra.append(ProcNode(id: gid, proc: nil, title: "\(text) (exited)",
                                       subtitle: "app is gone; these outlived it", isGhost: true, children: kids))
             }
             roots += extra

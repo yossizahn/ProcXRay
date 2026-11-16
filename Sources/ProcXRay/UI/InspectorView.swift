@@ -97,7 +97,7 @@ struct InspectorView: View {
         }, parse: parse, isEmpty: isEmpty, visual: visual)
     }
 
-    static let exitedNote = "The process has exited, so this can't be collected any more."
+    static let exitedNote = "Exited."
     nonisolated static func goneNote(_ pid: pid_t) -> String {
         "Process \(pid) has exited (its pid may now belong to another process); nothing was collected."
     }
@@ -203,12 +203,12 @@ extension Store {
 
     /// One-line account of who is responsible for `p`, shared by the General and Lineage tabs.
     func responsibleDescription(_ p: ProcInfo) -> String {
-        if let t = p.leftBehindText { return "† \(t) — exited and left this process running" }
-        guard let r = p.responsible else { return "unknown" }
+        if let t = p.leftBehindText { return "\(t) (exited; left this process running)" }
+        guard let r = p.responsible else { return "?" }
         if r == p.pid { return "self (\(r))" }
         if let rp = procs[r] { return "\(rp.name) (\(r))" }
         let name = lsApps.first { $0.pid == r }?.name
-        return "† \(name ?? "exited process") (\(r)) — no longer running"
+        return "\(name ?? "process") (\(r), exited)"
     }
 }
 
@@ -271,7 +271,7 @@ struct CommandTab<Parsed, Visual: View>: View {
                 VStack(spacing: 8) {
                     Image(systemName: disabledReason == nil ? "play.circle" : "xmark.circle")
                         .font(.largeTitle).foregroundStyle(.secondary)
-                    Text(disabledReason ?? "Press Run to collect this data.").foregroundStyle(.secondary)
+                    if let disabledReason { Text(disabledReason).foregroundStyle(.secondary) }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .opacity(running ? 0 : 1)

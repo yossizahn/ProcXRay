@@ -74,14 +74,17 @@ struct TCCCard: View {
     private func grantsGrid(_ g: [TCCGrants.Grant]) -> some View {
         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
             ForEach(g) { x in
-                GridRow {
-                    Text(TCCGrants.displayName(x.service) + (x.target.map { " → \($0)" } ?? ""))
-                        .help(x.service + (x.target.map { "\ntarget: \($0)" } ?? ""))
+                GridRow(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(TCCGrants.displayName(x.service) + (x.target.map { " → \($0)" } ?? ""))
+                            .help(x.service + (x.target.map { "\ntarget: \($0)" } ?? ""))
+                        // The record's own fields, on a detail line rather than in a tooltip.
+                        Text(verbatim: "changed \(x.modified?.formatted() ?? "—") · \(x.database.rawValue) database · \(x.clientIsPath ? "path" : "bundle ID") \(x.client)")
+                            .font(.caption).foregroundStyle(.tertiary).textSelection(.enabled)
+                    }
                     Text(TCCGrants.decision(x.authValue))
                         .foregroundStyle(x.authValue == 2 ? .green : x.authValue == 0 ? .red : .secondary)
                     Text(TCCGrants.reason(x.authReason)).foregroundStyle(.secondary)
-                    Text(x.modified?.formatted(date: .abbreviated, time: .omitted) ?? "").foregroundStyle(.secondary)
-                        .help("Last changed \(x.modified?.formatted() ?? "—")\n\(x.database.rawValue) database, filed under \(x.clientIsPath ? "path" : "bundle ID") \(x.client)")
                 }
             }
         }

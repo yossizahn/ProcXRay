@@ -354,7 +354,6 @@ struct LogsPane: View {
         if !session.started {
             VStack(spacing: 8) {
                 Image(systemName: "play.circle").font(.largeTitle).foregroundStyle(.secondary)
-                Text("Run collects the last 10 minutes; Live follows new events as they're logged.").foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if session.isActive && (session.mode == .snapshot || (session.loadingHistory && session.entries.isEmpty)) {

@@ -1145,6 +1145,9 @@ struct ProcessOutline: NSViewRepresentable {
                 let v = n.proc.map { c.value($0, store) } ?? n.groupValues[c.id] ?? .empty
                 set(v.display)
                 set(color: Self.color(v.tint))
+                // "?": say why it couldn't be read.
+                let tip = v == .unknown ? "Couldn't be read" + (c.needs.map { ": needs the \($0)" } ?? "") : nil
+                if label.toolTip != tip { label.toolTip = tip }
             }
         }
 
@@ -1205,10 +1208,9 @@ struct ProcessOutline: NSViewRepresentable {
                 ]))
             }
             if p.notResponding { badge("NOT RESPONDING", .systemRed) }
-            if orphan { badge("LEFT", .systemOrange) }
+            if orphan { badge("LEFT BEHIND", .systemOrange) }
             if p.isZombie { badge("ZOMBIE", .systemGray) }
             if p.isTranslated { badge("ROSETTA", .systemPurple) }
-            if p.sandboxed == true { badge("SBX", .systemTeal) }
             if p.lsTags.contains(where: { $0.hasPrefix("exited") }) { badge("EXITED", .systemRed) }
             s.addAttribute(.paragraphStyle, value: Self.truncating, range: NSRange(location: 0, length: s.length))
             set(s)

@@ -70,13 +70,13 @@ struct InspectorHeader: View {
                         ProcessChip(proc: owner)
                     }
                     Text("·").foregroundStyle(.tertiary)
-                    Text(p.sandboxed.map { $0 ? "sandboxed" : "not sandboxed" } ?? "sandbox unknown")
+                    Text(p.sandboxed.map { $0 ? "sandboxed" : "not sandboxed" } ?? "sandbox ?")
                     Text("·").foregroundStyle(.tertiary)
                     Text(TrustVerdict(sign).short)
                 }
                 .truncationHelp([
                     (store.kind(of: p) ?? "Process") + (owner.map { " of \($0.name) (\($0.pid))" } ?? ""),
-                    p.sandboxed.map { $0 ? "sandboxed" : "not sandboxed" } ?? "sandbox unknown",
+                    p.sandboxed.map { $0 ? "sandboxed" : "not sandboxed" } ?? "sandbox ?",
                     TrustVerdict(sign).short,
                 ].joined(separator: " · "))
                 Spacer(minLength: 8)
@@ -358,7 +358,7 @@ struct InfoTab: View {
                     }
                 }
             } else {
-                Text(exited && loaded == nil ? "Exited." : loaded != nil ? "Not readable: another user's process (needs the helper)." : "Reading…")
+                Text(exited && loaded == nil ? "Exited." : loaded != nil ? "? (another user's process: needs the helper)" : "Reading…")
                     .foregroundStyle(.secondary)
             }
         }
@@ -701,7 +701,7 @@ struct UsageTab: View {
     /// Jetsam band and memory limits (root only: the helper's), under "Now".
     private func jetsamRows(_ p: ProcInfo) -> [(String, String, String)] {
         guard let j = p.jetsam else {
-            return [("Memory limit", "—", store.helperState.isRunning ? "not readable" : "needs the privileged helper")]
+            return [("Memory limit", "?", store.helperState.isRunning ? "" : "needs the helper")]
         }
         let mb: (Int32?) -> String = { $0.map { Fmt.bytes(UInt64($0) << 20) } ?? "none" }
         var used = ""
@@ -1289,7 +1289,7 @@ struct TrustTab: View {
         rows.append(FactRow("Identifier", .text(s.identifier ?? "—"), info))
         rows.append(FactRow("Team ID", .text(s.teamID ?? "—"), info))
         rows.append(FactRow("Authority", .text(s.authority.isEmpty ? "—" : s.authority.joined(separator: "\n")), info + " certificates"))
-        rows.append(FactRow("Valid", .text(s.valid.map { $0 ? "yes" : "NO" } ?? "unknown"), "SecCodeCheckValidity"))
+        rows.append(FactRow("Valid", .text(s.valid.map { $0 ? "yes" : "NO" } ?? "?"), "SecCodeCheckValidity"))
         rows.append(FactRow("Code hash (cdhash)", .text(s.cdHash ?? "—"), info + " unique"))
         rows.append(FactRow("Code directory flags", .text(s.staticFlagNames.joined(separator: " ").ifEmpty("none")), info + " flags"))
         let status: String = s.runtimeStatus.map { String(format: "0x%08x  ", $0) + s.runtimeFlagNames.joined(separator: " ") } ?? "—"
