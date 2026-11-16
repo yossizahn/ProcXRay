@@ -2,7 +2,8 @@ import Foundation
 
 /// Top-level groups of the Smart tree, in display order. See docs/tree-and-inspector-proposal.md.
 enum ProcCategory: Int, CaseIterable, Sendable {
-    case apps, backgroundApps, extensions, thirdPartyServices, systemInterface, systemServices, other, leftBehind
+    // Left behind first: it is a warning, starts open and is usually empty.
+    case leftBehind, apps, backgroundApps, extensions, thirdPartyServices, systemInterface, systemServices, other
 
     var title: String {
         switch self {
@@ -113,13 +114,16 @@ enum SmartTree {
         if p.lsType == "Foreground" { return .apps }
         // Before the LaunchServices background types: Finder Sync and Quick Look extensions register as
         // BackgroundOnly, and would otherwise fill "Background apps" with things that aren't apps.
-        if isExtension(p) { return .extensions }
+        // Apple's own extensions (most of them) are system services, so the third-party ones stand out.
+        if isExtension(p) { return isApple(p) ? .systemServices : .extensions }
         // A job in launchd's system domain runs outside every login session, so it can't show any UI,
         // whatever LaunchServices type its bundle registered as (Foxit's update service registers as UIElement).
         if p.launchdDomain == "system", let l = p.launchdLabel, !l.hasPrefix("application.") {
             return isApple(p) ? .systemServices : .thirdPartyServices
         }
-        if p.lsType == "UIElement" || p.lsType == "BackgroundOnly" { return isApple(p) ? .systemInterface : .backgroundApps }
+        // System interface is what has UI without a Dock icon (UIElement); BackgroundOnly has no UI at all.
+        if p.lsType == "UIElement" { return isApple(p) ? .systemInterface : .backgroundApps }
+        if p.lsType == "BackgroundOnly" { return isApple(p) ? .systemServices : .backgroundApps }
         let apple = isApple(p)
         if let l = p.launchdLabel, !apple, !l.hasPrefix("application.") { return .thirdPartyServices }
         return apple ? .systemServices : .other
@@ -128,11 +132,17 @@ enum SmartTree {
     /// Sub-group of a unit inside its category, or nil for none.
     static func subgroup(ofRoot p: ProcInfo, in c: ProcCategory) -> String? {
         switch c {
-        case .backgroundApps: return p.lsType == "UIElement" ? "No Dock icon" : "Background only"
+        case .backgroundApps: return p.lsType == "UIElement" ? "No Dock icon (UIElement)" : "No UI (BackgroundOnly)"
         case .extensions: return p.extensionPoint.map(ExtensionInfo.title) ?? "Unknown extension point"
-        case .thirdPartyServices: return p.launchdDomain == "system" || p.uid == 0 ? "Daemons" : "Agents"
+        case .thirdPartyServices: return daemonOrAgent(p)
+        case .systemServices: return isExtension(p) ? "Extensions" : daemonOrAgent(p)
         default: return nil
         }
+    }
+
+    /// Daemons: launchd's system domain, or root. Agents: the rest (decision D2 of the regrouping plan).
+    private static func daemonOrAgent(_ p: ProcInfo) -> String {
+        p.launchdDomain == "system" || p.uid == 0 ? "Daemons" : "Agents"
     }
 
     // MARK: Roles inside a unit
@@ -321,7 +331,10 @@ enum SmartTree {
             guard let rp = input.procs[r] else { continue }
             let c = category(ofRoot: rp)
             var s = c.singular
-            if c == .extensions, let e = rp.extensionPoint { s += " · " + ExtensionInfo.title(e) }
+            if isExtension(rp) {
+                if c != .extensions { s += " · Extension" }
+                if let e = rp.extensionPoint { s += " · " + ExtensionInfo.title(e) }
+            }
             if p.pid != r {
                 s += " · " + (p.tty != nil ? "Terminal" : role(of: p).singular)
                 // An app's own extension: what kind, from its declared extension point.
