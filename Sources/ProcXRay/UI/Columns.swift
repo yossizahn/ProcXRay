@@ -324,6 +324,14 @@ private let catalogue: [Column] = [
            section: .lineage, width: 200, rule: .blank) { p, _ in text(p.launchdLabel) },
     Column(id: "domain", title: "Domain", tooltip: "launchd domain of that job: system, gui or user.",
            section: .lineage, width: 64, rule: .same(noun: "domain")) { p, _ in text(p.launchdDomain) },
+    Column(id: "lsType", title: "LaunchServices type",
+           tooltip: "The app's type as LaunchServices registers it (lsappinfo): Foreground (has a Dock icon), UIElement (no Dock icon) or BackgroundOnly (no UI). Empty: not registered with LaunchServices. The Smart tree's categories are derived from it.",
+           section: .lineage, width: 110, rule: .same(noun: "type")) { p, _ in text(p.lsType) },
+    Column(id: "lsState", title: "LaunchServices state",
+           tooltip: "LaunchServices' state tags for the app, verbatim as lsappinfo prints them (such as !signalled).",
+           section: .lineage, width: 140, rule: .blank) { p, _ in
+        p.lsTags.isEmpty ? .empty : .text(p.lsTags.joined(separator: " "))
+    },
     Column(id: "extPoint", title: "Extension point", tooltip: "For an app extension: what it extends.",
            section: .lineage, width: 130, rule: .same(noun: "extension point")) { p, _ in
         text(p.extensionPoint.map(ExtensionInfo.title))
@@ -339,6 +347,11 @@ private let catalogue: [Column] = [
            tooltip: "Jetsam coalition id: processes macOS frees memory from together, such as a host app and its extensions.",
            section: .lineage, term: "jetsam coalition", width: 100, numeric: true, rule: .same(noun: "coalition")) { p, _ in
         p.jetsamCoalition.map { .number(Double($0), String($0)) } ?? .empty
+    },
+    Column(id: "leftBehind", title: "Left behind",
+           tooltip: "The app that has exited but left this process running; macOS keeps the app 'running in background' while it lives. Empty otherwise.",
+           section: .lineage, width: 110, rule: .same(noun: "app")) { p, _ in
+        p.leftBehindText.map { .text($0, .warning) } ?? .empty
     },
     Column(id: "context", title: "Context",
            tooltip: "launchd label, LaunchServices name, extension point, terminal, or the path. Group rows: process counts.",
