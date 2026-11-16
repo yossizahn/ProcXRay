@@ -1,6 +1,17 @@
 # Plan: regroup the UI around one taxonomy
 
-Status: plan, written 2026-11-16. Nothing here is implemented. It is written to be handed to an agent and done in the order of Part 9.
+Status: implemented 2026-11-16, one commit per step of Part 9 (steps 1–18), with the defaults of Part 10. Deviations:
+
+- Menus and the filter's field help show the glossed title too ("Accounting group (resource coalition)"), not only the Column Manager.
+- Step 9 removes the Signal and Reveal buttons from the header before step 14 adds the Process menu; an inspector window can send signals again from step 14 on.
+- Step 11: the Mach port counts go to a summary line at the top of Files & Ports (open files and the port space), since the ports themselves are listed there.
+- Step 12: Usage rows get their source by row name (one name per quantity makes the name a key) rather than a field per row; the group page prefixes `Σ`. Usage sparklines move above each card's rows so the tokens fit. The Mach-O window keeps sourceless rows (out of scope). Launch's attribution sources stay sentences, shown in the token style.
+- Step 13: Files & Ports already had an FD column. `—` from `Fmt` for a missing number in Usage rows is left as is, since there it can mean either "doesn't apply" or "couldn't be read".
+- Step 15: LaunchServices Apps shows the Memory-kill group (jetsam coalition) column, because lsappinfo's coalition is the jetsam one. A filter's sidebar row is selected while its predicate is in force; a filter without columns brings back the columns shown before a filter with columns replaced them.
+- Step 17: Triage's Show All exists for Top CPU, GPU and memory; disk and network rank by read plus written, which no single column shows. launchd plist paths come from the standard launchd folders only.
+- Step 18: the README text is updated; its screenshots are not retaken.
+
+It was written to be handed to an agent and done in the order of Part 9.
 
 ## 0. Read this first
 

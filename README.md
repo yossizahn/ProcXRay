@@ -6,24 +6,24 @@ A Process Hacker–style process explorer for macOS. It shows the attribution da
 
 ## Highlights
 
-- **Smart process tree.** Every process is sorted into Apps, Background apps, Extensions, Third-party services, System interface and System services, with each app's helpers, XPC services and terminal sessions under it. You can switch to a responsible/parent tree (each process under its responsible process, or under its parent when it has none), a flat list, or a flat list grouped by signer, user, launchd domain, sandbox or architecture, or click a column header to see every process in one flat list sorted by it (descending, then ascending, then back to the tree), as in Process Hacker.
-- **Rich columns.** About 50 columns cover CPU, memory, disk, energy, signing and launchd. Filter chips catch the usual suspects: unsigned, root, not sandboxed, Rosetta and recently started processes.
-- **Inspector.** Six tabs (Overview, Origin, Trust, Resources, Connections and Activity) answer what a process is, who launched it, who signed it, what it's using and what it's talking to. Every process it mentions is a clickable link.
-- **Left Behind.** Finds processes that keep an app "running in the background" after you quit it.
+- **Smart process tree.** Every process is sorted into Left behind, Apps, Background apps, Extensions and Third-party services (third-party only), System interface and System services (Apple only), with each app's helpers, XPC services and terminal sessions under it; an app's row shows its own pid, path and parent. You can switch to a responsible/parent tree (each process under its responsible process, or under its parent when it has none), a flat list, or a flat list grouped by signer, user, launchd domain, sandbox or architecture, or click a column header to see every process in one flat list sorted by it (descending, then ascending, then back to the tree), as in Process Hacker. View ▸ Keep Groups When Sorting sorts inside the groups instead.
+- **Rich columns.** About 75 columns in eleven sections (Identity, Execution, Lineage, CPU, GPU, Memory, Disk, Network, IPC, Energy, Security), each with what it means and where it comes from. Filter chips catch the usual suspects, and a predicate (`cpu > 5 and not sandboxed`) filters on any column. Saved filters sit in the sidebar.
+- **Inspector.** Ten tabs (Info, Launch, Security, Usage, Threads, Memory, Files & Ports, Logs, Sample, Syscalls; ⌘1–⌘0) show what a process is, who started it and why, who signed it, what it's using and what it's talking to. Every row names its source, and every process it mentions is a clickable link.
+- **Left Behind.** A built-in filter finds processes that keep an app "running in the background" after you quit it.
 - **Visual, not just text.** The output of `lsof`, `vmmap`, `sample`, `log`, `launchctl` and `lsappinfo` is parsed into tables, charts and call trees. A Raw switch shows the original text.
 - **Privileged helper (optional).** A read-only root daemon fills in data for root-owned processes and loads Background Items without a password prompt.
 
 ## A closer look
 
-Resources: each figure now and since start, with sparklines and CPU time split by QoS class.
+Usage: each figure now and since start, with sparklines and CPU time split by QoS class.
 
-![Resources](docs/screenshots/resources.png)
+![Usage](docs/screenshots/resources.png)
 
 `vmmap --summary` drawn as footprint tiles, portion bars and a per-region chart.
 
 ![Memory map](docs/screenshots/memory.png)
 
-Connections, with the other end of every pipe and socket resolved into a peer graph.
+Files & Ports, with the other end of every pipe and socket resolved into a peer graph.
 
 ![Connections](docs/screenshots/connections.png)
 
@@ -44,14 +44,14 @@ Without `--release` you get `build/Proc X-Ray Dev.app`. It has its own bundle id
 
 ## Privileged helper
 
-Click **Install Privileged Helper…** in the sidebar, then approve it once in System Settings → General → Login Items. The helper:
+Click **Install Privileged Helper…** in Settings ▸ Helper (the helper part of the sidebar's status line opens it), then approve it once in System Settings → General → Login Items. The helper:
 
 - is read-only and runs only a fixed allowlist of tools (`lsof`, `vmmap`, `sample`, `launchctl procinfo` and `sfltool dumpbtm`), with arguments it builds itself.
 - accepts connections only from this exact build of the app, matched by team ID and cdhash.
 - lets admins inspect any process. Other users can inspect only their own processes.
 - exits about 10 s after it goes idle. launchd restarts it on demand.
 
-Without the helper the app runs unprivileged, and root-owned processes show `—`.
+Without the helper the app runs unprivileged, and what it can't read for root-owned processes shows `?`.
 
 ## More
 

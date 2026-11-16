@@ -34,7 +34,7 @@ The availability notes on unused APIs were measured on 2026-11-12 (macOS 27, App
 
 Checked against `top` for Dock: context switches, faults, COW faults, page-ins, Mach messages and both syscall counts matched, and CPU time matched `top`'s TIME.
 | `proc_pidinfo(PROC_PIDCOALITIONINFO)` (flavor 20) | **coalition** (resource coalition id), **jetsamCoalition** |
-| `proc_pidinfo(PROC_PIDVNODEPATHINFO)` | **working dir** (only while the General tab is open) |
+| `proc_pidinfo(PROC_PIDVNODEPATHINFO)` | **working dir** (only while the Info tab is open) |
 
 #### 3. Private libsystem functions, looked up with `dlsym`
 
@@ -51,7 +51,7 @@ Checked against `top` for Dock: context switches, faults, COW faults, page-ins, 
 
 #### 5. Command-line tools (every 5th tick, and on every manual refresh)
 
-- `/usr/bin/lsappinfo list` → `LSApp`, matched by pid: **lsAppName** and **lsTags** (state tags such as `exited-with-subordinates`). The record also has bundleID, bundlePath, executablePath, type, version, arch, coalition (the *jetsam* coalition id), coalitionPIDs, relatedCoalitionIDs, relatedCoalitionPIDs and parentASN. The raw text is shown in the launchd / LS tab.
+- `/usr/bin/lsappinfo list` → `LSApp`, matched by pid: **lsAppName** and **lsTags** (state tags such as `exited-with-subordinates`). The record also has bundleID, bundlePath, executablePath, type, version, arch, coalition (the *jetsam* coalition id), coalitionPIDs, relatedCoalitionIDs, relatedCoalitionPIDs and parentASN. The raw text is shown on the Launch tab's LaunchServices card. The `lsType` and `lsState` columns and the LaunchServices Apps filter show the type and tags.
 - `/bin/launchctl list` → **launchdLabel**, matched by pid; each job also has its last exit status.
 
 ### Signing: Security framework → `SignInfo` (`CodeSign.inspect`)
@@ -78,7 +78,7 @@ Filled in the background and cached by `codeKey`. `SecCodeCopyGuestWithAttribute
 - **Memory Map**: `vmmap --summary <pid>`
 - **Sample**: `sample <pid> 1 -mayDie`
 - **Logs**: `log show --last 10m --predicate 'processID == pid OR eventMessage CONTAINS "pid"'`
-- **launchd / LS**: `launchctl print gui/<uid>/<label>` (falling back to `system/<label>`), `launchctl procinfo <pid>` (helper only), and the raw lsappinfo record
+- **Launch**: `launchctl print gui/<uid>/<label>` (falling back to `user/<uid>/<label>` and `system/<label>`), `launchctl procinfo <pid>` (helper only), and the raw lsappinfo record
 - Not per process: `sfltool dumpbtm` → Background Items, loaded only on request because it asks for an admin password
 
 ### Calculated and heuristic values (`Model.swift`)
@@ -100,7 +100,35 @@ Filled in the background and cached by `codeKey`. `SecCodeCopyGuestWithAttribute
 
   On macOS 27 signal 1 rarely fires, so signals 2 and 3 do most of the work.
 
-## Threads (Resources → Threads)
+### Source tokens shown in the UI
+
+Every column's tooltip and every inspector row (Info, Launch, Security, Usage) names its source with a short token; View ▸ Show Sources hides them. `· root` after a token means the helper read it. `Δ` means a rate: the change since the last refresh divided by the time between them. `derived:` marks a value worked out from others, and `Σ` on the group page a sum over the members. Most tokens are the calls described above; these are the ones the sections above don't name:
+
+| Token | What it is |
+|---|---|
+| `kinfo_proc e_tdev`, `e_pgid`, `p_stat`, `p_flag P_TRANSLATED` | The TTY, process group, state and Rosetta flag from group 1 |
+| `rusage ri_user_ptime + ri_system_ptime` | Performance-core CPU time (**pCoreNanos**) |
+| `rusage ri_lifetime_max_phys_footprint`, `ri_neural_footprint`, `ri_logical_writes` | **peakFootprint**, **neuralFootprint**, **logicalWrites** |
+| `proc_bsdinfo pbi_nice` | Nice value, an optional read (`ExtraReads.nice`) while the column or the Info tab is shown |
+| `proc_get_dirty` | Idle exit (dirty tracking), `IdleExitState` |
+| `task_info TASK_VM_INFO` | Compressed memory, an optional read while the column or the Usage tab is shown |
+| `memorystatus_control GET_PRIORITY_LIST` / `GET_MEMLIMIT_PROPERTIES` | Memory-kill band and memory limits (`Jetsam.all`), root only |
+| `IORegistry accelerator clients` | GPU time per process (`ExtraRead.gpuNanosByPid`) |
+| `NetworkStatistics per-socket counts` | Network rates and totals (`NetSampler`), the counts `nettop` shows |
+| `lsmp, run as root` | Mach port counts (`MachLoader`), helper and admins only |
+| `Info.plist NSExtensionPointIdentifier` | An extension's extension point |
+| `SecCodeCopyDesignatedRequirement` | The designated requirement on the Security tab |
+| `os_security_config_get_for_proc` | The five hardened-process flags (`SecurityDetail`) |
+| `task_info TASK_SECURITY_CONFIG_INFO`, `TASK_IPC_SPACE_POLICY_INFO` | The kernel's security config and IPC space policy under them |
+| `launchctl print: immediate reason`, `: path`, `: parent bundle identifier` | Fields of the job's `launchctl print` record on the Launch tab |
+| `launchctl print pid/<n>` | The per-process launchd domain (pid domain) that hosts a process |
+| `sfltool dumpbtm` | Background Items records |
+| `responsibility_get_pid_responsible_for_pid` | **responsible**, group 3 |
+| `derived: Smart tree`, `derived: enclosing .app bundle`, `derived: lsappinfo exited apps, coalitions` | Kind, Contained in, Left behind |
+
+The launchd Jobs list finds plist paths by reading the `Label` of every plist in `~/Library/LaunchAgents`, `/Library/LaunchAgents`, `/Library/LaunchDaemons` and `/System/Library/LaunchAgents|LaunchDaemons` (`Launchd.plistPaths`); jobs registered through SMAppService keep their plist inside the app and show none.
+
+## Threads (the Threads tab)
 
 `Sys/Threads.swift`, read every refresh interval while the pane is open; same user directly, everyone else through the helper (`HelperProtocol.threads`).
 
