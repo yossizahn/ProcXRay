@@ -27,12 +27,11 @@ struct HardeningCard: View {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Image(systemName: on ? "checkmark.circle.fill" : "minus.circle")
                                 .foregroundStyle(on ? Color.green : Color.secondary)
-                            Text(name).foregroundStyle(on ? .primary : .secondary)
+                            FieldName(label: name, info: FieldInfo(help: about, source: "os_security_config_get_for_proc",
+                                                                   via: viaHelper ? .helper : .direct))
                             Text(on ? "on" : "off").foregroundStyle(on ? .primary : .secondary)
-                            SourceTag(source: "os_security_config_get_for_proc", via: viaHelper ? .helper : .direct)
                             Spacer(minLength: 0)
                         }
-                        .help(about)
                     }
                     if d.kernel != nil || d.ipcPolicy != nil {
                         Divider()

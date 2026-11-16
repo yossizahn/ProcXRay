@@ -251,6 +251,9 @@ struct ProcessOutline: NSViewRepresentable {
             ColumnPrefs.setShown(Set(Column.defaultShown))
         }
 
+        /// "About This Column": the column's info bubble, over its header.
+        let columnBubble = InfoBubble()
+
         private func buildHeaderMenu(_ menu: NSMenu) {
             guard let o = outline, let header = o.headerView else { return }
             // A blank state image gives the plain rows the checkmark gutter, so their titles line up
@@ -277,6 +280,17 @@ struct ProcessOutline: NSViewRepresentable {
                 if ci >= 0 { clicked = o.tableColumns[ci] }
             }
             if let col = clicked {
+                if let c = Column.byID[col.identifier.rawValue], let ci = o.tableColumns.firstIndex(of: col) {
+                    // The column's bubble: a click on a header sorts, so its info is here and in the tooltip.
+                    item("About This Column") { [weak self, weak header] in
+                        guard let self, let header else { return }
+                        var sections = FieldInfo(help: c.help, source: c.source, needs: c.needs).sections
+                        if let term = c.term { sections.insert(.init(title: "System term", value: term), at: 0) }
+                        if let g = c.groupNoteText { sections.append(.init(title: "Group rows", value: g)) }
+                        self.columnBubble.toggle(col, sections: sections, relativeTo: header.headerRect(ofColumn: ci), of: header)
+                    }
+                    menu.addItem(.separator())
+                }
                 if col.identifier.rawValue != "name" {
                     let id = col.identifier.rawValue
                     item("Hide \(col.title)") { ColumnPrefs.toggle(id) }
@@ -870,124 +884,6 @@ struct ProcessOutline: NSViewRepresentable {
     /// A popover with labelled, wrapped values, opened from a row's ⓘ button. It closes on a click anywhere
     /// else, and a second click on the same button closes it.
     @MainActor
-    final class InfoBubble: NSObject, NSPopoverDelegate {
-        struct Section {
-            let title: String; let value: String; var mono = false
-            /// A path to offer reveal-in-Finder for, next to the title.
-            var reveal: String? = nil
-        }
-
-        private lazy var popover: NSPopover = {
-            let p = NSPopover()
-            p.behavior = .transient
-            p.delegate = self
-            return p
-        }()
-        private weak var item: AnyObject?
-        /// The transient popover closes on the button's mouse-down, before the button's action runs: that
-        /// action must not reopen it.
-        private weak var justClosed: AnyObject?
-        private var closedAt = Date.distantPast
-
-        func toggle(_ item: AnyObject, sections: [Section], from button: NSView) {
-            if popover.isShown, self.item === item { close(); return }
-            if justClosed === item, Date().timeIntervalSince(closedAt) < 0.5 { justClosed = nil; return }
-            self.item = item
-            popover.contentViewController = Self.controller(sections)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
-        }
-
-        func close() { if popover.isShown { popover.close() } }
-
-        func popoverDidClose(_ n: Notification) {
-            justClosed = item; closedAt = Date()
-            item = nil
-        }
-
-        nonisolated(unsafe) private static var actionKey = 0
-
-        /// Every bubble is the same width: values wrap at `valueWidth` (inside 12pt insets, 480pt in all), and
-        /// scroll past `maxValueHeight` (a renderer's argv runs to 10 KB).
-        private static let inset: CGFloat = 12, valueWidth: CGFloat = 456, maxValueHeight: CGFloat = 320
-
-        private static func controller(_ sections: [Section]) -> NSViewController {
-            let stack = NSStackView()
-            stack.orientation = .vertical
-            stack.alignment = .leading
-            stack.spacing = 8
-            stack.edgeInsets = NSEdgeInsets(top: 10, left: inset, bottom: 10, right: inset)
-            for s in sections {
-                let title = NSTextField(labelWithString: s.title.uppercased())
-                title.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1, weight: .semibold)
-                title.textColor = .secondaryLabelColor
-                var heading: NSView = title
-                if let path = s.reveal, Reveal.exists(path) {
-                    let b = Reveal.button(target: nil, action: nil)
-                    let action = MenuAction { Reveal.reveal([path]) }
-                    b.target = action
-                    b.action = #selector(MenuAction.fire)
-                    objc_setAssociatedObject(b, &Self.actionKey, action, .OBJC_ASSOCIATION_RETAIN)   // keeps the target alive
-                    b.widthAnchor.constraint(equalToConstant: 14).isActive = true
-                    b.heightAnchor.constraint(equalToConstant: 14).isActive = true
-                    var views: [NSView] = [title, b]
-                    if let t = MachOProbe.target(path) {
-                        let ib = MachOOpen.button(target: nil, action: nil)
-                        let ia = MenuAction { MachOOpen.open(t) }
-                        ib.target = ia
-                        ib.action = #selector(MenuAction.fire)
-                        objc_setAssociatedObject(ib, &Self.actionKey, ia, .OBJC_ASSOCIATION_RETAIN)
-                        ib.widthAnchor.constraint(equalToConstant: 14).isActive = true
-                        ib.heightAnchor.constraint(equalToConstant: 14).isActive = true
-                        views.append(ib)
-                    }
-                    let row = NSStackView(views: views)
-                    row.orientation = .horizontal
-                    row.spacing = 4
-                    row.alignment = .centerY
-                    heading = row
-                }
-                let group = NSStackView(views: [heading, value(s)])
-                group.orientation = .vertical
-                group.alignment = .leading
-                group.spacing = 2
-                stack.addArrangedSubview(group)
-            }
-            let vc = NSViewController()
-            vc.view = stack
-            vc.preferredContentSize = NSSize(width: valueWidth + 2 * inset, height: stack.fittingSize.height)
-            return vc
-        }
-
-        /// The value as selectable text wrapped at valueWidth, in a scroll view when it's taller than maxValueHeight.
-        private static func value(_ s: Section) -> NSView {
-            let field = NSTextField(wrappingLabelWithString: s.value)
-            field.font = s.mono ? .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
-                : .systemFont(ofSize: NSFont.smallSystemFontSize)
-            field.isSelectable = true
-            // Pinned to valueWidth: a wrapping field has no intrinsic width of its own, and the scroll view needs
-            // the text's real height.
-            let height = ceil(field.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: valueWidth, height: .greatestFiniteMagnitude)).height)
-            guard height > maxValueHeight else {
-                field.preferredMaxLayoutWidth = valueWidth
-                field.widthAnchor.constraint(equalToConstant: valueWidth).isActive = true
-                return field
-            }
-            // Overlay scrollers draw over the text's last few points rather than taking a column of their own.
-            field.frame = NSRect(x: 0, y: 0, width: valueWidth, height: height)
-            let scroll = NSScrollView()
-            scroll.drawsBackground = false
-            scroll.hasVerticalScroller = true
-            scroll.autohidesScrollers = true
-            scroll.scrollerStyle = .overlay
-            scroll.documentView = field
-            scroll.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                scroll.widthAnchor.constraint(equalToConstant: valueWidth),
-                scroll.heightAnchor.constraint(equalToConstant: maxValueHeight),
-            ])
-            return scroll
-        }
-    }
 
     // MARK: Cells
 

@@ -171,7 +171,8 @@ struct TrustVerdict {
 
 // MARK: - Shared bits
 
-/// One fact in an inspector grid: its label, its value, and where the value comes from.
+/// One fact in an inspector grid: its label, its value, and where the value comes from (shown in the info
+/// bubble on its label, not in the row).
 struct FactRow {
     enum Via { case direct, helper }
     let label: String
@@ -179,27 +180,17 @@ struct FactRow {
     /// The API, tool or calculation: "proc_pidpath", "csops CS_OPS_CDHASH", "derived: Smart tree".
     let source: String
     var via: Via = .direct
-    init(_ label: String, _ value: KVValue, _ source: String, via: Via = .direct) {
-        self.label = label; self.value = value; self.source = source; self.via = via
+    var help: String? = nil
+    var needs: String? = nil
+    init(_ label: String, _ value: KVValue, _ source: String, via: Via = .direct, help: String? = nil, needs: String? = nil) {
+        self.label = label; self.value = value; self.source = source; self.via = via; self.help = help; self.needs = needs
     }
-}
-
-/// View ▸ Show Sources: every inspector row's source token.
-enum ShowSources { static let key = "showSources" }
-
-/// A value's source, after it: small, monospaced, tertiary; "· root" when the helper read it.
-struct SourceTag: View {
-    let source: String
-    var via: FactRow.Via = .direct
-    @AppStorage(ShowSources.key) private var show = true
-    var body: some View {
-        if show && !source.isEmpty {
-            Text(verbatim: source + (via == .helper ? " · root" : ""))
-                .font(.system(.caption, design: .monospaced)).foregroundStyle(.tertiary)
-                .lineLimit(1).truncationMode(.middle)
-                .help(via == .helper ? "Read as root by the privileged helper" : source)
-        }
+    /// A row showing a column's value: the column's help, source and needs.
+    init(_ label: String, _ value: KVValue, column id: String, via: Via = .direct) {
+        let c = Column.byID[id]!
+        self.init(label, value, c.source, via: via, help: c.help, needs: c.needs)
     }
+    var info: FieldInfo { FieldInfo(help: help, source: source, via: via, needs: needs) }
 }
 
 /// A titled key/value grid that doesn't scroll by itself (tabs put several in one ScrollView).
@@ -215,11 +206,8 @@ struct FactGrid: View {
         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
                 GridRow(alignment: .firstTextBaseline) {
-                    Text(r.label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        KVValueView(value: r.value)
-                        SourceTag(source: r.source, via: r.via)
-                    }
+                    FieldName(label: r.label, info: r.source.isEmpty ? nil : r.info).gridColumnAlignment(.trailing)
+                    KVValueView(value: r.value)
                 }
             }
         }
@@ -367,41 +355,40 @@ struct InfoTab: View {
     private func col(_ id: String, _ p: ProcInfo) -> String { Column.byID[id]!.value(p, store).display }
 
     /// The Identity columns (name and pid are in the header, the command line has its own card).
-    private func src(_ id: String) -> String { Column.byID[id]!.source }
 
     private func identity(_ p: ProcInfo) -> [FactRow] {
-        var rows = [FactRow("Path", p.path.map { .path($0) } ?? .text("— (\(p.comm))"), src("path"))]
+        var rows = [FactRow("Path", p.path.map { .path($0) } ?? .text("— (\(p.comm))"), column: "path")]
         if let b = store.bundleID(of: p) {
             let version = p.bundlePath.flatMap(BundleInfo.version)
-            rows.append(FactRow("Bundle ID", .text(b + (version.map { "  \($0)" } ?? "")), src("bundleID")))
+            rows.append(FactRow("Bundle ID", .text(b + (version.map { "  \($0)" } ?? "")), column: "bundleID"))
         }
         rows += [
-            FactRow("Kind", .text(store.kind(of: p) ?? "—"), src("kind")),
-            FactRow("Architecture", .text(col("arch", p)), src("arch")),
+            FactRow("Kind", .text(store.kind(of: p) ?? "—"), column: "kind"),
+            FactRow("Architecture", .text(col("arch", p)), column: "arch"),
         ]
-        if let e = p.extensionPoint { rows.append(FactRow("Extension point", .text("\(ExtensionInfo.title(e))  (\(e))"), src("extPoint"))) }
+        if let e = p.extensionPoint { rows.append(FactRow("Extension point", .text("\(ExtensionInfo.title(e))  (\(e))"), column: "extPoint")) }
         return rows
     }
 
     /// The Execution columns, plus the working directory and scheduling.
     private func execution(_ p: ProcInfo) -> [FactRow] {
         var rows = [
-            FactRow("User", .text("\(p.user) (uid \(p.uid))"), src("user")),
+            FactRow("User", .text("\(p.user) (uid \(p.uid))"), column: "user"),
             FactRow("Started", .text(Fmt.shownStart(p.start) == p.start
                 ? "\(Fmt.date.string(from: p.start))  (\(Fmt.age(p.start)) ago)"
-                : "at boot, before the clock was set (\(Fmt.date.string(from: Fmt.shownStart(p.start))))"), src("started")),
-            FactRow("State", .text(col("state", p).ifEmpty("live")), src("state")),
+                : "at boot, before the clock was set (\(Fmt.date.string(from: Fmt.shownStart(p.start))))"), column: "started"),
+            FactRow("State", .text(col("state", p).ifEmpty("live")), column: "state"),
         ]
         // Cheap and unprivileged, so read here rather than waiting for the column's next refresh.
         if let s = p.idleExit ?? IdleExitState.read(p.pid) {
-            rows.append(FactRow("Idle exit (dirty tracking)", .text(s.contains(.tracked) ? s.long : "not tracked"), src("idleExit")))
+            rows.append(FactRow("Idle exit (dirty tracking)", .text(s.contains(.tracked) ? s.long : "not tracked"), column: "idleExit"))
         }
         rows += [
             FactRow("Working dir", (cwd?.key == p.key ? cwd?.path : nil).map { .path($0) } ?? .text("—"), "proc_pidinfo PROC_PIDVNODEPATHINFO"),
-            FactRow("TTY", .text(p.tty.map(SmartTree.ttyName) ?? "—"), src("tty")),
-            FactRow("Process group", .text(p.pgid == p.pid ? "\(p.pgid) (leader)" : "\(p.pgid)"), src("pgid")),
-            FactRow("Priority", .text(col("priority", p)), src("priority")),
-            FactRow("Nice", .text(col("nice", p)), src("nice"), via: p.viaHelper && p.uid != getuid() ? .helper : .direct),
+            FactRow("TTY", .text(p.tty.map(SmartTree.ttyName) ?? "—"), column: "tty"),
+            FactRow("Process group", .text(p.pgid == p.pid ? "\(p.pgid) (leader)" : "\(p.pgid)"), column: "pgid"),
+            FactRow("Priority", .text(col("priority", p)), column: "priority"),
+            FactRow("Nice", .text(col("nice", p)), column: "nice", via: p.viaHelper && p.uid != getuid() ? .helper : .direct),
         ]
         return rows
     }
@@ -754,6 +741,13 @@ struct UsageTab: View {
         "Power assertion": "IOPMCopyAssertionsByProcess",
         "Power assertions": "IOPMCopyAssertionsByProcess",
     ]
+    /// A Usage row's info bubble: the column of the same name's help where there is one.
+    static func info(_ label: String, group: Bool, via: FactRow.Via) -> FieldInfo {
+        let key = label.trimmingCharacters(in: .whitespaces)
+        let col = Column.all.first { $0.title == key }
+        return FieldInfo(help: col?.help, source: source(label, group: group), via: via, needs: col?.needs)
+    }
+
     static func source(_ label: String, group: Bool) -> String {
         let key = label.trimmingCharacters(in: .whitespaces)
         let s = sources[key] ?? sources[key.hasPrefix("QoS ") ? "QoS" : key] ?? ""
@@ -783,11 +777,9 @@ struct UsageTab: View {
                     }
                     ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                         GridRow {
-                            Text(row.0).foregroundStyle(.secondary).frame(width: Self.metricWidth, alignment: .leading)
+                            FieldName(label: row.0, info: info(row.0, group: group, via: via)).frame(width: Self.metricWidth, alignment: .leading)
                             Text(row.1).monospacedDigit().textSelection(.enabled).frame(width: Self.nowWidth, alignment: .trailing)
                             Text(row.2).monospacedDigit().textSelection(.enabled).frame(width: Self.totalWidth, alignment: .trailing)
-                            SourceTag(source: source(row.0, group: group), via: via)
-                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                 }
@@ -891,11 +883,8 @@ struct LaunchTab: View {
         }
         var body: some View {
             GridRow(alignment: .firstTextBaseline) {
-                Text(label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) { value }
-                    SourceTag(source: source)
-                }
+                FieldName(label: label, info: source.isEmpty ? nil : FieldInfo(source: source)).gridColumnAlignment(.trailing)
+                VStack(alignment: .leading, spacing: 2) { value }
             }
         }
     }
@@ -922,7 +911,7 @@ struct LaunchTab: View {
                     else { Text(store.responsibleDescription(p)).foregroundStyle(.secondary).textSelection(.enabled) }
                 }
                 if let r = record, !r.launcher.isEmpty {
-                    Row("Requested by") {
+                    Row("Requested by", source: "CoreServicesUIAgent's launch log at \(Fmt.date.string(from: r.at)), launcher pid \(r.launcher[0].pid); parents read when the request came in") {
                         FlowLayout(spacing: 4) {
                             ForEach(Array(r.launcher.enumerated()), id: \.offset) { i, hop in
                                 if i > 0 { Text("←").foregroundStyle(.tertiary) }
@@ -935,16 +924,16 @@ struct LaunchTab: View {
                     }
                 }
                 if let parentApp, let pid = parentApp.pid, let host = store.procs[pid] {
-                    Row("Parent app") {
+                    Row("Parent app", source: "LaunchServices parentASN \(parentApp.asn)") {
                         ProcessChip(proc: host)
                         sourceLine("LaunchServices parentASN \(parentApp.asn)", .exact)
                     }
                 }
                 if p.ppid == 1, let label = p.launchdLabel, !label.hasPrefix("application.") {
-                    Row("Loaded on behalf of") { launchdAttribution(label, p) }
+                    Row("Loaded on behalf of", source: "launchd's attribution record for \(label), as launchd logs it when launchservicesd asks") { launchdAttribution(label, p) }
                 }
                 if let e = env, e.fromShell {
-                    Row("Inherited environment") { envRows(e, p) }
+                    Row("Inherited environment", source: "the environment it inherited (CLAUDE_PID, CLAUDE_CODE_SESSION_ID, TERM_PROGRAM, PWD)") { envRows(e, p) }
                 }
             }
         }
@@ -961,7 +950,7 @@ struct LaunchTab: View {
         Card(title: "Mechanism", systemImage: "bolt.horizontal") {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
                 ForEach(mechanisms, id: \.self) { m in
-                    Row("How") {
+                    Row("How", source: m.source) {
                         Text(verbatim: m.how).fontWeight(.medium)
                         if let d = m.detail { Text(verbatim: d).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
                         sourceLine(m.source, m.confidence)
@@ -1148,14 +1137,13 @@ struct LaunchTab: View {
         }
     }
 
+    /// The confidence badge; the source itself is in the row's info bubble (and this badge's tooltip).
     private func sourceLine(_ s: String, _ c: LaunchMechanism.Confidence) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 5) {
-            Text(c.rawValue.uppercased()).font(.system(size: 8, weight: .bold))
-                .padding(.horizontal, 4).padding(.vertical, 1)
-                .foregroundStyle(c == .exact ? Color.green : .orange)
-                .background((c == .exact ? Color.green : .orange).opacity(0.15), in: RoundedRectangle(cornerRadius: 3))
-            SourceTag(source: s)
-        }
+        Text(c.rawValue.uppercased()).font(.system(size: 8, weight: .bold))
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .foregroundStyle(c == .exact ? Color.green : .orange)
+            .background((c == .exact ? Color.green : .orange).opacity(0.15), in: RoundedRectangle(cornerRadius: 3))
+            .help("Source: " + s)
     }
 
     /// launchd's `immediate reason`, with the common ones spelled out.

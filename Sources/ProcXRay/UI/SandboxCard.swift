@@ -11,12 +11,12 @@ struct SandboxCard: View {
 
     var body: some View {
         Card(title: "Sandbox", systemImage: "square.dashed") {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                FieldName(label: "Sandbox", info: FieldInfo(column: "sandboxed"))
                 Text(Self.summary(proc.sandboxed, entitlements: entitlements))
                     .help(proc.sandboxed == true && !Self.isAppSandbox(entitlements)
                           ? "Sandboxed, but not by the App Sandbox entitlement: a system profile, one inherited from its parent, or sandbox-exec."
                           : "")
-                SourceTag(source: "sandbox_check")
             }
             if proc.sandboxed == true && !exited {
                 if gone {
@@ -35,9 +35,9 @@ struct SandboxCard: View {
 
     static func summary(_ sandboxed: Bool?, entitlements: [String: Any]) -> String {
         switch sandboxed {
-        case true?: isAppSandbox(entitlements) ? "Sandbox on · App Sandbox" : "Sandbox on · profile: system, inherited or sandbox-exec"
-        case false?: "Sandbox off"
-        case nil: "Sandbox ?"
+        case true?: isAppSandbox(entitlements) ? "on · App Sandbox" : "on · profile: system, inherited or sandbox-exec"
+        case false?: "off"
+        case nil: "?"
         }
     }
 

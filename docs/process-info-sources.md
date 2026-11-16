@@ -102,7 +102,7 @@ Filled in the background and cached by `codeKey`. `SecCodeCopyGuestWithAttribute
 
 ### Source tokens shown in the UI
 
-Every column's tooltip and every inspector row (Info, Launch, Security, Usage) names its source with a short token; View ▸ Show Sources hides them. `· root` after a token means the helper read it. `Δ` means a rate: the change since the last refresh divided by the time between them. `derived:` marks a value worked out from others, and `Σ` on the group page a sum over the members. Most tokens are the calls described above; these are the ones the sections above don't name:
+Every column (its header tooltip and "About This Column") and every inspector field (the info bubble on its name, on Info, Launch, Security and Usage) names its source with a short token, and says whether it was read directly or as root by the helper. `Δ` means a rate: the change since the last refresh divided by the time between them. `derived:` marks a value worked out from others, and `Σ` on the group page a sum over the members. Most tokens are the calls described above; these are the ones the sections above don't name:
 
 | Token | What it is |
 |---|---|

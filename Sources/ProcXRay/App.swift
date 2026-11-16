@@ -50,7 +50,6 @@ struct ProcXRayApp: App {
     @AppStorage(AmbientPrefs.showIn) private var showIn: AmbientPrefs.ShowIn = .both
     @AppStorage(AmbientPrefs.launchToMenuBar) private var launchToMenuBar = false
     @AppStorage(SortKeepsGroups.key) private var sortKeepsGroups = false
-    @AppStorage(ShowSources.key) private var showSources = true
 
     init() {
         Section.migrate()
@@ -297,8 +296,6 @@ struct ProcXRayApp: App {
                 Button(store.paused ? "Resume Updates" : "Pause Updates") { store.paused.toggle() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Toggle("Keep Groups When Sorting", isOn: $sortKeepsGroups)
-                Toggle("Show Sources", isOn: $showSources)
-                    .keyboardShortcut("s", modifiers: [.command, .option])
             }
         }
 
