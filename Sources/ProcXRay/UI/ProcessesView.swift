@@ -14,6 +14,8 @@ enum IconCache {
     }
 }
 
+enum SortKeepsGroups { static let key = "processes.sortKeepsGroups" }
+
 struct ProcessesView: View {
     @Environment(Store.self) var store
     @Environment(\.openWindow) private var openWindow
@@ -43,8 +45,12 @@ struct ProcessesView: View {
             return ColumnSort(id: String(parts[0]), ascending: parts[1] == "asc")
         }, set: { savedSort = $0.map { "\($0.id),\($0.ascending ? "asc" : "desc")" } ?? "" })
     }
-    /// What the list shows: the chosen grouping, or the flat list while a column sort is on.
-    private var shownGrouping: Grouping { sort.wrappedValue == nil ? grouping : .flat }
+    /// View ▸ Keep Groups When Sorting: a column sort orders the rows inside each group instead of
+    /// switching to the flat list (ranks apps by their summed memory).
+    @AppStorage(SortKeepsGroups.key) private var sortKeepsGroups = false
+    /// What the list shows: the chosen grouping, or the flat list while a column sort is on (unless
+    /// sorting keeps the groups).
+    private var shownGrouping: Grouping { sort.wrappedValue == nil || sortKeepsGroups ? grouping : .flat }
     /// Picking a grouping clears the column sort, so the grouping is what you see.
     private var groupingChoice: Binding<Grouping> {
         Binding(get: { shownGrouping }, set: { grouping = $0; savedSort = "" })
@@ -117,7 +123,9 @@ struct ProcessesView: View {
                     Label(shownGrouping.label, systemImage: "list.bullet.indent").labelStyle(.titleAndIcon)
                 }
                 .fixedSize()
-                .help("Smart tree, flat list, or the flat list grouped by one field. Clicking a column header shows the flat list sorted by it; a third click comes back here.")
+                .help(sortKeepsGroups
+                      ? "Smart tree, flat list, or the flat list grouped by one field. Clicking a column header sorts the rows inside each group."
+                      : "Smart tree, flat list, or the flat list grouped by one field. Clicking a column header shows the flat list sorted by it; a third click comes back here. View ▸ Keep Groups When Sorting sorts inside the groups instead.")
                 Button { WindowPicker.start { AppRouter.shared.show($0) } } label: { Label("Pick Window", systemImage: "scope") }
                     .help("Click any window on screen to select the process that owns it (⌥⌘P)")
                 Button { store.paused.toggle() } label: {

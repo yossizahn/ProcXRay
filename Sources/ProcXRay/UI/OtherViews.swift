@@ -335,6 +335,11 @@ enum SelfTest {
                 .joined(separator: " ")
         }
         for c in smart { print("values \(c.title): \(values(c))") }
+        // Sorting inside the tree (Keep Groups When Sorting): each category's children by summed memory.
+        for c in smart {
+            let mems = (c.children ?? []).map { $0.sortValue.number ?? 0 }
+            print("sorted by memory in \(c.title): \(mems == mems.sorted(by: >) ? "ok" : "OUT OF ORDER") (first: \(c.children?.first?.title ?? "-"))")
+        }
         if let app = smart.first?.children?.first { print("values \(app.title): \(values(app))") }
         for g in Store.ghosts(procs: procs, lsApps: snap.ls) {
             print("left behind by \(g.name) (\(g.detail)): \(g.survivors.map { "\($0.name)(\($0.pid))" })")
