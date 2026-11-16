@@ -1107,6 +1107,7 @@ final class Store {
 enum Fmt {
     static func bytes(_ v: UInt64?) -> String {
         guard let v else { return "—" }
+        if v == 0 { return "0" }
         return ByteCountFormatter.string(fromByteCount: Int64(clamping: v), countStyle: .memory)
     }
     /// A count with thousands separators, or "—".
@@ -1115,8 +1116,16 @@ enum Fmt {
         return Int64(clamping: v).formatted()
     }
 
+    /// CPU-style durations: "12.34 s" below a minute, then "m:ss", "h:mm:ss", "Nd h:mm:ss".
     static func secs(_ nanos: UInt64?) -> String {
-        nanos.map { String(format: "%.2f s", Double($0) / 1e9) } ?? "—"
+        guard let nanos else { return "—" }
+        let s = Double(nanos) / 1e9
+        if s < 60 { return String(format: "%.2f s", s) }
+        let t = Int(s)
+        let (d, h, m, sec) = (t / 86400, t % 86400 / 3600, t % 3600 / 60, t % 60)
+        if d > 0 { return String(format: "%dd %d:%02d:%02d", d, h, m, sec) }
+        if h > 0 { return String(format: "%d:%02d:%02d", h, m, sec) }
+        return String(format: "%d:%02d", m, sec)
     }
 
     static func pct(_ v: Double?) -> String {
