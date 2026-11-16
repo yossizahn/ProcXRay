@@ -86,7 +86,7 @@ struct SandboxProbeTable: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .help("The kernel can't be asked about network access this way, so this comes from the entitlements.")
             HStack(alignment: .firstTextBaseline) {
-                Text("Asked of the kernel (sandbox_check), so it includes folders the user has granted since launch. Privacy permissions (camera, Desktop, …) are a separate gate: “allowed” here can still be refused by Privacy & Security.")
+                Text("“allowed” can still be refused by Privacy permissions (TCC), a separate gate. Source: sandbox_check (includes folders granted since launch).")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 if let recheck {
@@ -224,7 +224,7 @@ struct SandboxProfileSection: View {
             SandboxRulesView(data: data)
         }
         HStack {
-            Text("From secinitd's cache next to the container, written when the app last launched. Folders granted after launch are added on top and don't appear here; the checks above include them.")
+            Text("Folders granted after launch don't appear here; the checks above include them. Source: secinitd's cache next to the container, written at the app's last launch.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Spacer()
             Button("Reveal") { NSWorkspace.shared.selectFile(i.metadataPath, inFileViewerRootedAtPath: "") }
@@ -257,7 +257,7 @@ struct SandboxRulesView: View {
                     TextField("Filter by operation or rule text", text: $query)
                         .textFieldStyle(.roundedBorder).controlSize(.small)
                     MonoText(text: text(rs), sbpl: true).frame(height: 320)
-                    Text("Each operation's effective policy, reconstructed from the compiled profile. These describe what the kernel enforces; they aren't the original source and don't necessarily recompile to the same bytes (the compiler merges wildcard and inherited rules into each operation).")
+                    Text("Not the original source: the compiler merges wildcard and inherited rules into each operation. Source: the compiled profile, decoded.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             } else if let why = failure {

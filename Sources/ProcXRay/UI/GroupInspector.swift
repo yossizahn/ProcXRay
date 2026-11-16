@@ -170,21 +170,21 @@ struct GroupInspectorView: View {
             ("Context switches", rate(\.contextSwitches), count(\.contextSwitches)),
         ]
         return VStack(alignment: .leading, spacing: 12) {
-        UsageTab.section("CPU", "cpu", summedHistory(ms, \.cpu), format: { "\(Fmt.pct($0)) %" }, rows: cpuRows + vouchers.prefix(2))
+        UsageTab.section("CPU", "cpu", summedHistory(ms, \.cpu), group: true, format: { "\(Fmt.pct($0)) %" }, rows: cpuRows + vouchers.prefix(2))
         if ms.contains(where: { $0.rates?.gpuPercent != nil || $0.gpuNanos != nil }) {
-            UsageTab.section("GPU", "cpu.fill", nil, format: { _ in "" }, rows: [
+            UsageTab.section("GPU", "cpu.fill", nil, group: true, format: { _ in "" }, rows: [
                 ("% GPU", sum(ms) { $0.rates?.gpuPercent }.map { $0 < 0.05 ? "0" : String(format: "%.1f %%", $0) } ?? "—",
                  sum(ms) { $0.gpuNanos.map { Double($0) } }.map { Fmt.secs(UInt64($0)) } ?? "—"),
             ])
         }
-        UsageTab.section("Memory", "memorychip", summedHistory(ms, \.memory), fromZero: false, format: { Fmt.bytes(UInt64($0)) }, rows: [
+        UsageTab.section("Memory", "memorychip", summedHistory(ms, \.memory), fromZero: false, group: true, format: { Fmt.bytes(UInt64($0)) }, rows: [
             ("Memory", bytes(sum(ms) { $0.footprint.map { Double($0) } }), ""),
             ("Compressed", bytes(sum(ms) { $0.compressed.map { Double($0) } }), ""),
             ("Neural Engine", bytes(sum(ms) { $0.counters?.neuralFootprint.map { Double($0) } }), ""),
             ("Page faults", rate(\.faults), count(\.faults)),
             ("Page-ins", rate(\.pageins), count(\.pageins)),
         ])
-        UsageTab.section("Disk", "internaldrive", summedHistory(ms, \.disk), format: bytesPerSecFormat, rows: [
+        UsageTab.section("Disk", "internaldrive", summedHistory(ms, \.disk), group: true, format: bytesPerSecFormat, rows: [
             ("Read", sum(ms) { $0.rates?.diskRead }.map(bytesPerSecFormat) ?? "—", bytes(sum(ms) { $0.diskRead.map { Double($0) } })),
             ("Written", sum(ms) { $0.rates?.diskWrite }.map(bytesPerSecFormat) ?? "—", bytes(sum(ms) { $0.diskWrite.map { Double($0) } })),
             ("Logical writes", sum(ms) { $0.rates?.logicalWrites }.map(bytesPerSecFormat) ?? "—",
@@ -192,15 +192,15 @@ struct GroupInspectorView: View {
         ])
         UsageTab.networkSection(summedHistory(ms, \.network), inRate: sum(ms) { $0.netIn }, outRate: sum(ms) { $0.netOut },
                                 inTotal: sum(ms) { $0.netInTotal.map { Double($0) } }, outTotal: sum(ms) { $0.netOutTotal.map { Double($0) } },
-                                start: ms.map(\.start).min())
-        UsageTab.section("IPC", "arrow.left.arrow.right", nil, format: { _ in "" }, rows: [
+                                start: ms.map(\.start).min(), group: true)
+        UsageTab.section("IPC", "arrow.left.arrow.right", nil, group: true, format: { _ in "" }, rows: [
             ("BSD system calls", rate(\.unixSyscalls), count(\.unixSyscalls)),
             ("Mach system calls", rate(\.machSyscalls), count(\.machSyscalls)),
             ("Mach messages sent", rate(\.machMsgsSent), count(\.machMsgsSent)),
             ("Mach messages received", rate(\.machMsgsReceived), count(\.machMsgsReceived)),
             ("Open files", sum(ms) { $0.openFiles.map { Double($0) } }.map { Fmt.count(Int64($0)) } ?? "—", ""),
         ])
-        UsageTab.section("Energy", "bolt", summedHistory(ms, \.power), format: wattsFormat, rows: [
+        UsageTab.section("Energy", "bolt", summedHistory(ms, \.power), group: true, format: wattsFormat, rows: [
             ("Power", sum(ms) { $0.rates?.watts }.map(wattsFormat) ?? "—",
              sum(ms) { $0.energyNJ.map { Double($0) } }.map { String(format: "%.2f J", $0 / 1e9) } ?? "—"),
             ("Wakeups", rate(\.wakeups),

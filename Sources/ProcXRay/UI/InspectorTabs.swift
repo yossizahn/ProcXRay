@@ -171,15 +171,55 @@ struct TrustVerdict {
 
 // MARK: - Shared bits
 
+/// One fact in an inspector grid: its label, its value, and where the value comes from.
+struct FactRow {
+    enum Via { case direct, helper }
+    let label: String
+    let value: KVValue
+    /// The API, tool or calculation: "proc_pidpath", "csops CS_OPS_CDHASH", "derived: Smart tree".
+    let source: String
+    var via: Via = .direct
+    init(_ label: String, _ value: KVValue, _ source: String, via: Via = .direct) {
+        self.label = label; self.value = value; self.source = source; self.via = via
+    }
+}
+
+/// View ▸ Show Sources: every inspector row's source token.
+enum ShowSources { static let key = "showSources" }
+
+/// A value's source, after it: small, monospaced, tertiary; "· root" when the helper read it.
+struct SourceTag: View {
+    let source: String
+    var via: FactRow.Via = .direct
+    @AppStorage(ShowSources.key) private var show = true
+    var body: some View {
+        if show && !source.isEmpty {
+            Text(verbatim: source + (via == .helper ? " · root" : ""))
+                .font(.system(.caption, design: .monospaced)).foregroundStyle(.tertiary)
+                .lineLimit(1).truncationMode(.middle)
+                .help(via == .helper ? "Read as root by the privileged helper" : source)
+        }
+    }
+}
+
 /// A titled key/value grid that doesn't scroll by itself (tabs put several in one ScrollView).
 struct FactGrid: View {
-    let rows: [(String, KVValue)]
+    let rows: [FactRow]
+    init(rows: [FactRow]) {
+        assert(rows.allSatisfy { !$0.source.isEmpty }, "FactRow without a source: \(rows.filter { $0.source.isEmpty }.map(\.label))")
+        self.rows = rows
+    }
+    /// Rows without sources (the Mach-O window, which shows a file's own fields).
+    init(rows: [(String, KVValue)]) { self.rows = rows.map { FactRow($0.0, $0.1, "") } }
     var body: some View {
         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
-                GridRow {
-                    Text(r.0).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                    KVValueView(value: r.1)
+                GridRow(alignment: .firstTextBaseline) {
+                    Text(r.label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        KVValueView(value: r.value)
+                        SourceTag(source: r.source, via: r.via)
+                    }
                 }
             }
         }
@@ -327,39 +367,41 @@ struct InfoTab: View {
     private func col(_ id: String, _ p: ProcInfo) -> String { Column.byID[id]!.value(p, store).display }
 
     /// The Identity columns (name and pid are in the header, the command line has its own card).
-    private func identity(_ p: ProcInfo) -> [(String, KVValue)] {
-        var rows: [(String, KVValue)] = [("Path", p.path.map { .path($0) } ?? .text("— (\(p.comm))"))]
+    private func src(_ id: String) -> String { Column.byID[id]!.source }
+
+    private func identity(_ p: ProcInfo) -> [FactRow] {
+        var rows = [FactRow("Path", p.path.map { .path($0) } ?? .text("— (\(p.comm))"), src("path"))]
         if let b = store.bundleID(of: p) {
             let version = p.bundlePath.flatMap(BundleInfo.version)
-            rows.append(("Bundle ID", .text(b + (version.map { "  \($0)" } ?? ""))))
+            rows.append(FactRow("Bundle ID", .text(b + (version.map { "  \($0)" } ?? "")), src("bundleID")))
         }
         rows += [
-            ("Kind", .text(store.kind(of: p) ?? "—")),
-            ("Architecture", .text(col("arch", p))),
+            FactRow("Kind", .text(store.kind(of: p) ?? "—"), src("kind")),
+            FactRow("Architecture", .text(col("arch", p)), src("arch")),
         ]
-        if let e = p.extensionPoint { rows.append(("Extension point", .text("\(ExtensionInfo.title(e))  (\(e))"))) }
+        if let e = p.extensionPoint { rows.append(FactRow("Extension point", .text("\(ExtensionInfo.title(e))  (\(e))"), src("extPoint"))) }
         return rows
     }
 
     /// The Execution columns, plus the working directory and scheduling.
-    private func execution(_ p: ProcInfo) -> [(String, KVValue)] {
-        var rows: [(String, KVValue)] = [
-            ("User", .text("\(p.user) (uid \(p.uid))")),
-            ("Started", .text(Fmt.shownStart(p.start) == p.start
+    private func execution(_ p: ProcInfo) -> [FactRow] {
+        var rows = [
+            FactRow("User", .text("\(p.user) (uid \(p.uid))"), src("user")),
+            FactRow("Started", .text(Fmt.shownStart(p.start) == p.start
                 ? "\(Fmt.date.string(from: p.start))  (\(Fmt.age(p.start)) ago)"
-                : "at boot, before the clock was set (\(Fmt.date.string(from: Fmt.shownStart(p.start))))")),
-            ("State", .text(col("state", p).ifEmpty("live"))),
+                : "at boot, before the clock was set (\(Fmt.date.string(from: Fmt.shownStart(p.start))))"), src("started")),
+            FactRow("State", .text(col("state", p).ifEmpty("live")), src("state")),
         ]
         // Cheap and unprivileged, so read here rather than waiting for the column's next refresh.
         if let s = p.idleExit ?? IdleExitState.read(p.pid) {
-            rows.append(("Idle exit (dirty tracking)", .text(s.contains(.tracked) ? s.long : "not tracked")))
+            rows.append(FactRow("Idle exit (dirty tracking)", .text(s.contains(.tracked) ? s.long : "not tracked"), src("idleExit")))
         }
         rows += [
-            ("Working dir", (cwd?.key == p.key ? cwd?.path : nil).map { .path($0) } ?? .text("—")),
-            ("TTY", .text(p.tty.map(SmartTree.ttyName) ?? "—")),
-            ("Process group", .text(p.pgid == p.pid ? "\(p.pgid) (leader)" : "\(p.pgid)")),
-            ("Priority", .text(col("priority", p))),
-            ("Nice", .text(col("nice", p))),
+            FactRow("Working dir", (cwd?.key == p.key ? cwd?.path : nil).map { .path($0) } ?? .text("—"), "proc_pidinfo PROC_PIDVNODEPATHINFO"),
+            FactRow("TTY", .text(p.tty.map(SmartTree.ttyName) ?? "—"), src("tty")),
+            FactRow("Process group", .text(p.pgid == p.pid ? "\(p.pgid) (leader)" : "\(p.pgid)"), src("pgid")),
+            FactRow("Priority", .text(col("priority", p)), src("priority")),
+            FactRow("Nice", .text(col("nice", p)), src("nice"), via: p.viaHelper && p.uid != getuid() ? .helper : .direct),
         ]
         return rows
     }
@@ -519,13 +561,15 @@ struct UsageTab: View {
         let p = proc, r = p.rates, c = p.counters
         let h = store.history[p.key]
         let e = extra?.key == p.key ? extra : nil
+        // The task metrics came from the helper (root) when the app couldn't read them itself.
+        let via: FactRow.Via = p.viaHelper ? .helper : .direct
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 if !p.isInspectable {
                     Text("Task info isn't readable (owned by \(p.user)). Install the privileged helper to read it.")
                         .foregroundStyle(.secondary)
                 }
-                Self.section("CPU", "cpu", h?.cpu, format: { "\(Fmt.pct($0)) %" }, rows: [
+                Self.section("CPU", "cpu", h?.cpu, via: via, format: { "\(Fmt.pct($0)) %" }, rows: [
                     ("CPU", r?.cpuPercent.map { "\(Fmt.pct($0)) %" } ?? "—", Fmt.secs(p.cpuNanos)),
                     ("P-core share", r?.pCoreShare.map { String(format: "%.0f %%", $0) } ?? "—",
                      c?.pCoreNanos.map { pc in Fmt.secs(pc) + (p.cpuNanos.flatMap { $0 > 0 ? String(format: " (%.0f %%)", Double(pc) / Double($0) * 100) : nil } ?? "") } ?? "—"),
@@ -543,7 +587,7 @@ struct UsageTab: View {
                         ("% GPU", r?.gpuPercent.map { $0 < 0.05 ? "0" : String(format: "%.1f %%", $0) } ?? "—", Fmt.secs(p.gpuNanos)),
                     ])
                 }
-                Self.section("Memory", "memorychip", h?.memory, fromZero: false, format: { Fmt.bytes(UInt64($0)) }, rows: [
+                Self.section("Memory", "memorychip", h?.memory, fromZero: false, via: via, format: { Fmt.bytes(UInt64($0)) }, rows: [
                     ("Memory", Fmt.bytes(p.footprint), c?.peakFootprint.map { "peak " + Fmt.bytes($0) } ?? "—"),
                     ("Resident", Fmt.bytes(p.rss), ""),
                     ("Virtual", Fmt.bytes(p.virt), ""),
@@ -552,7 +596,7 @@ struct UsageTab: View {
                     ("Page faults", rate(r?.faults), c.map { "\(Fmt.count($0.faults)) (\(Fmt.count($0.cowFaults)) copy-on-write)" } ?? "—"),
                     ("Page-ins", rate(r?.pageins), Fmt.count(c?.pageins)),
                 ] + jetsamRows(p))
-                Self.section("Disk", "internaldrive", h?.disk, format: bytesPerSecFormat, rows: [
+                Self.section("Disk", "internaldrive", h?.disk, via: via, format: bytesPerSecFormat, rows: [
                     ("Read", r?.diskRead.map(bytesPerSecFormat) ?? "—", Fmt.bytes(p.diskRead)),
                     ("Written", r?.diskWrite.map(bytesPerSecFormat) ?? "—", Fmt.bytes(p.diskWrite)),
                     ("Logical writes", r?.logicalWrites.map(bytesPerSecFormat) ?? "—", Fmt.bytes(c?.logicalWrites)),
@@ -560,14 +604,14 @@ struct UsageTab: View {
                 Self.networkSection(h?.network, inRate: p.netIn, outRate: p.netOut,
                                     inTotal: p.netInTotal.map { Double($0) }, outTotal: p.netOutTotal.map { Double($0) },
                                     start: p.start)
-                Self.section("IPC", "arrow.left.arrow.right", nil, format: { _ in "" }, rows: [
+                Self.section("IPC", "arrow.left.arrow.right", nil, via: via, format: { _ in "" }, rows: [
                     ("BSD system calls", rate(r?.unixSyscalls), Fmt.count(c?.unixSyscalls)),
                     ("Mach system calls", rate(r?.machSyscalls), Fmt.count(c?.machSyscalls)),
                     ("Mach messages sent", rate(r?.machMsgsSent), Fmt.count(c?.machMsgsSent)),
                     ("Mach messages received", rate(r?.machMsgsReceived), Fmt.count(c?.machMsgsReceived)),
                     ("Open files", e?.files.map { Fmt.count($0) } ?? "—", ""),
                 ])
-                Self.section("Energy", "bolt", h?.power, format: wattsFormat, rows: [
+                Self.section("Energy", "bolt", h?.power, via: via, format: wattsFormat, rows: [
                     ("Power", r?.watts.map(wattsFormat) ?? "—", p.energyNJ.map { String(format: "%.2f J", Double($0) / 1e9) } ?? "—"),
                     ("Wakeups", rate(r?.wakeups), Fmt.count(p.wakeups)),
                 ] + voucherEnergyRows(p) + assertionRows(e))
@@ -635,7 +679,7 @@ struct UsageTab: View {
     /// group's earliest member's). One started before the reader (NetSampler.since) may have closed sockets
     /// before then, so its total is a lower bound, shown as "≥"; with nothing seen, "none since" the reader's start.
     static func networkSection(_ spark: [Double?]?, inRate: Double?, outRate: Double?, inTotal: Double?, outTotal: Double?,
-                               start: Date?) -> some View {
+                               start: Date?, group: Bool = false) -> some View {
         let since = NetSampler.shared.since
         let lowerBound = since.flatMap { s in start.map { $0 < s } } ?? false
         let sinceText = since.map { $0.formatted(Calendar.current.isDateInToday($0) ? .dateTime.hour().minute() : .dateTime.month().day().hour().minute()) } ?? ""
@@ -644,7 +688,7 @@ struct UsageTab: View {
             if v == 0 { return lowerBound ? "none since \(sinceText)" : "none" }
             return (lowerBound ? "≥ " : "") + Fmt.bytes(UInt64(v))
         }
-        return section("Network", "network", spark, format: bytesPerSecFormat, rows: [
+        return section("Network", "network", spark, group: group, format: bytesPerSecFormat, rows: [
             ("Received", inRate.map(bytesPerSecFormat) ?? "—", total(inTotal)),
             ("Sent", outRate.map(bytesPerSecFormat) ?? "—", total(outTotal)),
         ])
@@ -671,11 +715,66 @@ struct UsageTab: View {
 
     /// One section: metric, now and since start in fixed-width columns, and its sparkline. The group
     /// inspector uses it too, so both pages line up the same way.
-    static func section(_ title: String, _ symbol: String, _ spark: [Double?]?, fromZero: Bool = true,
+    /// Where each Usage row comes from, by its name (one name per quantity, so the name is the key).
+    static let sources: [String: String] = [
+        "CPU": "proc_taskinfo pti_total_user + pti_total_system",
+        "P-core share": "rusage ri_user_ptime + ri_system_ptime",
+        "Runnable wait": "rusage ri_runnable_time",
+        "Threads": "proc_taskinfo pti_threadnum",
+        "Instr/cycle": "rusage ri_instructions ÷ ri_cycles",
+        "Context switches": "proc_taskinfo pti_csw",
+        "QoS": "rusage ri_cpu_time_qos_*",
+        "CPU for others": "rusage ri_serviced_system_time",
+        "CPU by others": "rusage ri_billed_system_time",
+        "% GPU": "IORegistry accelerator clients",
+        "Memory": "rusage ri_phys_footprint",
+        "Resident": "proc_taskinfo pti_resident_size",
+        "Virtual": "proc_taskinfo pti_virtual_size",
+        "Compressed": "task_info TASK_VM_INFO",
+        "Neural Engine": "rusage ri_neural_footprint",
+        "Page faults": "proc_taskinfo pti_faults, pti_cow_faults",
+        "Page-ins": "proc_taskinfo pti_pageins",
+        "Memory limit": "memorystatus_control GET_MEMLIMIT_PROPERTIES",
+        "active / inactive": "memorystatus_control GET_MEMLIMIT_PROPERTIES",
+        "Memory-kill band (jetsam)": "memorystatus_control GET_PRIORITY_LIST",
+        "Read": "rusage ri_diskio_bytesread",
+        "Written": "rusage ri_diskio_byteswritten",
+        "Logical writes": "rusage ri_logical_writes",
+        "Received": "NetworkStatistics per-socket counts",
+        "Sent": "NetworkStatistics per-socket counts",
+        "BSD system calls": "proc_taskinfo pti_syscalls_unix",
+        "Mach system calls": "proc_taskinfo pti_syscalls_mach",
+        "Mach messages sent": "proc_taskinfo pti_messages_sent",
+        "Mach messages received": "proc_taskinfo pti_messages_received",
+        "Open files": "proc_pidinfo PROC_PIDLISTFDS",
+        "Power": "rusage ri_energy_nj",
+        "Wakeups": "rusage ri_pkg_idle_wkups + ri_interrupt_wkups",
+        "Energy for others": "rusage ri_serviced_energy",
+        "Energy by others": "rusage ri_billed_energy",
+        "Power assertion": "IOPMCopyAssertionsByProcess",
+        "Power assertions": "IOPMCopyAssertionsByProcess",
+    ]
+    static func source(_ label: String, group: Bool) -> String {
+        let key = label.trimmingCharacters(in: .whitespaces)
+        let s = sources[key] ?? sources[key.hasPrefix("QoS ") ? "QoS" : key] ?? ""
+        assert(!s.isEmpty, "Usage row without a source: \(label)")
+        return group && !s.isEmpty ? "Σ " + s : s
+    }
+
+    static func section(_ title: String, _ symbol: String, _ spark: [Double?]?, fromZero: Bool = true, group: Bool = false,
+                        via: FactRow.Via = .direct,
                         format: @escaping (Double) -> String, rows: [(String, String, String)]) -> some View {
         Card(title: title, systemImage: symbol) {
-            HStack(alignment: .top, spacing: 16) {
-                // Fixed column widths, so every section's columns and sparkline line up with the others'.
+            VStack(alignment: .leading, spacing: 6) {
+                // The history across the card, so the rows below keep room for their sources.
+                if let spark {
+                    let known = spark.compactMap { $0 }
+                    Sparkline(values: spark, fromZero: fromZero, format: format).frame(maxWidth: .infinity).frame(height: 32)
+                        .help(known.isEmpty ? "No history yet"
+                              : "Last \(spark.count) refreshes: \(format(known.min()!)) to \(format(known.max()!)); the line spans "
+                                + (fromZero ? "zero to the maximum." : "the minimum to the maximum."))
+                }
+                // Fixed column widths, so every section's columns line up with the others'.
                 Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 4) {
                     GridRow {
                         Text("").frame(width: Self.metricWidth, alignment: .leading)
@@ -687,15 +786,10 @@ struct UsageTab: View {
                             Text(row.0).foregroundStyle(.secondary).frame(width: Self.metricWidth, alignment: .leading)
                             Text(row.1).monospacedDigit().textSelection(.enabled).frame(width: Self.nowWidth, alignment: .trailing)
                             Text(row.2).monospacedDigit().textSelection(.enabled).frame(width: Self.totalWidth, alignment: .trailing)
+                            SourceTag(source: source(row.0, group: group), via: via)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
-                }
-                if let spark {
-                    let known = spark.compactMap { $0 }
-                    Sparkline(values: spark, fromZero: fromZero, format: format).frame(width: 200, height: 44)
-                        .help(known.isEmpty ? "No history yet"
-                              : "Last \(spark.count) refreshes: \(format(known.min()!)) to \(format(known.max()!)); the line spans "
-                                + (fromZero ? "zero to the maximum." : "the minimum to the maximum."))
                 }
             }
         }
@@ -757,8 +851,8 @@ struct LaunchTab: View {
                 if let e = p.extensionPoint {
                     Card(title: "Extension", systemImage: "puzzlepiece.extension") {
                         FactGrid(rows: [
-                            ("Extension point", .text("\(ExtensionInfo.title(e))  (\(e))")),
-                            ("Containing app", .text(p.containingAppName ?? "—")),
+                            FactRow("Extension point", .text("\(ExtensionInfo.title(e))  (\(e))"), "Info.plist NSExtensionPointIdentifier"),
+                            FactRow("Containing app", .text(p.containingAppName ?? "—"), "derived: enclosing .app bundle"),
                         ])
                     }
                 }
@@ -790,12 +884,18 @@ struct LaunchTab: View {
     /// A label and its value, for cards whose values are views rather than text.
     private struct Row<V: View>: View {
         let label: String
+        var source = ""
         @ViewBuilder let value: V
-        init(_ label: String, @ViewBuilder value: () -> V) { self.label = label; self.value = value() }
+        init(_ label: String, source: String = "", @ViewBuilder value: () -> V) {
+            self.label = label; self.source = source; self.value = value()
+        }
         var body: some View {
             GridRow(alignment: .firstTextBaseline) {
                 Text(label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                VStack(alignment: .leading, spacing: 2) { value }
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) { value }
+                    SourceTag(source: source)
+                }
             }
         }
     }
@@ -807,7 +907,7 @@ struct LaunchTab: View {
         let env = p.ppid == 1 ? envAttr : nil
         Card(title: Column.Section.lineage.title, systemImage: "arrow.up.to.line") {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
-                Row("Parent chain") {
+                Row("Parent chain", source: "kinfo_proc e_ppid") {
                     // Root first: kernel_task › launchd › … › this process.
                     FlowLayout(spacing: 4) {
                         ForEach(ancestors(p).reversed(), id: \.key) { a in
@@ -817,7 +917,7 @@ struct LaunchTab: View {
                         Text(p.name).fontWeight(.medium)
                     }
                 }
-                Row("Responsible") {
+                Row("Responsible", source: "responsibility_get_pid_responsible_for_pid") {
                     if let rp = store.responsibleProcess(p) { ProcessChip(proc: rp) }
                     else { Text(store.responsibleDescription(p)).foregroundStyle(.secondary).textSelection(.enabled) }
                 }
@@ -871,7 +971,7 @@ struct LaunchTab: View {
                     Row("How") { Text("—").foregroundStyle(.secondary).help("Nothing records how this process was started.") }
                 }
                 if let reason = jobFacts["immediate reason"] {
-                    Row("Started because") { Text(Self.reasonText(reason)).textSelection(.enabled) }
+                    Row("Started because", source: "launchctl print: immediate reason") { Text(Self.reasonText(reason)).textSelection(.enabled) }
                 }
             }
             if p.ppid == 1, record == nil {
@@ -887,15 +987,15 @@ struct LaunchTab: View {
         Card(title: "launchd job", systemImage: "gearshape.2") {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
                 if let label = p.launchdLabel {
-                    Row("Label") { Text(label).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
-                    Row("Domain") { Text(p.launchdDomain ?? top["domain"] ?? "—") }
-                    Row("Type") { Text(top["type"] ?? "—") }
-                    Row("Properties") { Text(top["properties"] ?? "—").textSelection(.enabled) }
-                    Row("Runs / last exit") { Text("\(top["runs"] ?? "—") / \(top["last exit code"] ?? "—")") }
-                    if let plist = top["path"], !plist.isEmpty { Row("Plist") { PathText(path: plist) } }
+                    Row("Label", source: "launchctl list") { Text(label).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
+                    Row("Domain", source: "launchctl print") { Text(p.launchdDomain ?? top["domain"] ?? "—") }
+                    Row("Type", source: "launchctl print") { Text(top["type"] ?? "—") }
+                    Row("Properties", source: "launchctl print") { Text(top["properties"] ?? "—").textSelection(.enabled) }
+                    Row("Runs / last exit", source: "launchctl print") { Text("\(top["runs"] ?? "—") / \(top["last exit code"] ?? "—")") }
+                    if let plist = top["path"], !plist.isEmpty { Row("Plist", source: "launchctl print: path") { PathText(path: plist) } }
                     // Set by launchd only for jobs an app registered through SMAppService.
                     if let bid = top["parent bundle identifier"], !bid.isEmpty {
-                        Row("Registered by (SMAppService)") {
+                        Row("Registered by (SMAppService)", source: "launchctl print: parent bundle identifier") {
                             HStack(spacing: 6) {
                                 if let a = store.lsApps.first(where: { $0.bundleID == bid && $0.pid != nil }),
                                    let host = store.procs[a.pid!] { ProcessChip(proc: host) }
@@ -905,7 +1005,7 @@ struct LaunchTab: View {
                     }
                 }
                 if let o = p.domainOwner, let host = store.procs[o] {
-                    Row("Per-process launchd domain (pid domain)") {
+                    Row("Per-process launchd domain (pid domain)", source: "launchctl print pid/<n>") {
                         ProcessChip(proc: host)
                             .help("launchctl print pid/\(o) lists this process among the services it launched.")
                     }
@@ -928,10 +1028,10 @@ struct LaunchTab: View {
     @ViewBuilder private func launchServices(_ ls: LSApp) -> some View {
         Card(title: "LaunchServices", systemImage: "app.badge") {
             FactGrid(rows: [
-                ("Name", .text(ls.name)),
-                ("Type", .text(ls.type.map(Self.lsTypeLabel) ?? "—")),
-                ("LaunchServices instance (ASN)", .text(ls.asn)),
-                ("State tags", .text(ls.stateTags.joined(separator: " ").ifEmpty("—"))),
+                FactRow("Name", .text(ls.name), "lsappinfo list"),
+                FactRow("Type", .text(ls.type.map(Self.lsTypeLabel) ?? "—"), "lsappinfo list"),
+                FactRow("LaunchServices instance (ASN)", .text(ls.asn), "lsappinfo list"),
+                FactRow("State tags", .text(ls.stateTags.joined(separator: " ").ifEmpty("—")), "lsappinfo list"),
             ])
             Collapsible(title: "lsappinfo record", startsOpen: false) { LSRecordContent(raw: ls.raw, filter: "") }
         }
@@ -950,11 +1050,11 @@ struct LaunchTab: View {
     @ViewBuilder private func backgroundItem(_ item: BTMItem) -> some View {
         Card(title: "Background item (BTM)", systemImage: "shippingbox") {
             FactGrid(rows: [
-                ("Item", .text(item.name)),
-                ("Developer", .text([item.developer, item.teamID].filter { !$0.isEmpty }.joined(separator: " · ").ifEmpty("—"))),
-                ("State", .text((item.enabled ? "enabled" : "disabled") + ", " + (item.allowed ? "allowed" : "not allowed"))),
-                ("Type", .text(item.type)),
-                ("Parent item", .text(item.parent.ifEmpty("—"))),
+                FactRow("Item", .text(item.name), "sfltool dumpbtm"),
+                FactRow("Developer", .text([item.developer, item.teamID].filter { !$0.isEmpty }.joined(separator: " · ").ifEmpty("—")), "sfltool dumpbtm"),
+                FactRow("State", .text((item.enabled ? "enabled" : "disabled") + ", " + (item.allowed ? "allowed" : "not allowed")), "sfltool dumpbtm"),
+                FactRow("Type", .text(item.type), "sfltool dumpbtm"),
+                FactRow("Parent item", .text(item.parent.ifEmpty("—")), "sfltool dumpbtm"),
             ])
         }
     }
@@ -973,7 +1073,7 @@ struct LaunchTab: View {
                        store.btmLoaded && item == nil ? "Background Items" : nil].compactMap { $0 }
         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
             if !missing.isEmpty {
-                Row("Not registered with") { Text(missing.joined(separator: ", ")) }
+                Row("Not registered with", source: "launchctl, lsappinfo, sfltool dumpbtm") { Text(missing.joined(separator: ", ")) }
             }
             if !store.btmLoaded {
                 Row("Background item") {
@@ -1054,7 +1154,7 @@ struct LaunchTab: View {
                 .padding(.horizontal, 4).padding(.vertical, 1)
                 .foregroundStyle(c == .exact ? Color.green : .orange)
                 .background((c == .exact ? Color.green : .orange).opacity(0.15), in: RoundedRectangle(cornerRadius: 3))
-            Text(verbatim: "Source: " + s).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            SourceTag(source: s)
         }
     }
 
@@ -1183,18 +1283,19 @@ struct TrustTab: View {
         }
     }
 
-    private func signatureRows(_ s: SignInfo) -> [(String, KVValue)] {
-        var rows: [(String, KVValue)] = []
-        rows.append(("Identifier", .text(s.identifier ?? "—")))
-        rows.append(("Team ID", .text(s.teamID ?? "—")))
-        rows.append(("Authority", .text(s.authority.isEmpty ? "—" : s.authority.joined(separator: "\n"))))
-        rows.append(("Valid", .text(s.valid.map { $0 ? "yes" : "NO" } ?? "unknown")))
-        rows.append(("Code hash (cdhash)", .text(s.cdHash ?? "—")))
-        rows.append(("Code directory flags", .text(s.staticFlagNames.joined(separator: " ").ifEmpty("none"))))
+    private func signatureRows(_ s: SignInfo) -> [FactRow] {
+        let info = "SecCodeCopySigningInformation"
+        var rows: [FactRow] = []
+        rows.append(FactRow("Identifier", .text(s.identifier ?? "—"), info))
+        rows.append(FactRow("Team ID", .text(s.teamID ?? "—"), info))
+        rows.append(FactRow("Authority", .text(s.authority.isEmpty ? "—" : s.authority.joined(separator: "\n")), info + " certificates"))
+        rows.append(FactRow("Valid", .text(s.valid.map { $0 ? "yes" : "NO" } ?? "unknown"), "SecCodeCheckValidity"))
+        rows.append(FactRow("Code hash (cdhash)", .text(s.cdHash ?? "—"), info + " unique"))
+        rows.append(FactRow("Code directory flags", .text(s.staticFlagNames.joined(separator: " ").ifEmpty("none")), info + " flags"))
         let status: String = s.runtimeStatus.map { String(format: "0x%08x  ", $0) + s.runtimeFlagNames.joined(separator: " ") } ?? "—"
-        rows.append(("Runtime status", .text(status)))
-        rows.append(("Designated requirement", .text(s.designatedRequirement ?? "—")))
-        if let e = s.error { rows.append(("Error", .text(e))) }
+        rows.append(FactRow("Runtime status", .text(status), info + " status"))
+        rows.append(FactRow("Designated requirement", .text(s.designatedRequirement ?? "—"), "SecCodeCopyDesignatedRequirement"))
+        if let e = s.error { rows.append(FactRow("Error", .text(e), "Security framework")) }
         return rows
     }
 

@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 // The process table's columns, as one table of descriptors (docs/tree-and-inspector-proposal.md, Part 2).
-// A column is a title, a tooltip, a value for a process and a rule for group rows; the outline, sorting,
+// A column is a title, its help and source, a value for a process and a rule for group rows; the outline, sorting,
 // the menus and the group-row pass all read this table, so a new column is one entry here.
 
 /// What one cell shows, and how it sorts.
@@ -107,13 +107,20 @@ struct Column: Identifiable {
 
     let id: String
     let title: String
-    let tooltip: String
+    /// What the value means, in a sentence or two.
+    let help: String
+    /// The API, tool or calculation it comes from: "rusage ri_phys_footprint", "derived: Smart tree".
+    let source: String
     let section: Section
     /// The system's own name for a cryptic quantity, when the title is a plain phrase ("resource coalition"
     /// for "Accounting group"). Leads the tooltip; menus and the column manager show "Title (term)".
     var term: String? = nil
     /// On an app's row (a Smart tree unit), show the app's own process's value: its pid, path, parent.
     var unitShowsRoot = false
+    /// What it takes beyond the user's own rights: "helper", "helper (admins only)".
+    var needs: String? = nil
+    /// For a .custom group rule: what group rows show.
+    var groupNote: String? = nil
     var minWidth: CGFloat = 50
     var width: CGFloat = 80
     var numeric = false
@@ -129,11 +136,13 @@ struct Column: Identifiable {
     let value: @MainActor (ProcInfo, Store) -> CellValue
 
     /// A column of numbers that add up: the value is `amount`, formatted.
-    static func amount(id: String, title: String, tooltip: String, section: Section, term: String? = nil, minWidth: CGFloat = 50,
+    static func amount(id: String, title: String, help: String, source: String, section: Section, term: String? = nil,
+                       needs: String? = nil, minWidth: CGFloat = 50,
                        width: CGFloat = 76, rule: GroupRule = .sum, reads: ExtraReads = [],
                        format: @escaping (Double) -> String,
                        _ amount: @escaping @MainActor (ProcInfo) -> Double?) -> Column {
-        Column(id: id, title: title, tooltip: tooltip, section: section, term: term, minWidth: minWidth, width: width, numeric: true,
+        Column(id: id, title: title, help: help, source: source, section: section, term: term, needs: needs,
+               minWidth: minWidth, width: width, numeric: true,
                rule: rule, format: format, amount: amount, reads: reads) { p, _ in amount(p).map { .number($0, format($0)) } ?? .unknown }
     }
 
@@ -204,6 +213,31 @@ struct Column: Identifiable {
         }
     }
 
+    /// The header's tooltip: the term, what it means, then where it comes from, what group rows show and
+    /// what it needs, each on its own line.
+    var tooltip: String {
+        // The system term first, unless the help already opens with it.
+        let lead = term.flatMap { help.lowercased().hasPrefix($0.lowercased()) ? nil : $0.prefix(1).uppercased() + $0.dropFirst() + ". " } ?? ""
+        var lines = [lead + help, "Source: " + source]
+        if let g = groupNoteText { lines.append("Group rows: " + g) }
+        if unitShowsRoot { lines.append("App rows: the app's own process.") }
+        if let needs { lines.append("Needs: " + needs) }
+        return lines.joined(separator: "\n")
+    }
+
+    /// What group rows show, from the rule.
+    var groupNoteText: String? {
+        switch rule {
+        case .sum: "the sum."
+        case .same: "the value, the few values, or the most common and how many others."
+        case .uniform: "the value when all agree."
+        case .range: "lowest–highest."
+        case .oldest: "the oldest; category rows: the newest."
+        case .blank: nil
+        case .custom: groupNote.map { $0 + "." }
+        }
+    }
+
     /// "Accounting group (resource coalition)": the title with its system term, where there is room.
     var fullTitle: String { term.map { "\(title) (\($0))" } ?? title }
 
@@ -229,7 +263,6 @@ private func num(_ v: Double?, _ f: (Double) -> String) -> CellValue { v.map { .
 private func text(_ s: String?) -> CellValue { s.map { .text($0) } ?? .empty }
 private let bytesFormat: (Double) -> String = { Fmt.bytes(UInt64(max(0, $0))) }
 private let countFormat: (Double) -> String = { Fmt.count(Int64($0)) }
-private let machNote = " From lsmp, run as root by the helper (admins only) about every 30 s while a Mach ports column is shown; — for a process started since. Group rows: the sum."
 private let secsFormat: (Double) -> String = { Fmt.secs(UInt64(max(0, $0))) }
 /// Events per second: one decimal below 10, whole numbers above.
 let perSecFormat: (Double) -> String = { $0 == 0 ? "0" : $0 < 10 ? String(format: "%.1f/s", $0) : "\(Fmt.count(Int64($0.rounded())))/s" }
@@ -282,25 +315,25 @@ private func state(_ p: ProcInfo) -> CellValue {
 private let catalogue: [Column] = [
     // Identity
     Column(id: "name", title: "Name",
-           tooltip: "Process name, or the title of a group row. Badges: LEFT (outlived its app), ZOMBIE, ROSETTA, SBX (sandboxed), EXITED.",
+           help: "Process name, or a group row's title. Badges: LEFT (outlived its app), ZOMBIE, ROSETTA, SBX (sandboxed), EXITED.", source: "kinfo_proc p_comm",
            section: .identity, minWidth: 180, width: 280, rule: .blank) { p, _ in .text(p.name) },
-    Column(id: "pid", title: "PID", tooltip: "Process ID.",
+    Column(id: "pid", title: "PID", help: "Process ID.", source: "kinfo_proc p_pid",
            section: .identity, unitShowsRoot: true, minWidth: 44, width: 56, numeric: true, rule: .blank) { p, _ in .number(Double(p.pid), String(p.pid)) },
     Column(id: "kind", title: "Kind",
-           tooltip: "Where the Smart tree puts it: category, then the role inside its app (\"App · XPC service\", \"Extension · Widgets\").",
+           help: "Where the Smart tree puts it: category, then the role inside its app (\"App · XPC service\", \"Extension · Widgets\").", source: "derived: Smart tree",
            section: .identity, width: 150, rule: .same) { p, s in text(s.kind(of: p)) },
-    Column(id: "path", title: "Path", tooltip: "Executable path.",
+    Column(id: "path", title: "Path", help: "Executable path.", source: "proc_pidpath",
            section: .identity, unitShowsRoot: true, width: 260, truncateMiddle: true, rule: .blank) { p, _ in text(p.path) },
     Column(id: "bundleID", title: "Bundle ID",
-           tooltip: "Bundle identifier of the app or extension bundle that holds the executable.",
+           help: "Bundle identifier of the app or extension bundle that holds the executable.", source: "lsappinfo; Info.plist CFBundleIdentifier",
            section: .identity, unitShowsRoot: true, width: 180, rule: .blank) { p, s in text(s.bundleID(of: p)) },
     Column(id: "commandLine", title: "Command line",
-           tooltip: "The arguments the process was started with (argv), read once per process. Other users' processes need the helper; \"—\" means they couldn't be read.",
-           section: .identity, unitShowsRoot: true, minWidth: 120, width: 360, rule: .blank) { p, _ in
+           help: "The arguments the process was started with (argv), read once per process; — when they couldn't be read.", source: "sysctl KERN_PROCARGS2",
+           section: .identity, unitShowsRoot: true, needs: "helper, for other users' processes", minWidth: 120, width: 360, rule: .blank) { p, _ in
         if let c = p.commandLine { return .text(c) }
         return p.commandLineRead ? .unknown : .empty
     },
-    Column(id: "arch", title: "Architecture", tooltip: "Native, or x86_64 translated by Rosetta.",
+    Column(id: "arch", title: "Architecture", help: "Native, or x86_64 translated by Rosetta.", source: "kinfo_proc p_flag P_TRANSLATED",
            section: .identity, width: 90, rule: .same) { p, _ in
         #if arch(arm64)
         p.isTranslated ? .text("x86_64 (Rosetta)", .warning) : .text("arm64")
@@ -310,11 +343,11 @@ private let catalogue: [Column] = [
     },
 
     // Execution
-    Column(id: "user", title: "User", tooltip: "User the process runs as.",
+    Column(id: "user", title: "User", help: "User the process runs as.", source: "kinfo_proc uid; getpwuid",
            section: .execution, width: 70, rule: .same) { p, _ in .text(p.user) },
     Column(id: "state", title: "State",
-           tooltip: "Not responding (WindowServer reports the app hung, as in Activity Monitor), stopped (by a signal such as SIGSTOP), zombie (exited, waiting for its parent) or starting, from the kernel's process state. Empty for a normal live process. Group rows: how many are stopped, zombie or starting.",
-           section: .execution, width: 76,
+           help: "Not responding (the app is hung, as in Activity Monitor), stopped (by a signal such as SIGSTOP), zombie (exited, waiting for its parent) or starting. Empty for a normal live process.", source: "kinfo_proc p_stat; WindowServer (not responding)",
+           section: .execution, groupNote: "a count per state", width: 76,
            rule: .custom { ms, _ in
                var counts: [String: Int] = [:]
                for m in ms { let v = state(m); if v.hasValue { counts[v.display, default: 0] += 1 } }
@@ -322,25 +355,25 @@ private let catalogue: [Column] = [
                let parts = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map { "\($0.value) \($0.key)" }
                return .number(Double(counts.values.reduce(0, +)), parts.joined(separator: ", "), .warning)
            }) { p, _ in state(p) },
-    Column(id: "started", title: "Started", tooltip: "Time since the process started. Group rows: the oldest; category rows: the newest.",
+    Column(id: "started", title: "Started", help: "Time since the process started.", source: "kinfo_proc p_starttime",
            section: .execution, unitShowsRoot: true, minWidth: 50, width: 70, numeric: false, rule: .oldest) { p, _ in .date(p.start, Fmt.age(p.start)) },
-    Column(id: "startTime", title: "Start time", tooltip: "When the process started. Group rows: the oldest; category rows: the newest.",
+    Column(id: "startTime", title: "Start time", help: "When the process started.", source: "kinfo_proc p_starttime",
            section: .execution, unitShowsRoot: true, width: 120, rule: .oldest) { p, _ in .date(p.start, Fmt.date.string(from: Fmt.shownStart(p.start))) },
-    Column(id: "tty", title: "TTY", tooltip: "Controlling terminal.",
+    Column(id: "tty", title: "TTY", help: "Controlling terminal.", source: "kinfo_proc e_tdev",
            section: .execution, width: 70, rule: .same) { p, _ in text(p.tty.map(SmartTree.ttyName)) },
-    Column(id: "pgid", title: "Process group", tooltip: "Process group id: a shell job, such as a pipeline, shares one.",
+    Column(id: "pgid", title: "Process group", help: "Process group id: a shell job, such as a pipeline, shares one.", source: "kinfo_proc e_pgid",
            section: .execution, width: 90, numeric: true, rule: .uniform) { p, _ in
         .number(Double(p.pgid), String(p.pgid))
     },
     Column(id: "idleExit", title: "Idle exit",
-           tooltip: "Dirty tracking (proc_get_dirty): \"can exit\" when launchd or the app lets the system stop it while idle; \"busy\" (dirty) while it has work and is kept. Empty: not tracked.",
+           help: "\"can exit\" when launchd or the app lets the system stop it while idle; \"busy\" (dirty) while it has work and is kept. Empty: not tracked.", source: "proc_get_dirty",
            section: .execution, term: "dirty tracking", width: 100, rule: .same, reads: .idleExit) { p, _ in
         guard let s = p.idleExit else { return .unknown }
         return .text(s.short, s.contains(.dirty) || !s.contains(.allowsIdleExit) ? .secondary : .normal)
     },
 
     // Lineage
-    Column(id: "parent", title: "Parent", tooltip: "Parent process (ppid).",
+    Column(id: "parent", title: "Parent", help: "Parent process.", source: "kinfo_proc e_ppid",
            section: .lineage, unitShowsRoot: true, width: 130, rule: .blank) { p, s in
         guard p.ppid != p.pid else { return .empty }
         // A "parent" started after its child is a later process that reused the pid.
@@ -348,7 +381,7 @@ private let catalogue: [Column] = [
         return .text("\(par.name) (\(p.ppid))")
     },
     Column(id: "responsible", title: "Responsible",
-           tooltip: "The process macOS holds responsible for this one (for privacy prompts and energy). † marks one that has exited.",
+           help: "The process macOS holds responsible for this one (for privacy prompts and energy). † marks one that has exited.", source: "responsibility_get_pid_responsible_for_pid",
            section: .lineage, unitShowsRoot: true, minWidth: 80, width: 130, rule: .blank) { p, s in
         if let t = p.leftBehindText { return .text("† \(t)", .warning) }
         guard let r = p.responsible else { return .empty }
@@ -356,69 +389,69 @@ private let catalogue: [Column] = [
         if let rp = s.procs[r] { return .text("\(rp.name) (\(r))") }
         return .text("† gone (\(r))", .warning)
     },
-    Column(id: "label", title: "launchd label", tooltip: "Label of the launchd job this process is the main process of.",
+    Column(id: "label", title: "launchd label", help: "Label of the launchd job this process is the main process of.", source: "launchctl list",
            section: .lineage, unitShowsRoot: true, width: 200, rule: .blank) { p, _ in text(p.launchdLabel) },
-    Column(id: "domain", title: "Domain", tooltip: "launchd domain of that job: system, gui or user.",
+    Column(id: "domain", title: "Domain", help: "launchd domain of that job: system, gui or user.", source: "launchctl print",
            section: .lineage, width: 64, rule: .same) { p, _ in text(p.launchdDomain) },
     Column(id: "lsType", title: "LaunchServices type",
-           tooltip: "The app's type as LaunchServices registers it (lsappinfo): Foreground (has a Dock icon), UIElement (no Dock icon) or BackgroundOnly (no UI). Empty: not registered with LaunchServices. The Smart tree's categories are derived from it.",
+           help: "The app's type as LaunchServices registers it: Foreground (has a Dock icon), UIElement (no Dock icon) or BackgroundOnly (no UI). Empty: not registered. The Smart tree's categories are derived from it.", source: "lsappinfo list",
            section: .lineage, unitShowsRoot: true, width: 110, rule: .same) { p, _ in text(p.lsType) },
     Column(id: "lsState", title: "LaunchServices state",
-           tooltip: "LaunchServices' state tags for the app, verbatim as lsappinfo prints them (such as !signalled).",
+           help: "LaunchServices' state tags for the app, verbatim (such as !signalled).", source: "lsappinfo list",
            section: .lineage, width: 140, rule: .blank) { p, _ in
         p.lsTags.isEmpty ? .empty : .text(p.lsTags.joined(separator: " "))
     },
-    Column(id: "extPoint", title: "Extension point", tooltip: "For an app extension: what it extends.",
+    Column(id: "extPoint", title: "Extension point", help: "For an app extension: what it extends.", source: "Info.plist NSExtensionPointIdentifier",
            section: .lineage, width: 130, rule: .same) { p, _ in
         text(p.extensionPoint.map(ExtensionInfo.title))
     },
-    Column(id: "containedIn", title: "Contained in", tooltip: "For an app extension: the app whose bundle holds it.",
+    Column(id: "containedIn", title: "Contained in", help: "For an app extension: the app whose bundle holds it.", source: "derived: enclosing .app bundle",
            section: .lineage, width: 120, rule: .same) { p, _ in text(p.containingAppName) },
     Column(id: "coalition", title: "Accounting group",
-           tooltip: "Resource coalition id: processes macOS accounts for together, usually an app and its helpers.",
+           help: "Resource coalition id: processes macOS accounts for together, usually an app and its helpers.", source: "proc_pidinfo PROC_PIDCOALITIONINFO",
            section: .lineage, term: "resource coalition", width: 100, numeric: true, rule: .uniform) { p, _ in
         p.coalition.map { .number(Double($0), String($0)) } ?? .empty
     },
     Column(id: "jetsam", title: "Memory-kill group",
-           tooltip: "Jetsam coalition id: processes macOS frees memory from together, such as a host app and its extensions.",
+           help: "Jetsam coalition id: processes macOS frees memory from together, such as a host app and its extensions.", source: "proc_pidinfo PROC_PIDCOALITIONINFO",
            section: .lineage, term: "jetsam coalition", width: 100, numeric: true, rule: .uniform) { p, _ in
         p.jetsamCoalition.map { .number(Double($0), String($0)) } ?? .empty
     },
     Column(id: "leftBehind", title: "Left behind",
-           tooltip: "The app that has exited but left this process running; macOS keeps the app 'running in background' while it lives. Empty otherwise.",
+           help: "The app that exited and left this process running; macOS keeps the app 'running in background' while it lives.", source: "derived: lsappinfo exited apps, coalitions",
            section: .lineage, width: 110, rule: .same) { p, _ in
         p.leftBehindText.map { .text($0, .warning) } ?? .empty
     },
     Column(id: "context", title: "Context",
-           tooltip: "launchd label, LaunchServices name, extension point, terminal, or the path. Group rows: process counts.",
-           section: .lineage, minWidth: 120, width: 300, rule: .blank) { _, _ in .empty },   // drawn by the cell
+           help: "launchd label, LaunchServices name, extension point, terminal, or the path.", source: "derived",
+           section: .lineage, groupNote: "process counts", minWidth: 120, width: 300, rule: .blank) { _, _ in .empty },   // drawn by the cell
 
     // CPU
     .amount(id: "cpu", title: "CPU %",
-            tooltip: "CPU use over the last refresh, as a percentage of one core (can pass 100). Group rows: the sum.",
+            help: "CPU use over the last refresh, as a percentage of one core (can pass 100).", source: "proc_taskinfo pti_total_user + pti_total_system, Δ",
             section: .cpu, minWidth: 44, width: 52, format: { Fmt.pct($0) }) { $0.cpuPercent },
-    .amount(id: "cpuTime", title: "CPU time", tooltip: "User plus system CPU time since the process started. Group rows: the sum.",
+    .amount(id: "cpuTime", title: "CPU time", help: "User plus system CPU time since the process started.", source: "proc_taskinfo pti_total_user + pti_total_system",
             section: .cpu, width: 80, format: secsFormat) { $0.cpuNanos.map { Double($0) } },
-    .amount(id: "threads", title: "Threads", tooltip: "Number of threads. Group rows: the sum.",
+    .amount(id: "threads", title: "Threads", help: "Number of threads.", source: "proc_taskinfo pti_threadnum",
             section: .cpu, minWidth: 44, width: 56, format: countFormat) { $0.threads.map { Double($0) } },
     .amount(id: "waiting", title: "Runnable wait",
-            tooltip: "Runnable but waiting: time the process's threads were ready to run but no core was free, as a percentage of one core." + rateNote,
+            help: "Runnable but waiting: time the threads were ready to run but no core was free, as a percentage of one core." + rateNote, source: "rusage ri_runnable_time − CPU time, Δ",
             section: .cpu, width: 70, rule: .blank, format: { String(format: "%.1f", $0) }) { $0.rates?.waitingPercent },
-    .amount(id: "cswRate", title: "Context switches/s", tooltip: "Context switches per second. Group rows: the sum." + rateNote,
+    .amount(id: "cswRate", title: "Context switches/s", help: "Context switches per second." + rateNote, source: "proc_taskinfo pti_csw, Δ",
             section: .cpu, width: 90, format: perSecFormat) { $0.rates?.contextSwitches },
     Column(id: "priority", title: "Priority",
-           tooltip: "Scheduling priority of the process's main thread (proc_taskinfo; 31 is the default, higher runs first).",
+           help: "Scheduling priority of the main thread: 31 is the default, higher runs first.", source: "proc_taskinfo pti_priority",
            section: .cpu, width: 56, numeric: true, rule: .range) { p, _ in
         p.priority.map { .number(Double($0), String($0)) } ?? .unknown
     },
     Column(id: "nice", title: "Nice",
-           tooltip: "Nice value (proc_bsdinfo): 0 is normal, positive yields the CPU to others. Other users' processes need the helper.",
-           section: .cpu, width: 48, numeric: true, rule: .range, reads: .nice) { p, _ in
+           help: "Nice value: 0 is normal, positive yields the CPU to others.", source: "proc_bsdinfo pbi_nice",
+           section: .cpu, needs: "helper, for other users' processes", width: 48, numeric: true, rule: .range, reads: .nice) { p, _ in
         p.nice.map { .number(Double($0), String($0), $0 > 0 ? .secondary : $0 < 0 ? .warning : .normal) } ?? .unknown
     },
     Column(id: "pcore", title: "P-core share",
-           tooltip: "Share of the process's CPU time spent on performance cores. Group rows: weighted by CPU time.",
-           section: .cpu, width: 70, numeric: true,
+           help: "Share of the process's CPU time spent on performance cores.", source: "rusage ri_user_ptime + ri_system_ptime",
+           section: .cpu, groupNote: "weighted by CPU time", width: 70, numeric: true,
            rule: .custom { ms, _ in
                var pc: UInt64 = 0, all: UInt64 = 0
                for m in ms { if let p = m.counters?.pCoreNanos, let c = m.cpuNanos { pc &+= p; all &+= c } }
@@ -430,8 +463,8 @@ private let catalogue: [Column] = [
         let v = Double(pc) / Double(c) * 100
         return .number(v, String(format: "%.0f %%", v))
     },
-    Column(id: "ipc", title: "Instr/cycle", tooltip: "Instructions retired per CPU cycle, since the process started. Group rows: all instructions over all cycles.",
-           section: .cpu, width: 70, numeric: true,
+    Column(id: "ipc", title: "Instr/cycle", help: "Instructions retired per CPU cycle, since the process started.", source: "rusage ri_instructions ÷ ri_cycles",
+           section: .cpu, groupNote: "all instructions over all cycles", width: 70, numeric: true,
            rule: .custom { ms, _ in
                var i: UInt64 = 0, c: UInt64 = 0
                for m in ms { if let mi = m.counters?.instructions, let mc = m.counters?.cycles { i &+= mi; c &+= mc } }
@@ -443,127 +476,127 @@ private let catalogue: [Column] = [
         let v = Double(i) / Double(c)
         return .number(v, String(format: "%.2f", v))
     },
-    .amount(id: "cycles", title: "Cycles", tooltip: "CPU cycles the process has used since it started (rusage ri_cycles). Group rows: the sum.",
+    .amount(id: "cycles", title: "Cycles", help: "CPU cycles the process has used since it started.", source: "rusage ri_cycles",
             section: .cpu, width: 70, format: siFormat) { $0.counters?.cycles.map { Double($0) } },
     .amount(id: "cycleRate", title: "Cycles/s",
-            tooltip: "CPU cycles per second: like CPU %, but weighted by clock speed. Group rows: the sum." + rateNote,
+            help: "CPU cycles per second: like CPU %, but weighted by clock speed." + rateNote, source: "rusage ri_cycles, Δ",
             section: .cpu, width: 70, format: { siFormat($0) + "/s" }) { $0.rates?.cycles },
     .amount(id: "instructions", title: "Instructions",
-            tooltip: "Instructions the process has retired since it started (rusage ri_instructions). Group rows: the sum.",
+            help: "Instructions the process has retired since it started.", source: "rusage ri_instructions",
             section: .cpu, width: 76, format: siFormat) { $0.counters?.instructions.map { Double($0) } },
     .amount(id: "instructionRate", title: "Instructions/s",
-            tooltip: "Instructions retired per second. Group rows: the sum." + rateNote,
+            help: "Instructions retired per second." + rateNote, source: "rusage ri_instructions, Δ",
             section: .cpu, width: 76, format: { siFormat($0) + "/s" }) { $0.rates?.instructions },
 
     // GPU
     .amount(id: "gpu", title: "% GPU",
-            tooltip: "GPU time over the last refresh, as a percentage of the interval (IORegistry accelerator clients). Group rows: the sum." + rateNote,
+            help: "GPU time over the last refresh, as a percentage of the interval." + rateNote, source: "IORegistry accelerator clients, Δ",
             section: .gpu, width: 56, reads: .gpu, format: { $0 < 0.05 ? "0" : String(format: "%.1f", $0) }) { $0.rates?.gpuPercent },
     .amount(id: "gpuTime", title: "GPU time",
-            tooltip: "GPU time since the process started (IORegistry accelerator clients); 0 for a process that never used the GPU. Group rows: the sum.",
+            help: "GPU time since the process started; 0 for a process that never used the GPU.", source: "IORegistry accelerator clients",
             section: .gpu, width: 76, reads: .gpu, format: secsFormat) { $0.gpuNanos.map { Double($0) } },
 
     // Memory
     .amount(id: "mem", title: "Memory",
-            tooltip: "Physical footprint: the memory macOS charges to the process, as in Activity Monitor. Group rows: the sum.",
+            help: "Physical footprint: the memory macOS charges to the process, as in Activity Monitor.", source: "rusage ri_phys_footprint",
             section: .memory, minWidth: 60, width: 76, format: bytesFormat) { $0.footprint.map { Double($0) } },
-    .amount(id: "peakMem", title: "Peak memory", tooltip: "Highest footprint since the process started.",
+    .amount(id: "peakMem", title: "Peak memory", help: "Highest footprint since the process started.", source: "rusage ri_lifetime_max_phys_footprint",
             section: .memory, width: 80, rule: .blank, format: bytesFormat) { $0.counters?.peakFootprint.map { Double($0) } },
     .amount(id: "resident", title: "Resident",
-            tooltip: "Resident size. Shared pages count once per process, so group rows show nothing.",
+            help: "Resident size. Shared pages count once per process, so group rows show nothing.", source: "proc_taskinfo pti_resident_size",
             section: .memory, width: 76, rule: .blank, format: bytesFormat) { $0.rss.map { Double($0) } },
-    .amount(id: "virtual", title: "Virtual", tooltip: "Virtual address space size.",
+    .amount(id: "virtual", title: "Virtual", help: "Virtual address space size.", source: "proc_taskinfo pti_virtual_size",
             section: .memory, width: 80, rule: .blank, format: bytesFormat) { $0.virt.map { Double($0) } },
     .amount(id: "compressed", title: "Compressed",
-            tooltip: "Memory the system has compressed for this process (TASK_VM_INFO). Your own processes; other users' need the helper. Group rows: the sum.",
-            section: .memory, width: 80, reads: .compressed, format: bytesFormat) { $0.compressed.map { Double($0) } },
-    .amount(id: "neural", title: "Neural Engine", tooltip: "Memory charged to the process for the Neural Engine. Group rows: the sum.",
+            help: "Memory the system has compressed for this process.", source: "task_info TASK_VM_INFO",
+            section: .memory, needs: "helper, for other users' processes", width: 80, reads: .compressed, format: bytesFormat) { $0.compressed.map { Double($0) } },
+    .amount(id: "neural", title: "Neural Engine", help: "Memory charged to the process for the Neural Engine.", source: "rusage ri_neural_footprint",
             section: .memory, width: 76, format: bytesFormat) { $0.counters?.neuralFootprint.map { Double($0) } },
     Column(id: "jetsamBand", title: "Memory-kill band",
-           tooltip: "Jetsam band: where the kernel's memory killer (jetsam) puts the process: when memory runs short, lower bands are killed first; 0 is the idle band. Read as root, so it needs the helper.",
-           section: .memory, term: "jetsam", width: 64, numeric: true, rule: .range, reads: .jetsam) { p, _ in
+           help: "Jetsam band: when memory runs short, lower bands are killed first; 0 is the idle band.", source: "memorystatus_control GET_PRIORITY_LIST",
+           section: .memory, term: "jetsam", needs: "helper", width: 64, numeric: true, rule: .range, reads: .jetsam) { p, _ in
         p.jetsam.map { .number(Double($0.band), String($0.band), $0.band == 0 ? .secondary : .normal) } ?? .unknown
     },
     Column(id: "memLimit", title: "Memory limit",
-           tooltip: "The footprint at which the kernel kills the process (jetsam), in force now. Some processes have a different limit while inactive (see the Usage tab). Needs the helper.",
-           section: .memory, width: 80, numeric: true, rule: .blank, reads: .jetsam) { p, _ in
+           help: "The footprint at which the kernel kills the process (jetsam), in force now. Some processes have a different limit while inactive (see Usage).", source: "memorystatus_control GET_MEMLIMIT_PROPERTIES",
+           section: .memory, needs: "helper", width: 80, numeric: true, rule: .blank, reads: .jetsam) { p, _ in
         guard let j = p.jetsam else { return .unknown }
         guard let b = j.limitBytes else { return .number(.infinity, "none", .secondary) }
         return .number(Double(b), Fmt.bytes(b))
     },
     Column(id: "memLimitUsed", title: "Limit used",
-           tooltip: "Footprint as a share of the memory limit: at 100 % the kernel kills the process. Needs the helper.",
-           section: .memory, width: 64, numeric: true, rule: .blank, reads: .jetsam) { p, _ in
+           help: "Footprint as a share of the memory limit: at 100 % the kernel kills the process.", source: "derived: Memory ÷ Memory limit",
+           section: .memory, needs: "helper", width: 64, numeric: true, rule: .blank, reads: .jetsam) { p, _ in
         guard let j = p.jetsam else { return .unknown }
         guard let b = j.limitBytes, b > 0, let f = p.footprint else { return .empty }
         let v = Double(f) / Double(b) * 100
         return .number(v, String(format: "%.0f %%", v), v >= 90 ? .danger : v >= 75 ? .warning : .normal)
     },
-    .amount(id: "faultRate", title: "Page faults/s", tooltip: "Page faults per second. Group rows: the sum." + rateNote,
+    .amount(id: "faultRate", title: "Page faults/s", help: "Page faults per second." + rateNote, source: "proc_taskinfo pti_faults, Δ",
             section: .memory, width: 80, format: perSecFormat) { $0.rates?.faults },
-    .amount(id: "pageinRate", title: "Page-ins/s", tooltip: "Pages read in from disk per second. Group rows: the sum." + rateNote,
+    .amount(id: "pageinRate", title: "Page-ins/s", help: "Pages read in from disk per second." + rateNote, source: "proc_taskinfo pti_pageins, Δ",
             section: .memory, width: 70, format: perSecFormat) { $0.rates?.pageins },
 
     // Disk
-    .amount(id: "readRate", title: "Read/s", tooltip: "Bytes read from disk per second. Group rows: the sum." + rateNote,
+    .amount(id: "readRate", title: "Read/s", help: "Bytes read from disk per second." + rateNote, source: "rusage ri_diskio_bytesread, Δ",
             section: .disk, width: 80, format: bytesPerSecFormat) { $0.rates?.diskRead },
-    .amount(id: "writeRate", title: "Written/s", tooltip: "Bytes written to disk per second. Group rows: the sum." + rateNote,
+    .amount(id: "writeRate", title: "Written/s", help: "Bytes written to disk per second." + rateNote, source: "rusage ri_diskio_byteswritten, Δ",
             section: .disk, width: 80, format: bytesPerSecFormat) { $0.rates?.diskWrite },
-    .amount(id: "diskRead", title: "Disk read", tooltip: "Bytes read from disk since the process started. Group rows: the sum.",
+    .amount(id: "diskRead", title: "Disk read", help: "Bytes read from disk since the process started.", source: "rusage ri_diskio_bytesread",
             section: .disk, width: 76, format: bytesFormat) { $0.diskRead.map { Double($0) } },
-    .amount(id: "diskWritten", title: "Disk written", tooltip: "Bytes written to disk since the process started. Group rows: the sum.",
+    .amount(id: "diskWritten", title: "Disk written", help: "Bytes written to disk since the process started.", source: "rusage ri_diskio_byteswritten",
             section: .disk, width: 76, format: bytesFormat) { $0.diskWrite.map { Double($0) } },
     .amount(id: "disk", title: "Disk I/O",
-            tooltip: "Bytes read plus written since the process started. — when neither could be read. Group rows: the sum.",
+            help: "Bytes read plus written since the process started; — when neither could be read.", source: "rusage ri_diskio_bytesread + ri_diskio_byteswritten",
             section: .disk, minWidth: 56, width: 70, format: bytesFormat) { p in
         let d = ProcNode.disk(p)
         return d < 0 ? nil : Double(d)
     },
     .amount(id: "logicalWrites", title: "Logical writes",
-            tooltip: "Bytes the process asked to write, before caching and compression. Group rows: the sum.",
+            help: "Bytes the process asked to write, before caching and compression.", source: "rusage ri_logical_writes",
             section: .disk, width: 80, format: bytesFormat) { $0.counters?.logicalWrites.map { Double($0) } },
 
     // Network
     .amount(id: "netIn", title: "Received/s",
-            tooltip: "Network bytes received per second over the last 2 s, from the kernel's per-socket counts (the ones nettop shows), read every 2 s since the app started. Includes connections that closed in that time, and loopback traffic. Group rows: the sum.",
+            help: "Network bytes received per second over the last 2 s, read every 2 s since the app started. Includes connections that closed in that time, and loopback traffic.", source: "NetworkStatistics per-socket counts (as nettop)",
             section: .network, width: 80, reads: .network, format: bytesPerSecFormat) { $0.netIn },
     .amount(id: "netOut", title: "Sent/s",
-            tooltip: "Network bytes sent per second over the last 2 s, from the kernel's per-socket counts (the ones nettop shows), read every 2 s since the app started. Includes connections that closed in that time, and loopback traffic. Group rows: the sum.",
+            help: "Network bytes sent per second over the last 2 s, read every 2 s since the app started. Includes connections that closed in that time, and loopback traffic.", source: "NetworkStatistics per-socket counts (as nettop)",
             section: .network, width: 80, reads: .network, format: bytesPerSecFormat) { $0.netOut },
 
     // IPC
-    .amount(id: "syscallRate", title: "System calls/s", tooltip: "BSD plus Mach system calls per second. Group rows: the sum." + rateNote,
+    .amount(id: "syscallRate", title: "System calls/s", help: "BSD plus Mach system calls per second." + rateNote, source: "proc_taskinfo pti_syscalls_unix + pti_syscalls_mach, Δ",
             section: .ipc, width: 90, format: perSecFormat) { $0.rates?.syscalls },
-    .amount(id: "machMsgRate", title: "Mach messages/s", tooltip: "Mach messages sent plus received per second. Group rows: the sum." + rateNote,
+    .amount(id: "machMsgRate", title: "Mach messages/s", help: "Mach messages sent plus received per second." + rateNote, source: "proc_taskinfo pti_messages_sent + pti_messages_received, Δ",
             section: .ipc, width: 90, format: perSecFormat) { $0.rates?.machMsgs },
     .amount(id: "machPorts", title: "Ports",
-            tooltip: "Mach port names in the process's port space: send, receive and send-once rights, port sets and dead names (lsmp's total; Activity Monitor's Ports)." + machNote,
-            section: .ipc, width: 62, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.total) } },
+            help: "Mach port names in the process's port space: send, receive and send-once rights, port sets and dead names (Activity Monitor's Ports). Read about every 30 s while a Mach ports column is shown; — for a process started since.", source: "lsmp, run as root",
+            section: .ipc, needs: "helper (admins only)", width: 62, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.total) } },
     .amount(id: "machDeadNames", title: "Dead names",
-            tooltip: "Rights the process still holds to ports whose receiver has died. Thousands that keep growing are a leak: the process never deallocates them." + machNote,
-            section: .ipc, width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.deadNames) } },
+            help: "Rights the process still holds to ports whose receiver has died. Thousands that keep growing are a leak: the process never deallocates them. Read about every 30 s while a Mach ports column is shown; — for a process started since.", source: "lsmp, run as root",
+            section: .ipc, needs: "helper (admins only)", width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.deadNames) } },
     .amount(id: "machRepliesOwed", title: "Replies owed",
-            tooltip: "Send-once rights: the ones the process holds: mostly replies it owes to processes that sent it a request. Thousands that keep growing are requests it never answers." + machNote,
-            section: .ipc, term: "send-once", width: 76, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.sendOnce) } },
+            help: "Send-once rights the process holds: mostly replies it owes to processes that sent it a request. Thousands that keep growing are requests it never answers. Read about every 30 s while a Mach ports column is shown; — for a process started since.", source: "lsmp, run as root",
+            section: .ipc, term: "send-once", needs: "helper (admins only)", width: 76, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.sendOnce) } },
     .amount(id: "machFullQueues", title: "Full queues",
-            tooltip: "Ports the process receives on whose message queue is full (messages waiting ≥ queue limit): senders block or time out until it receives." + machNote,
-            section: .ipc, width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.fullQueues) } },
+            help: "Ports the process receives on whose message queue is full: senders block or time out until it receives. Read about every 30 s while a Mach ports column is shown; — for a process started since.", source: "lsmp, run as root",
+            section: .ipc, needs: "helper (admins only)", width: 70, reads: .machPorts, format: countFormat) { $0.machPorts.map { Double($0.fullQueues) } },
     .amount(id: "openFiles", title: "Open files",
-            tooltip: "Open file descriptors: files, sockets, pipes (PROC_PIDLISTFDS). Other users' processes need the helper. Group rows: the sum.",
-            section: .ipc, width: 66, reads: .openFiles, format: countFormat) { $0.openFiles.map { Double($0) } },
+            help: "Open file descriptors: files, sockets, pipes.", source: "proc_pidinfo PROC_PIDLISTFDS",
+            section: .ipc, needs: "helper, for other users' processes", width: 66, reads: .openFiles, format: countFormat) { $0.openFiles.map { Double($0) } },
 
     // Energy
     .amount(id: "power", title: "Power",
-            tooltip: "Energy the process's threads used on the CPU, per second, in watts (rusage ri_energy_nj). Group rows: the sum." + rateNote,
+            help: "Energy the process's threads used on the CPU, per second, in watts." + rateNote, source: "rusage ri_energy_nj, Δ",
             section: .energy, width: 70, format: wattsFormat) { $0.rates?.watts },
-    .amount(id: "energy", title: "Energy", tooltip: "Energy the process's threads used on the CPU since it started, in joules (rusage ri_energy_nj). Group rows: the sum.",
+    .amount(id: "energy", title: "Energy", help: "Energy the process's threads used on the CPU since it started, in joules.", source: "rusage ri_energy_nj",
             section: .energy, width: 80, format: { String(format: "%.1f J", $0) }) { $0.energyNJ.map { Double($0) / 1e9 } },
     .amount(id: "wakeupRate", title: "Wakeups/s",
-            tooltip: "Wakeups per second: package idle plus interrupt wakeups (rusage ri_pkg_idle_wkups + ri_interrupt_wkups). Group rows: the sum." + rateNote,
+            help: "Wakeups per second: package idle plus interrupt wakeups." + rateNote, source: "rusage ri_pkg_idle_wkups + ri_interrupt_wkups, Δ",
             section: .energy, width: 80, format: perSecFormat) { $0.rates?.wakeups },
     Column(id: "preventingSleep", title: "Preventing sleep",
-           tooltip: "Power assertions that keep the Mac (system) or the display awake (IOPMCopyAssertionsByProcess). Group rows: how many processes hold one.",
-           section: .energy, width: 90, rule: .custom { ms, _ in
+           help: "Power assertions that keep the Mac (system) or the display awake.", source: "IOPMCopyAssertionsByProcess",
+           section: .energy, groupNote: "how many processes hold one", width: 90, rule: .custom { ms, _ in
                let n = ms.filter { ExtraRead.preventing($0.assertions ?? []) != nil }.count
                return n == 0 ? .empty : .number(Double(n), "\(n) process\(n == 1 ? "" : "es")", .warning)
            }, reads: .assertions) { p, _ in
@@ -572,20 +605,20 @@ private let catalogue: [Column] = [
     },
 
     // Security
-    Column(id: "signer", title: "Signer", tooltip: "Who signed the running code: Apple, a Developer ID team, ad hoc, or unsigned.",
+    Column(id: "signer", title: "Signer", help: "Who signed the running code: Apple, a Developer ID team, ad hoc, or unsigned.", source: "SecCodeCopySigningInformation",
            section: .security, minWidth: 70, width: 110, rule: .same) { p, _ in
         guard let s = p.signer else { return .empty }
         return .text(s, s == "unsigned" ? .danger : .normal)
     },
-    Column(id: "team", title: "Team ID", tooltip: "Developer team of the signature.",
+    Column(id: "team", title: "Team ID", help: "Developer team of the signature.", source: "SecCodeCopySigningInformation team identifier",
            section: .security, width: 90, rule: .same) { p, s in text(s.signInfo(for: p)?.teamID) },
-    Column(id: "signingID", title: "Signing ID", tooltip: "Identifier in the code signature.",
+    Column(id: "signingID", title: "Signing ID", help: "Identifier in the code signature.", source: "SecCodeCopySigningInformation identifier",
            section: .security, unitShowsRoot: true, width: 180, rule: .blank) { p, _ in text(p.signID) },
-    Column(id: "sandboxed", title: "Sandboxed", tooltip: "Whether the App Sandbox confines it. Group rows: all, none, or how many.",
-           section: .security, width: 76, rule: .custom { ms, _ in share(ms) { $0.sandboxed } }) { p, _ in yesNo(p.sandboxed) },
+    Column(id: "sandboxed", title: "Sandboxed", help: "Whether a sandbox confines it.", source: "sandbox_check",
+           section: .security, groupNote: "all, none, or how many", width: 76, rule: .custom { ms, _ in share(ms) { $0.sandboxed } }) { p, _ in yesNo(p.sandboxed) },
     Column(id: "hardened", title: "Hardened runtime",
-           tooltip: "Whether the signature enables the hardened runtime. \"platform\": Apple platform code, protected without it. Group rows: all, none, or how many, not counting platform code.",
-           section: .security, width: 76, rule: .custom { ms, s in share(ms) { hardened($0, s) } }) { p, s in
+           help: "Whether the signature enables the hardened runtime. \"platform\": Apple platform code, protected without it.", source: "code directory flags CS_RUNTIME",
+           section: .security, groupNote: "all, none, or how many, not counting platform code", width: 76, rule: .custom { ms, s in share(ms) { hardened($0, s) } }) { p, s in
         if p.signer == nil { return .empty }
         if s.signInfo(for: p)?.isPlatform == true { return .text("platform", .secondary) }
         return yesNo(hardened(p, s))

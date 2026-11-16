@@ -50,6 +50,7 @@ struct ProcXRayApp: App {
     @AppStorage(AmbientPrefs.showIn) private var showIn: AmbientPrefs.ShowIn = .both
     @AppStorage(AmbientPrefs.launchToMenuBar) private var launchToMenuBar = false
     @AppStorage(SortKeepsGroups.key) private var sortKeepsGroups = false
+    @AppStorage(ShowSources.key) private var showSources = true
 
     init() {
         ColumnPrefs.migrate()
@@ -297,6 +298,8 @@ struct ProcXRayApp: App {
                 Button("Pick Process by Window…") { WindowPicker.start { AppRouter.shared.show($0) } }
                     .keyboardShortcut("p", modifiers: [.command, .option])
                 Toggle("Keep Groups When Sorting", isOn: $sortKeepsGroups)
+                Toggle("Show Sources", isOn: $showSources)
+                    .keyboardShortcut("s", modifiers: [.command, .option])
             }
         }
 

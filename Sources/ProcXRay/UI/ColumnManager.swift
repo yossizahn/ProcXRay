@@ -73,7 +73,7 @@ struct ColumnManager: View {
                     let cols = Column.all.filter { $0.section == section && !shownSet.contains($0.id) && matches($0) }
                     if !cols.isEmpty {
                         SwiftUI.Section {
-                            ForEach(cols) { c in Text(c.fullTitle).help(c.tooltip).tag(c.id) }
+                            ForEach(cols) { c in ColumnManagerRow(column: c).tag(c.id) }
                         } header: {
                             Text(section.title)
                         }
@@ -92,7 +92,7 @@ struct ColumnManager: View {
             List(selection: $shownSelection) {
                 ForEach(shown, id: \.self) { id in
                     if let c = Column.byID[id] {
-                        Text(c.fullTitle).help(c.tooltip).tag(id)
+                        ColumnManagerRow(column: c).tag(id)
                     }
                 }
                 .onMove { from, to in
@@ -152,7 +152,7 @@ struct ColumnManager: View {
 
     private func matches(_ c: Column) -> Bool {
         let q = search.trimmingCharacters(in: .whitespaces)
-        return q.isEmpty || c.fullTitle.localizedCaseInsensitiveContains(q) || c.section.title.localizedCaseInsensitiveContains(q)
+        return q.isEmpty || c.fullTitle.localizedCaseInsensitiveContains(q) || c.source.localizedCaseInsensitiveContains(q) || c.section.title.localizedCaseInsensitiveContains(q)
     }
 
     /// Adds after the last selected shown column, or at the end.
@@ -182,5 +182,19 @@ struct ColumnManager: View {
         let to = step < 0 ? max(0, first - 1) : min(ids.count, last + 2)
         ids.move(fromOffsets: picked, toOffset: to)
         ColumnPrefs.apply(ids)
+    }
+}
+
+/// A column in the manager's lists: its full title, and its source in a column of its own.
+private struct ColumnManagerRow: View {
+    let column: Column
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(column.fullTitle)
+            Spacer(minLength: 8)
+            Text(column.source).font(.system(.caption, design: .monospaced)).foregroundStyle(.tertiary)
+                .lineLimit(1).truncationMode(.middle)
+        }
+        .help(column.tooltip)
     }
 }

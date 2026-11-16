@@ -29,17 +29,15 @@ struct HardeningCard: View {
                                 .foregroundStyle(on ? Color.green : Color.secondary)
                             Text(name).foregroundStyle(on ? .primary : .secondary)
                             Text(on ? "on" : "off").foregroundStyle(on ? .primary : .secondary)
+                            SourceTag(source: "os_security_config_get_for_proc", via: viaHelper ? .helper : .direct)
                             Spacer(minLength: 0)
                         }
                         .help(about)
                     }
                     if d.kernel != nil || d.ipcPolicy != nil {
                         Divider()
-                        FactGrid(rows: Self.kernelRows(d))
+                        FactGrid(rows: Self.kernelRows(d, via: viaHelper ? .helper : .direct))
                     }
-                    Text("From the kernel (os_security_config_get_for_proc; TASK_SECURITY_CONFIG_INFO and TASK_IPC_SPACE_POLICY_INFO, "
-                         + "decoded from what each hardened-process entitlement sets)\(viaHelper ? ", read as root through the privileged helper" : "").")
-                        .font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -47,7 +45,7 @@ struct HardeningCard: View {
     }
 
     /// The kernel records' fields beyond the five public flags.
-    static func kernelRows(_ d: SecurityDetail) -> [(String, KVValue)] {
+    static func kernelRows(_ d: SecurityDetail, via: FactRow.Via = .direct) -> [FactRow] {
         let onOff = { (b: Bool) in b ? "on" : "off" }
         var rows: [(String, KVValue)] = []
         if let k = d.kernel {
@@ -72,7 +70,9 @@ struct HardeningCard: View {
             if p.withoutTPRO { s += "; bit 0x80, seen only on Apple arm64e processes running without TPRO" }
             rows.append(("IPC space policy", .text(s)))
         }
-        return rows
+        return rows.map {
+            FactRow($0.0, $0.1, $0.0 == "IPC space policy" ? "task_info TASK_IPC_SPACE_POLICY_INFO" : "task_info TASK_SECURITY_CONFIG_INFO", via: via)
+        }
     }
 
     private var trailing: String? {
