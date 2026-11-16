@@ -18,6 +18,8 @@ struct ExtraReads: OptionSet, Hashable, Sendable {
     static let machPorts = ExtraReads(rawValue: 128)
     /// Jetsam band and memory limits (Jetsam.all): one call for every process, root only, so from the helper.
     static let jetsam = ExtraReads(rawValue: 256)
+    /// Dirty tracking (IdleExitState, proc_get_dirty): readable for every process without privileges.
+    static let idleExit = ExtraReads(rawValue: 512)
     /// What the helper can read for other users' processes. (A Mach port count was tried and dropped: even
     /// root got a task inspect port for 13 of 727 processes, and asking cost the helper ~11 ms per refresh.)
     static let viaHelper: ExtraReads = [.openFiles, .nice, .compressed, .jetsam]

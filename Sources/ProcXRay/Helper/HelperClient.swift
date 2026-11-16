@@ -69,9 +69,9 @@ final class HelperClient: @unchecked Sendable {
         return try? JSONDecoder().decode(PrivArgsEnv.self, from: data)
     }
 
-    func securityConfig(_ pid: Int32) -> SecurityConfig? {
-        guard let v = call({ p, done in p.securityConfig(pid: pid) { done($0) } }, timeout: 3), v >= 0 else { return nil }
-        return SecurityConfig(rawValue: UInt64(v))
+    func securityDetail(_ pid: Int32) -> SecurityDetail? {
+        guard let data = call({ p, done in p.securityConfig(pid: pid) { done($0) } }, timeout: 3) ?? nil else { return nil }
+        return try? JSONDecoder().decode(SecurityDetail.self, from: data)
     }
 
     func threads(_ pid: Int32) -> ThreadSnapshot? {

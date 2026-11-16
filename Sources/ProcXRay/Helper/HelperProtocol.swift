@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 13  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig
+    static let protocolVersion = 14  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -55,8 +55,8 @@ enum HelperConfig {
     func argsEnv(pid: Int32, reply: @escaping (Data?) -> Void)          // JSON PrivArgsEnv
     /// Every thread of one process (ThreadReader), for processes the app can't read itself. JSON ThreadSnapshot.
     func threads(pid: Int32, reply: @escaping (Data?) -> Void)
-    /// SecurityConfig raw value, or -1 when it can't be read (gone, or not the caller's and the caller isn't an admin).
-    func securityConfig(pid: Int32, reply: @escaping (Int64) -> Void)
+    /// JSON SecurityDetail, or nil when it can't be read (gone, or not the caller's and the caller isn't an admin).
+    func securityConfig(pid: Int32, reply: @escaping (Data?) -> Void)
     func runTool(_ tool: Int, pid: Int32, reply: @escaping (String) -> Void)
     /// Every process's Mach port links: `lsmp -a` paired in the helper, so the reply is the links (~1 MB of
     /// JSON MachSnapshot), not lsmp's ~40 MB. Admin callers only. (snapshot, nil) or (nil, why not).

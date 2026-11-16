@@ -89,9 +89,9 @@ enum HelperDaemon {
             reply(try? JSONEncoder().encode(v))
         }
 
-        func securityConfig(pid: Int32, reply: @escaping (Int64) -> Void) {
-            guard pid > 0, mayInspect(pid), let c = SecurityConfig.read(pid) else { reply(-1); return }
-            reply(Int64(bitPattern: c.rawValue))
+        func securityConfig(pid: Int32, reply: @escaping (Data?) -> Void) {
+            guard pid > 0, mayInspect(pid), let d = SecurityDetail.read(pid) else { reply(nil); return }
+            reply(try? JSONEncoder().encode(d))
         }
 
         func threads(pid: Int32, reply: @escaping (Data?) -> Void) {

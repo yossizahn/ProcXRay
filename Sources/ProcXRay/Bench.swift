@@ -176,9 +176,16 @@ enum Bench {
         }
         if what == "security" {
             // security <pid>: SecurityConfig through the helper, next to the local read.
-            let names = { (c: SecurityConfig?) in c.map { c in String(format: "0x%llx ", c.rawValue) + SecurityConfig.all.filter { c.contains($0.0) }.map(\.name).joined(separator: ", ") } ?? "unreadable" }
-            print("local:  \(names(SecurityConfig.read(pid)))")
-            print("helper: \(names(c.securityConfig(pid)))")
+            func names(_ d: SecurityDetail?) -> String {
+                guard let d else { return "unreadable" }
+                let flags: [String] = SecurityConfig.all.filter { d.config.contains($0.0) }.map(\.name)
+                var out = String(format: "0x%llx ", d.config.rawValue) + flags.joined(separator: ", ")
+                if let k = d.kernel { out += String(format: "; kernel 0x%x", k.raw) }
+                if let i = d.ipcPolicy { out += String(format: "; ipc 0x%x", i.raw) }
+                return out
+            }
+            print("local:  \(names(SecurityDetail.read(pid)))")
+            print("helper: \(names(c.securityDetail(pid)))")
             return
         }
         if what == "mach" {
@@ -668,6 +675,7 @@ enum Bench {
             ("assertions", .assertions, { ExtraRead.preventing($0.assertions ?? []) != nil }),
             ("gpu", .gpu, { $0.gpuNanos != nil }),
             ("jetsam", .jetsam, { $0.jetsam != nil }),
+            ("idle exit", .idleExit, { $0.idleExit != nil }),
         ]
         for (name, e, has) in cases {
             var ms = 0.0

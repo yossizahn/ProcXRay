@@ -377,6 +377,8 @@ struct OverviewTab: View {
             ("Kind", .text(store.kind(of: p) ?? "—")),
         ]
         if let l = p.launchdLabel { rows.append(("launchd label", .text(l))) }
+        // Cheap and unprivileged, so read here rather than waiting for the column's next refresh.
+        if let s = p.idleExit ?? IdleExitState.read(p.pid), s.contains(.tracked) { rows.append(("Idle exit", .text(s.long))) }
         if let e = p.extensionPoint { rows.append(("Extension point", .text("\(ExtensionInfo.title(e))  (\(e))"))) }
         return rows
     }

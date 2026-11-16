@@ -42,6 +42,8 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var compressed: UInt64?
     /// Jetsam band and memory limits (root only: from the helper, unless the app runs as root).
     var jetsam: JetsamInfo?
+    /// Dirty tracking: whether it may be stopped when idle, and whether it's busy now.
+    var idleExit: IdleExitState?
     /// Power assertion types held (IOPMCopyAssertionsByProcess); empty when it holds none.
     var assertions: [String]?
     /// GPU time since the process started, nanoseconds; nil when it has never used the GPU.
@@ -805,6 +807,7 @@ final class Store {
             // A pid reused since the snapshot would get another process's ports.
             if let mach, p.start <= mach.at { p.machPorts = mach.counts[k.pid] }
             if let jetsam { p.jetsam = jetsam[k.pid] }
+            if extras.contains(.idleExit) { p.idleExit = IdleExitState.read(k.pid) }
             out[k.pid] = p
         }
         let priv = privSource()

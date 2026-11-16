@@ -492,6 +492,12 @@ private let catalogue: [Column] = [
         guard let a = p.assertions else { return .unknown }
         return ExtraRead.preventing(a).map { .text($0, .warning) } ?? .empty
     },
+    Column(id: "idleExit", title: "Idle exit",
+           tooltip: "Dirty tracking (proc_get_dirty): \"can exit\" when launchd or the app lets the system stop it while idle; \"busy\" (dirty) while it has work and is kept. Empty: not tracked.",
+           section: .energy, width: 100, rule: .same(noun: "state"), reads: .idleExit) { p, _ in
+        guard let s = p.idleExit else { return .unknown }
+        return .text(s.short, s.contains(.dirty) || !s.contains(.allowsIdleExit) ? .secondary : .normal)
+    },
 
     // Security
     Column(id: "signer", title: "Signer", tooltip: "Who signed the running code: Apple, a Developer ID team, ad hoc, or unsigned.",
