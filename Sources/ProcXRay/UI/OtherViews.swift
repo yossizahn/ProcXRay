@@ -53,6 +53,18 @@ struct BackgroundItemsView: View {
         }
     }
 
+    /// The launchd job for an item: a running process with the item's executable that is a job's main
+    /// process, else a job whose label the item's identifier names.
+    private func job(for i: BTMItem) -> (label: String, pid: pid_t?)? {
+        if !i.executable.isEmpty,
+           let p = store.procs.values.first(where: { $0.path == i.executable && $0.launchdLabel != nil }) {
+            return (p.launchdLabel!, p.pid)
+        }
+        guard !i.identifier.isEmpty else { return nil }
+        let j = (store.jobs + store.otherJobs).first { i.identifier == $0.label || i.identifier.hasSuffix("." + $0.label) }
+        return j.map { ($0.label, $0.pid) }
+    }
+
     @ViewBuilder
     private func btmTable(_ items: [BTMItem]) -> some View {
         SplitPane(id: "btm", defaultFraction: 0.65) {
@@ -74,6 +86,18 @@ struct BackgroundItemsView: View {
                         if let path = Reveal.path(in: target) { Spacer(minLength: 0); RevealButton(path: path) }
                     }
                 }.width(min: 120, ideal: 260)
+                TableColumn("Job") { i in
+                    // The launchd job it installed, matched as the Launch tab matches: executable path, then label.
+                    if let j = job(for: i) {
+                        HStack(spacing: 4) {
+                            Text(j.label).truncationMode(.middle).truncationHelp(j.label)
+                            if let pid = j.pid {
+                                Button { AppRouter.shared.show(pid) } label: { Text(verbatim: "\(pid)").monospacedDigit() }
+                                    .buttonStyle(.link).help("Show pid \(pid) in Processes")
+                            }
+                        }
+                    }
+                }.width(min: 120, ideal: 220)
                 TableColumn("Last use") { i in Text(i.lastUse).truncationHelp(i.lastUse) }.width(min: 90, ideal: 150)
                 TableColumn("UID") { i in Text(i.uid) }.width(40)
             }
@@ -108,16 +132,21 @@ struct LaunchdView: View {
     @AppStorage("launchd.runningOnly") private var runningOnly = true
     @State private var detail = ""
     @State private var sort = [KeyPathComparator(\LaunchdJob.label)]
+    /// Label → plist path, read once when the view appears.
+    @State private var plists: [String: String] = [:]
 
     var body: some View {
         let procs = store.procs
-        let jobs = store.jobs.filter {
+        // The gui domain (launchctl list, every job) and the running jobs of the system and user domains.
+        let all = store.jobs + store.otherJobs
+        let jobs = all.filter {
             (!runningOnly || $0.pid != nil) && (search.isEmpty || $0.label.localizedCaseInsensitiveContains(search))
         }.sorted(using: sort)
-        let current = selection.flatMap { s in store.jobs.first { $0.id == s } }
+        let current = selection.flatMap { s in all.first { $0.id == s } }
         SplitPane(id: "launchd", defaultFraction: 0.6) {
             Table(jobs, selection: $selection, sortOrder: $sort) {
-                TableColumn("Label", value: \.label) { j in Text(j.label).truncationHelp(j.label) }.width(min: 200, ideal: 360)
+                TableColumn("Label", value: \.label) { j in Text(j.label).truncationHelp(j.label) }.width(min: 200, ideal: 340)
+                TableColumn("Domain", value: \.domain) { j in Text(j.domain).foregroundStyle(.secondary) }.width(min: 50, ideal: 60, max: 80)
                 TableColumn("PID") { j in Text(j.pid.map(String.init) ?? "—").monospacedDigit() }.width(60)
                 TableColumn("Last exit", value: \.lastExit) { j in
                     Text(j.lastExit).foregroundStyle(j.lastExit == "0" || j.lastExit == "-" ? Color.secondary : Color.red)
@@ -129,28 +158,50 @@ struct LaunchdView: View {
                         if let path { Spacer(minLength: 0); RevealButton(path: path) }
                     }
                 }
+                TableColumn("Plist") { j in
+                    let path = plists[j.label] ?? ""
+                    Text(path).foregroundStyle(.secondary).truncationMode(.middle).truncationHelp(path)
+                }
+            }
+            .contextMenu(forSelectionType: LaunchdJob.ID.self) { ids in
+                if let id = ids.first, let pid = all.first(where: { $0.id == id })?.pid {
+                    Button("Show in Processes") { AppRouter.shared.show(pid) }
+                }
             }
         } bottom: {
-            if let label = selection, current == nil {
-                PanePlaceholder(text: "\(label) is no longer loaded in launchd")
-            } else if selection != nil {
-                if detail == "loading…" { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
-                else { OutputPane(raw: detail, filterable: true) { f in KVTreeView(text: detail, filter: f) } }
+            if selection != nil, current == nil {
+                PanePlaceholder(text: "\(selection ?? "") is no longer loaded in launchd")
+            } else if let current {
+                VStack(spacing: 0) {
+                    if let pid = current.pid {
+                        HStack {
+                            Text(verbatim: "pid \(pid)").foregroundStyle(.secondary)
+                            Button("Show in Processes") { AppRouter.shared.show(pid) }.controlSize(.small)
+                            Spacer()
+                        }
+                        .padding(6)
+                        Divider()
+                    }
+                    if detail == "loading…" { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
+                    else { OutputPane(raw: detail, filterable: true) { f in KVTreeView(text: detail, filter: f) } }
+                }
             } else { PanePlaceholder(text: "Select a job to see launchctl print") }
         }
         // The label stays the same when the job restarts or is removed: reload when its row changes,
         // and on a manual refresh (run counts and other details aren't in the row).
         .task(id: "\(selection ?? "")|\(current.map { "\($0)" } ?? "gone")|\(store.fullRefreshGen)") {
-            guard let label = selection, current != nil else { return }
+            guard let current else { return }
             detail = "loading…"
-            let d = await Task.detached { Launchd.printJob(label) }.value
+            let (label, domain) = (current.label, current.domain)
+            let d = await Task.detached { Launchd.printJob(label, domain: domain) }.value
             guard !Task.isCancelled else { return }   // selection moved on while launchctl ran
             detail = d
         }
+        .task { if plists.isEmpty { plists = await Task.detached { Launchd.plistPaths() }.value } }
         .searchable(text: $search, placement: .toolbar)
         .toolbar { Toggle("Running only", isOn: $runningOnly) }
         .navigationTitle("launchd Jobs")
-        .navigationSubtitle("gui/\(getuid()) domain — \(store.jobs.count) jobs")
+        .navigationSubtitle("gui/\(getuid()), with the running jobs of system and user/\(getuid()) — \(all.count) jobs")
     }
 }
 

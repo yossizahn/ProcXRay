@@ -54,6 +54,17 @@ enum AmbientPrefs {
 /// The figures the menu bar, the top-consumer lists and the alerts work with.
 enum AmbientMetric: String, CaseIterable, Identifiable, Sendable {
     case cpu, gpu, memory, disk, network
+
+    /// The process list's column for this metric, for "Show All". Disk and network rank by read plus
+    /// written (received plus sent), which no single column shows.
+    var columnID: String? {
+        switch self {
+        case .cpu: "cpu"
+        case .gpu: "gpu"
+        case .memory: "mem"
+        case .disk, .network: nil
+        }
+    }
     var id: String { rawValue }
     var title: String {
         switch self {

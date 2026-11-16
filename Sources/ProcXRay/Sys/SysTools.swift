@@ -241,7 +241,8 @@ enum BTM {
 // MARK: - launchd
 
 struct LaunchdJob: Identifiable, Hashable, Sendable {
-    var id: String { label }
+    /// A label can be loaded in more than one domain.
+    var id: String { "\(domain)/\(label)" }
     var label: String
     var pid: pid_t?
     var lastExit: String
@@ -298,6 +299,28 @@ enum Launchd {
 
     /// `launchctl print` for a label, trying the domains a job of yours or the system's can be in: gui (agents of
     /// the login session), user (agents and XPC services outside it, e.g. CoreSimulator's), then system.
+    /// `launchctl print` for the job in its own domain.
+    static func printJob(_ label: String, domain: String) -> String {
+        let target = domain == "system" ? "system/\(label)" : "\(domain)/\(getuid())/\(label)"
+        return Shell.run("/bin/launchctl", ["print", target], timeout: 10)
+    }
+
+    /// Label → plist path, from the standard launchd folders (jobs an app registered through SMAppService
+    /// keep their plist inside the app and aren't here). Reads a few hundred small plists: call off the main thread.
+    static func plistPaths() -> [String: String] {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let dirs = ["\(home)/Library/LaunchAgents", "/Library/LaunchAgents", "/Library/LaunchDaemons",
+                    "/System/Library/LaunchAgents", "/System/Library/LaunchDaemons"]
+        var out: [String: String] = [:]
+        for d in dirs {
+            for f in (try? FileManager.default.contentsOfDirectory(atPath: d)) ?? [] where f.hasSuffix(".plist") {
+                let path = d + "/" + f
+                if let label = NSDictionary(contentsOfFile: path)?["Label"] as? String, out[label] == nil { out[label] = path }
+            }
+        }
+        return out
+    }
+
     static func printJob(_ label: String) -> String {
         var out = ""
         for domain in ["gui/\(getuid())", "user/\(getuid())", "system"] {

@@ -10,6 +10,18 @@ final class AppRouter {
     struct Reveal: Equatable { var pid: pid_t; var gen: Int }
     private(set) var reveal: Reveal?
     func show(_ pid: pid_t) { reveal = Reveal(pid: pid, gen: (reveal?.gen ?? 0) + 1) }
+
+    /// Opens the process list sorted by a column (descending), or with a predicate.
+    static func showProcessList(sortedBy column: String? = nil, predicate: String? = nil) {
+        let d = UserDefaults.standard
+        d.set("Processes", forKey: "section")
+        if let predicate { d.set(predicate, forKey: "processes.predicate") }
+        if let column {
+            ColumnPrefs.set(column, shown: true)   // a sort by a hidden column is dropped
+            d.set("\(column),desc", forKey: "processes.columnSort")
+        }
+        if let w = openWindow { openMain(w) }
+    }
     /// For the app delegate, which has no SwiftUI environment: kept by the menu bar label, which is always there
     /// when "Start in the menu bar" can be on.
     static var openWindow: OpenWindowAction?
@@ -354,7 +366,13 @@ struct TriageView: View {
                 }
                 ForEach(monitor.alerts) { a in AlertRow(alert: a) }
             }
-            section("Top \(topMetric.title.lowercased())", count: nil, symbol: topMetric.symbol) {
+            section("Top \(topMetric.title.lowercased())", count: nil, symbol: topMetric.symbol, trailing: {
+                if let col = topMetric.columnID {
+                    Button("Show All") { AppRouter.showProcessList(sortedBy: col) }
+                        .buttonStyle(.borderless).font(.caption)
+                        .help("Open the process list sorted by \(topMetric.title)")
+                }
+            }) {
                 let list = monitor.top[topMetric] ?? []
                 if list.isEmpty { empty("No readings yet") }
                 let peak = list.compactMap { topMetric.value($0) }.max() ?? 1
@@ -363,7 +381,11 @@ struct TriageView: View {
                             fraction: (topMetric.value(p) ?? 0) / max(peak, 1e-9))
                 }
             }
-            section("Just launched", count: monitor.launched.count, symbol: "sparkle") {
+            section("Just launched", count: monitor.launched.count, symbol: "sparkle", trailing: {
+                Button("Show All") { AppRouter.showProcessList(predicate: FilterChip.recent.source) }
+                    .buttonStyle(.borderless).font(.caption)
+                    .help("Open the process list with Started < 5 min")
+            }) {
                 if monitor.launched.isEmpty { empty(thirdPartyOnly ? "No third-party process started lately" : "Nothing started lately") }
                 ForEach(monitor.launched.prefix(compact ? 5 : 30)) { e in
                     ProcRow(proc: e.proc, detail: "\(Fmt.age(e.at)) ago", running: true)
