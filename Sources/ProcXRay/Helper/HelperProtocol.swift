@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 14  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail
+    static let protocolVersion = 15  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -114,7 +114,9 @@ enum HelperTool: Int, CaseIterable {
     func argv(pid: Int32) -> (String, [String])? {
         switch self {
         case .lsof: return pid > 0 ? ("/usr/sbin/lsof", ["-n", "-P", "-p", "\(pid)"]) : nil
-        case .vmmap: return pid > 0 ? ("/usr/bin/vmmap", ["--summary", "\(pid)"]) : nil
+        // Every region (-w: paths not truncated), then the same summary --summary prints; as fast as --summary
+        // (1.1–1.4 s for 7–16k regions) and 1–2 MB of text.
+        case .vmmap: return pid > 0 ? ("/usr/bin/vmmap", ["-w", "\(pid)"]) : nil
         // Without -file, sample also writes its report to /tmp (as root, world-readable when run by the helper).
         case .sample: return pid > 0 ? ("/usr/bin/sample", ["\(pid)", "1", "-mayDie", "-file", "/dev/stdout"]) : nil
         // One sample of every thread's stack (duration 0): ~0.3 s with symbols, against ~20 s for a 1 s run of

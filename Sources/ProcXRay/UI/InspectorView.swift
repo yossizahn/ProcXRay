@@ -35,7 +35,7 @@ struct InspectorView: View {
                 case .usage: UsageTab(proc: proc, exited: exited)
                 case .threads: ThreadsView(proc: proc, exited: exited)
                 case .memory:
-                    toolTab(.vmmap, auto: false, title: "vmmap --summary \(proc.pid)",
+                    toolTab(.vmmap, auto: false, title: "vmmap -w \(proc.pid)",
                             parse: { VmmapParser.parse($0) }, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
                 case .filesPorts:
                     toolTab(.lsof, auto: true, title: "lsof -n -P -p \(proc.pid)",

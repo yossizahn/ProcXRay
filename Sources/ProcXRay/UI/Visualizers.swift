@@ -744,10 +744,37 @@ struct LsofView: View {
 struct VmmapView: View {
     let s: VMSummary
     let filter: String
-    enum Mode: String, CaseIterable { case chart = "Chart", regions = "Regions", zones = "Malloc Zones" }
+    enum Mode: String, CaseIterable {
+        case chart = "Chart", types = "Types", list = "All Regions", files = "Files", zones = "Malloc Zones"
+    }
     @State private var mode = Mode.chart
     @State private var regionSort = [KeyPathComparator(\VMRegion.resident, order: .reverse)]
     @State private var zoneSort = [KeyPathComparator(\MallocZone.allocated, order: .reverse)]
+    /// All Regions narrowed to one region type or one file, from Types, Files or the chart.
+    @State private var scope: Scope?
+    @State private var access = Access.all
+    @State private var imagesOnly = false
+
+    enum Scope: Equatable {
+        case type(String), file(String), zone(String)
+        var label: String {
+            switch self {
+            case .type(let t): "Type: \(t)"
+            case .file(let p): "File: \((p as NSString).lastPathComponent)"
+            case .zone(let z): "Zone: \(z)"
+            }
+        }
+        func contains(_ e: VMMapEntry) -> Bool {
+            switch self {
+            case .type(let t): e.type == t
+            case .file(let p): e.detail == p
+            case .zone(let z): e.detail == z || e.detail == z + " zone structure"
+            }
+        }
+    }
+    enum Access: String, CaseIterable { case all = "All", writable = "Writable", readOnly = "Not writable" }
+
+    private func show(_ s: Scope) { scope = s; mode = .list }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -785,11 +812,15 @@ struct VmmapView: View {
             ForEach(Array(s.portions.enumerated()), id: \.offset) { _, p in
                 PortionBar(title: p.title, total: p.total, parts: p.parts).padding(.horizontal, 10)
             }
-            Picker("", selection: $mode) { ForEach(Mode.allCases, id: \.self) { Text($0.rawValue) } }
+            // A summary-only report (an older helper) has no region list: no All Regions or Files.
+            let modes = s.entries.isEmpty ? Mode.allCases.filter { $0 != .list && $0 != .files } : Mode.allCases
+            Picker("", selection: $mode) { ForEach(modes, id: \.self) { Text($0.rawValue) } }
                 .pickerStyle(.segmented).labelsHidden().fixedSize().padding(.horizontal, 10)
             switch mode {
             case .chart: chart
-            case .regions: regionTable
+            case .types: regionTable
+            case .list: entryTable
+            case .files: fileTable
             case .zones: zoneTable
             }
         }
@@ -833,7 +864,10 @@ struct VmmapView: View {
                             Text(Fmt.bytes(r.resident + r.swapped)).font(.system(size: 11)).monospacedDigit()
                                 .frame(width: 70, alignment: .leading)
                         }
-                        .help("\(r.name): resident \(Fmt.bytes(r.resident)) (dirty \(Fmt.bytes(r.dirty))), swapped \(Fmt.bytes(r.swapped)), virtual \(Fmt.bytes(r.virtual))")
+                        .help("\(r.name): resident \(Fmt.bytes(r.resident)) (dirty \(Fmt.bytes(r.dirty))), swapped \(Fmt.bytes(r.swapped)), virtual \(Fmt.bytes(r.virtual))"
+                              + (s.entries.isEmpty ? "" : "\nClick to list its regions"))
+                        .contentShape(Rectangle())
+                        .onTapGesture { if !s.entries.isEmpty { show(.type(r.name)) } }
                     }
                 }
             }
@@ -866,6 +900,11 @@ struct VmmapView: View {
             }.width(min: 110, ideal: 130)
             TableColumn("Count", value: \.count) { r in Text(verbatim: "\(r.count)").monospacedDigit() }.width(min: 40, ideal: 50)
         }
+        .contextMenu(forSelectionType: VMRegion.ID.self) { ids in
+            if let id = ids.first, !s.entries.isEmpty { Button("Show Regions") { show(.type(id)) } }
+        } primaryAction: { ids in
+            if let id = ids.first, !s.entries.isEmpty { show(.type(id)) }
+        }
     }
 
     private var zoneTable: some View {
@@ -890,6 +929,190 @@ struct VmmapView: View {
             TableColumn("Swapped", value: \.swapped) { z in Text(Fmt.bytes(z.swapped)).monospacedDigit().foregroundStyle(.secondary) }
                 .width(min: 60, ideal: 70)
         }
+        .contextMenu(forSelectionType: MallocZone.ID.self) { ids in
+            if let id = ids.first, !s.entries.isEmpty { Button("Show Regions") { show(.zone(id)) } }
+        } primaryAction: { ids in
+            if let id = ids.first, !s.entries.isEmpty { show(.zone(id)) }
+        }
+    }
+
+    // MARK: All Regions
+
+    private var shownEntries: [VMMapEntry] {
+        // "0x1027c0000" or "1027c0000" finds the region holding that address.
+        let hex = filter.lowercased().hasPrefix("0x") ? String(filter.dropFirst(2)) : filter
+        let addr = hex.count >= 5 ? UInt64(hex, radix: 16) : nil
+        return s.entries.filter { e in
+            if let scope, !scope.contains(e) { return false }
+            switch access {
+            case .all: break
+            case .writable: if !e.writable { return false }
+            case .readOnly: if e.writable { return false }
+            }
+            guard !filter.isEmpty else { return true }
+            if let addr, let a = e.start, let b = e.end, a <= addr, addr < b { return true }
+            return e.type.localizedCaseInsensitiveContains(filter) || e.detail.localizedCaseInsensitiveContains(filter)
+        }
+    }
+
+    private var entryTable: some View {
+        let rows = shownEntries
+        let sum = { (k: KeyPath<VMMapEntry, UInt64>) in rows.reduce(UInt64(0)) { $0 + $1[keyPath: k] } }
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if let scope {
+                    Button { self.scope = nil } label: {
+                        Label(scope.label, systemImage: "xmark.circle.fill").labelStyle(.titleAndIcon).lineLimit(1)
+                    }
+                    .buttonStyle(.bordered).controlSize(.small).help("Show every region")
+                }
+                Picker("", selection: $access) { ForEach(Access.allCases, id: \.self) { Text($0.rawValue) } }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize().controlSize(.small)
+                Spacer()
+                Text(verbatim: "\(rows.count.formatted()) regions · \(Fmt.bytes(sum(\.virtual))) virtual · \(Fmt.bytes(sum(\.resident))) resident · \(Fmt.bytes(sum(\.dirty))) dirty · \(Fmt.bytes(sum(\.swapped))) swapped")
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            FastTable(rows: rows, columns: Self.entryColumns, initialSort: ("address", true),
+                      menu: { entryMenu($0) }, onOpen: { e in if let p = e.path { show(.file(p)) } else { show(.type(e.type)) } })
+                .id("entries")
+        }
+    }
+
+    private static let entryColumns: [FastColumn<VMMapEntry>] = {
+        let secondary = NSColor.secondaryLabelColor
+        func bytes(_ id: String, _ title: String, _ k: KeyPath<VMMapEntry, UInt64>, _ color: NSColor? = nil) -> FastColumn<VMMapEntry> {
+            FastColumn(id: id, title: title, width: 70, numeric: true, text: { Fmt.bytes($0[keyPath: k]) },
+                       color: { $0[keyPath: k] > 0 ? (color ?? .labelColor) : secondary }, less: { $0[keyPath: k] < $1[keyPath: k] })
+        }
+        return [
+            FastColumn(id: "address", title: "Address", width: 100, mono: true,
+                       text: { $0.start.map { String($0, radix: 16) } ?? "—" }, tooltip: { range($0) },
+                       less: { $0.address < $1.address }),
+            FastColumn(id: "type", title: "Type", width: 170, text: \.type, less: { $0.type < $1.type }),
+            bytes("size", "Size", \.virtual),
+            bytes("resident", "Resident", \.resident),
+            bytes("dirty", "Dirty", \.dirty, .systemOrange),
+            bytes("swapped", "Swapped", \.swapped, .systemPurple),
+            FastColumn(id: "access", title: "Access", width: 70, mono: true,
+                       help: "Protection now / the most it can be raised to (r read, w write, x execute)",
+                       text: { "\($0.prot)/\($0.maxProt)" }, tooltip: { "Protection now \($0.prot), at most \($0.maxProt)" },
+                       less: { ($0.prot, $0.maxProt) < ($1.prot, $1.maxProt) }),
+            FastColumn(id: "share", title: "Sharing", width: 55, mono: true, help: "vmmap's sharing mode (SM=)",
+                       text: \.share, tooltip: { shareHelp($0.share) }, less: { $0.share < $1.share }),
+            FastColumn(id: "purge", title: "Purgeable", width: 75, help: "Purgeable memory's state (PURGE=): the system may discard volatile memory",
+                       text: { purgeName($0.purge) }, color: { _ in secondary }, less: { $0.purge < $1.purge }),
+            FastColumn(id: "detail", title: "Detail", width: 380, help: "The mapped file, the malloc zone, the thread, or vmmap's note",
+                       text: \.detail, color: { _ in secondary }, less: { $0.detail < $1.detail }),
+        ]
+    }()
+
+    private func entryMenu(_ picked: [VMMapEntry]) -> [FastMenuItem] {
+        var items = [
+            FastMenuItem(title: picked.count == 1 ? "Copy Address Range" : "Copy \(picked.count) Address Ranges") {
+                Self.copy(picked.map { Self.range($0) }.joined(separator: "\n"))
+            },
+            FastMenuItem(title: picked.count == 1 ? "Copy Line" : "Copy \(picked.count) Lines") {
+                Self.copy(picked.map { e in
+                    [e.type, Self.range(e), Fmt.bytes(e.virtual), Fmt.bytes(e.resident), Fmt.bytes(e.dirty), Fmt.bytes(e.swapped),
+                     "\(e.prot)/\(e.maxProt)", e.share, e.purge, e.detail].joined(separator: "\t")
+                }.joined(separator: "\n"))
+            },
+        ]
+        if picked.count == 1, let e = picked.first {
+            items += [.separator, FastMenuItem(title: "Show All \(e.type) Regions") { show(.type(e.type)) }]
+            if let p = e.path {
+                items.append(FastMenuItem(title: "Show All Regions of \((p as NSString).lastPathComponent)") { show(.file(p)) })
+                items += fileMenu(p)
+            }
+        }
+        return items
+    }
+
+    private func fileMenu(_ p: String) -> [FastMenuItem] {
+        let exists = Reveal.exists(p)
+        // dyld shared cache images exist only in the cache, not as files: Reveal and Inspect are off for them.
+        return [.separator,
+                FastMenuItem(title: "Copy Path") { Self.copy(p) },
+                FastMenuItem(title: Reveal.help, enabled: exists) { Reveal.reveal([p]) },
+                FastMenuItem(title: MachOOpen.help, enabled: exists && MachOProbe.target(p) != nil) { MachOOpen.open(p) }]
+    }
+
+    // MARK: Files
+
+    private var fileTable: some View {
+        let rows = s.files.filter { f in
+            (!imagesOnly || f.isImage) && (filter.isEmpty || f.path.localizedCaseInsensitiveContains(filter))
+        }
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Toggle("Images only", isOn: $imagesOnly).toggleStyle(.checkbox).controlSize(.small)
+                    .help("Executables and libraries (files with a __TEXT segment); off adds data files mapped into memory")
+                Spacer()
+                Text(verbatim: "\(rows.count.formatted()) files · \(Fmt.bytes(rows.reduce(0) { $0 + $1.resident })) resident")
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            }
+            .padding(.horizontal, 10)
+            FastTable(rows: rows, columns: Self.fileColumns, initialSort: ("resident", false),
+                      menu: { picked in
+                          guard let p = picked.first?.path else { return [] }
+                          return [FastMenuItem(title: "Show Regions") { show(.file(p)) }] + fileMenu(p)
+                      }, onOpen: { show(.file($0.path)) })
+                .id("files")
+        }
+    }
+
+    private static let fileColumns: [FastColumn<VMFile>] = {
+        let secondary = NSColor.secondaryLabelColor
+        func bytes(_ id: String, _ title: String, _ k: KeyPath<VMFile, UInt64>, _ color: NSColor? = nil) -> FastColumn<VMFile> {
+            FastColumn(id: id, title: title, width: 75, numeric: true, text: { Fmt.bytes($0[keyPath: k]) },
+                       color: { $0[keyPath: k] > 0 ? (color ?? .labelColor) : secondary }, less: { $0[keyPath: k] < $1[keyPath: k] })
+        }
+        return [
+            FastColumn(id: "name", title: "File", width: 200, text: \.name, tooltip: \.path, less: { $0.name < $1.name }),
+            FastColumn(id: "kind", title: "Kind", width: 85, text: \.kindName, color: { _ in secondary }, less: { $0.kindName < $1.kindName }),
+            bytes("resident", "Resident", \.resident),
+            bytes("dirty", "Dirty", \.dirty, .systemOrange),
+            bytes("swapped", "Swapped", \.swapped, .systemPurple),
+            bytes("virtual", "Virtual", \.virtual),
+            FastColumn(id: "regions", title: "Regions", width: 60, numeric: true, text: { "\($0.regions)" }, less: { $0.regions < $1.regions }),
+            FastColumn(id: "path", title: "Path", width: 380, text: \.path, color: { _ in secondary }, less: { $0.path < $1.path }),
+        ]
+    }()
+
+    // MARK: Formatting
+
+    static func range(_ e: VMMapEntry) -> String {
+        guard let a = e.start, let b = e.end else { return e.type }
+        return "0x" + String(a, radix: 16) + "-0x" + String(b, radix: 16)
+    }
+
+    /// vmmap's SM= codes, as its legend explains them.
+    static func shareHelp(_ code: String) -> String {
+        switch code {
+        case "COW": "Copy-on-write (COW): shared until written, then copied for this process"
+        case "PRV": "Private (PRV): this process's own memory"
+        case "NUL": "Empty (NUL): address space set aside with nothing behind it yet"
+        case "SHM": "Shared (SHM): the same memory is mapped in other processes"
+        case "ALI": "Aliased (ALI): private memory mapped more than once in this process"
+        case "S/A": "Shared alias (S/A): shared memory mapped more than once"
+        case "ZER": "Zero-filled (ZER): private memory not yet written"
+        default: "Sharing mode \(code)"
+        }
+    }
+
+    static func purgeName(_ code: String) -> String {
+        switch code {
+        case "V": "volatile"
+        case "N": "nonvolatile"
+        case "E": "emptied"
+        default: ""
+        }
+    }
+
+    static func copy(_ s: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(s, forType: .string)
     }
 }
 

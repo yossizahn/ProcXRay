@@ -1,8 +1,9 @@
 import Darwin
 import Foundation
 
-/// `vmmap --summary` read straight from the target's task port (only when SIP allows task ports; see NativeMach for why the helper
-/// has one). The output is vmmap's text layout, so VmmapParser, its views and the Raw switch work unchanged.
+/// `vmmap -w` read straight from the target's task port (only when SIP allows task ports; see NativeMach for why the helper
+/// has one): the region list, then the summary. The output is vmmap's text layout, so VmmapParser, its views and the Raw
+/// switch work unchanged.
 ///
 /// How regions get vmmap's names, measured by joining a native walk with `vmmap -v` on macOS 27.2:
 ///   - a range inside a loaded image's segment is that segment ("__TEXT", "__DATA_CONST"…), from dyld's process info;
@@ -10,7 +11,8 @@ import Foundation
 ///     "unused but dirty shlib __DATA";
 ///   - anything else is named by its VM user tag and share mode (`tagNames`).
 /// Not reproduced: splits that need libmalloc's view of a region ("Malloc Small (empty)", "Malloc Metadata metadata")
-/// fold into their base row; "page table in kernel" is left out (no public source for it).
+/// fold into their base row; "page table in kernel" is left out (no public source for it). In the region list, a stack's
+/// "thread N" is left out too; a malloc region's zone is filled in from the zone table's ranges.
 enum NativeVMMap {
     /// One leaf VM region (submaps descended into).
     struct Leaf: Codable {
@@ -122,8 +124,20 @@ enum NativeVMMap {
     static let sharedRegion = SHARED_REGION_BASE_ARM64..<(SHARED_REGION_BASE_ARM64 + SHARED_REGION_SIZE_ARM64)
     static let protWrite = VM_PROT_WRITE
 
-    /// vmmap's summary text for `pid`, or nil when there's no task port (SIP on, not root, or the process is gone).
-    static func summary(_ pid: pid_t, zones: Bool = true) -> String? {
+    /// One line of the region list.
+    struct ListLine {
+        var start: UInt64, end: UInt64
+        var name: String
+        var totals: Totals
+        var prot: Int32, maxProt: Int32
+        var share: UInt8
+        var purge: Character?
+        var detail: String
+    }
+
+    /// vmmap's text for `pid` (the region list unless `list` is false, then the summary), or nil when there's no
+    /// task port (SIP on, not root, or the process is gone).
+    static func summary(_ pid: pid_t, zones: Bool = true, list: Bool = true) -> String? {
         guard let task = controlPort(pid) else { return nil }
         defer { mach_port_deallocate(mach_task_self_, task) }
         let t0 = Date()
@@ -132,6 +146,7 @@ enum NativeVMMap {
         let segs = segments(task)
 
         var rows: [String: Totals] = [:]
+        var lines: [ListLine] = []
         var libRO = (total: UInt64(0), resident: UInt64(0))
         var writable = Totals()
         for l in leaves {
@@ -148,10 +163,18 @@ enum NativeVMMap {
                     t.virtual = t.dirty + t.swapped
                     t.resident = t.dirty
                     rows["unused but dirty shlib __DATA", default: Totals()].add(t)
+                    if list {
+                        lines.append(ListLine(start: p.start, end: p.end, name: "unused but dirty shlib __DATA", totals: t,
+                                              prot: l.prot, maxProt: l.maxProt, share: l.share, purge: nil, detail: ""))
+                    }
                     continue
                 }
-                purgeable(task, l, into: &t)
+                let purge = purgeable(task, l, into: &t)
                 rows[p.name, default: Totals()].add(t)
+                if list {
+                    lines.append(ListLine(start: p.start, end: p.end, name: p.name, totals: t, prot: l.prot, maxProt: l.maxProt,
+                                          share: l.share, purge: purge, detail: p.segPath ?? l.path ?? ""))
+                }
                 // Both lines measured against vmmap on 86 processes: "Writable regions" is writable memory other than
                 // image segments and mapped files (84 within 2 %), "ReadOnly portion of Libraries" is __TEXT plus
                 // __LINKEDIT (82; resident 86 of 86).
@@ -160,7 +183,10 @@ enum NativeVMMap {
             }
         }
 
+        // The zone table first: its ranges name the malloc regions in the list.
+        let (zoneText, zoneRanges) = zones ? zoneTable(task, pid: pid) : ("", [])
         var out = header(pid, task: task)
+        if list { out += regionList(pid, lines, zoneRanges) }
         out += "\n"
         let roRest = libRO.total - min(libRO.resident, libRO.total)
         out += "ReadOnly portion of Libraries: Total=\(size(libRO.total)) resident=\(size(libRO.resident))(\(pct(libRO.resident, libRO.total))%) "
@@ -193,7 +219,7 @@ enum NativeVMMap {
         }
         if !reserved.isEmpty { out += pad("TOTAL, minus reserved VM space") + cols(unreserved) + "\n" }
 
-        if zones { out += zoneTable(task, pid: pid) }
+        out += zoneText
         out += String(format: "\n(native task-port read in %.0f ms)\n", -t0.timeIntervalSinceNow * 1000)
         return out
     }
@@ -206,6 +232,9 @@ enum NativeVMMap {
         var totals: Totals
         var unused = false
         var segment = false
+        var start: UInt64 = 0, end: UInt64 = 0
+        /// The image a segment piece belongs to.
+        var segPath: String?
     }
 
     /// A region split at image segment boundaries: one piece per segment it overlaps, and the gaps between them.
@@ -226,15 +255,15 @@ enum NativeVMMap {
         }
         if cursor < l.end { spans.append((cursor, l.end, nil)) }
 
-        func piece(_ seg: Segment?, _ t: Totals) -> Piece {
-            if let seg { return Piece(name: seg.name, totals: t, segment: true) }
-            if inCache && l.path == nil && (l.tag == 0 || l.tag == 35) { return Piece(name: "unused", totals: t, unused: true) }
-            return Piece(name: tagName(l), totals: t)
+        func piece(_ seg: Segment?, _ t: Totals, _ s: UInt64, _ e: UInt64) -> Piece {
+            if let seg { return Piece(name: seg.name, totals: t, segment: true, start: s, end: e, segPath: seg.path) }
+            if inCache && l.path == nil && (l.tag == 0 || l.tag == 35) { return Piece(name: "unused", totals: t, unused: true, start: s, end: e) }
+            return Piece(name: tagName(l), totals: t, start: s, end: e)
         }
         if spans.count == 1 && !(spans[0].seg == nil && inCache && l.path == nil && (l.tag == 0 || l.tag == 35)) {
             let t = Totals(virtual: l.end - l.start, resident: UInt64(l.resident) * pageSize, dirty: UInt64(l.dirty) * pageSize,
                            swapped: UInt64(l.swapped) * pageSize, count: 1)
-            return [piece(spans[0].seg, t)]
+            return [piece(spans[0].seg, t, l.start, l.end)]
         }
         // Several pieces: count their pages one by one. Shared-cache segments aren't page-aligned (some are a few
         // bytes), so each piece gets the bytes of each page it overlaps, as vmmap counts them; whole pages would
@@ -254,7 +283,7 @@ enum NativeVMMap {
                     k += 1
                 }
             }
-            return piece(sp.seg, t)
+            return piece(sp.seg, t, sp.start, sp.end)
         }
     }
 
@@ -269,16 +298,73 @@ enum NativeVMMap {
         return r == KERN_SUCCESS ? Array(buf.prefix(Int(n))) : nil
     }
 
-    /// Purgeable objects: resident bytes by state, and the whole size of emptied ones.
-    static func purgeable(_ task: mach_port_t, _ l: Leaf, into t: inout Totals) {
-        guard l.tag != 0 || l.path == nil, l.prot != 0 else { return }
+    /// Purgeable objects: resident bytes by state, and the whole size of emptied ones. Returns vmmap's PURGE= code
+    /// (V, N, E), nil for memory that isn't purgeable.
+    @discardableResult
+    static func purgeable(_ task: mach_port_t, _ l: Leaf, into t: inout Totals) -> Character? {
+        guard l.tag != 0 || l.path == nil, l.prot != 0 else { return nil }
         var state: Int32 = 0
-        guard mach_vm_purgable_control(task, l.start, VM_PURGABLE_GET_STATE, &state) == KERN_SUCCESS else { return }
+        guard mach_vm_purgable_control(task, l.start, VM_PURGABLE_GET_STATE, &state) == KERN_SUCCESS else { return nil }
         switch state & VM_PURGABLE_STATE_MASK {
-        case VM_PURGABLE_VOLATILE: t.volatile += t.resident
-        case VM_PURGABLE_EMPTY: t.empty += t.virtual
-        case VM_PURGABLE_NONVOLATILE: t.nonvol += t.resident
-        default: break
+        case VM_PURGABLE_VOLATILE: t.volatile += t.resident; return "V"
+        case VM_PURGABLE_EMPTY: t.empty += t.virtual; return "E"
+        case VM_PURGABLE_NONVOLATILE: t.nonvol += t.resident; return "N"
+        default: return nil
+        }
+    }
+
+    // MARK: Region list
+
+    /// vmmap's two region lists, non-writable then writable, each in address order.
+    static func regionList(_ pid: pid_t, _ lines: [ListLine], _ zoneRanges: [(start: UInt64, end: UInt64, zone: String)]) -> String {
+        var name = [CChar](repeating: 0, count: 256)
+        proc_name(pid, &name, UInt32(name.count))
+        let zr = zoneRanges.sorted { $0.start < $1.start }
+        /// The zone with a range in [start, end). Ranges need not start where the region does (a tiny region's
+        /// blocks begin after its header).
+        func zone(_ start: UInt64, _ end: UInt64) -> String? {
+            var lo = 0, hi = zr.count
+            while lo < hi { let m = (lo + hi) / 2; if zr[m].end <= start { lo = m + 1 } else { hi = m } }
+            return lo < zr.count && zr[lo].start < end ? zr[lo].zone : nil
+        }
+        var out = "\nVirtual Memory Map of process \(pid) (\(String(cString: name)))\n"
+        out += "VM page size:  \(pageSize) bytes\n"
+        for writable in [false, true] {
+            out += "\n==== \(writable ? "Writable" : "Non-writable") regions for process \(pid)\n"
+            out += "REGION TYPE                    START - END         [ VSIZE  RSDNT  DIRTY   SWAP] PRT/MAX SHRMOD PURGE    REGION DETAIL\n"
+            for l in lines where (l.prot & protWrite != 0) == writable {
+                var detail = l.detail
+                if detail.isEmpty, l.name.hasPrefix("Malloc"), let z = zone(l.start, l.end) { detail = z }
+                let sizes = [l.totals.virtual, l.totals.resident, l.totals.dirty, l.totals.swapped].map { size($0).leftPad(6) }
+                let purge = l.purge.map { "PURGE=\($0)" } ?? ""
+                out += l.name.padding(toLength: max(27, l.name.count), withPad: " ", startingAt: 0)
+                    + " " + (String(l.start, radix: 16) + "-" + String(l.end, radix: 16)).leftPad(19)
+                    + "    [" + sizes.joined(separator: " ") + "] " + protString(l.prot) + "/" + protString(l.maxProt)
+                    + " SM=" + shareCode(l.share) + " " + purge.padding(toLength: 8, withPad: " ", startingAt: 0) + " " + detail + "\n"
+            }
+        }
+        out += "\n==== Legend\nSM=sharing mode:\n\tCOW=copy_on_write PRV=private NUL=empty ALI=aliased\n\tSHM=shared S/A=shared_alias\n"
+        out += "PURGE=purgeable mode:\n\tV=volatile N=nonvolatile E=empty   otherwise is unpurgeable\n"
+        out += "\n==== Summary for process \(pid)\n"
+        return out
+    }
+
+    static func protString(_ p: Int32) -> String {
+        (p & VM_PROT_READ != 0 ? "r" : "-") + (p & VM_PROT_WRITE != 0 ? "w" : "-") + (p & VM_PROT_EXECUTE != 0 ? "x" : "-")
+    }
+
+    /// vmmap's SM= codes. vmmap also prints ZER (zero-filled) for some private memory; from the share mode alone
+    /// that is PRV here.
+    static func shareCode(_ m: UInt8) -> String {
+        switch Int32(m) {
+        case SM_COW: "COW"
+        case SM_PRIVATE: "PRV"
+        case SM_EMPTY: "NUL"
+        case SM_SHARED, SM_TRUESHARED: "SHM"
+        case SM_PRIVATE_ALIASED: "ALI"
+        case SM_SHARED_ALIASED: "S/A"
+        case SM_LARGE_PAGE: "LPG"
+        default: "???"
         }
     }
 
@@ -322,12 +408,12 @@ enum NativeVMMap {
     /// process, so the target's pointer is callable here) enumerates its regions and counts its allocations,
     /// reading the target through `reader`. The target is suspended meanwhile, as vmmap does, since a running
     /// process changes these structures under the reader.
-    static func zoneTable(_ task: mach_port_t, pid: pid_t) -> String {
-        guard pid != getpid() else { return "" }
+    static func zoneTable(_ task: mach_port_t, pid: pid_t) -> (String, [(start: UInt64, end: UInt64, zone: String)]) {
+        guard pid != getpid() else { return ("", []) }
         zoneLock.lock()
         defer { zoneLock.unlock() }
         var token: task_suspension_token_t = 0
-        guard task_suspend2(task, &token) == KERN_SUCCESS else { return "" }
+        guard task_suspend2(task, &token) == KERN_SUCCESS else { return ("", []) }
         defer { task_resume2(token) }
         defer {
             for (a, s) in reads { vm_deallocate(mach_task_self_, a, s) }
@@ -335,7 +421,7 @@ enum NativeVMMap {
         }
         var addrs: UnsafeMutablePointer<vm_address_t>?
         var n: UInt32 = 0
-        guard malloc_get_all_zones(task, zoneReader, &addrs, &n) == KERN_SUCCESS, let addrs, n > 0 else { return "" }
+        guard malloc_get_all_zones(task, zoneReader, &addrs, &n) == KERN_SUCCESS, let addrs, n > 0 else { return ("", []) }
 
         // Three passes, in this order: each zone's regions, then their pages, then libmalloc's statistics. The
         // statistics walk reads the heap, which decompresses the target's compressed pages; measured afterwards,
@@ -356,7 +442,12 @@ enum NativeVMMap {
             found.append((za, remoteString(task, UInt(bitPattern: zone.zone_name)) ?? "Zone", intro, zone.version, box.ranges))
         }
         var zones: [(name: String, t: Totals, count: Int, allocated: UInt64)] = []
+        var owned: [(start: UInt64, end: UInt64, zone: String)] = []
         for z in found {
+            let label = z.name + "_0x" + String(z.addr, radix: 16)
+            owned += z.ranges.map { (UInt64($0.address), UInt64($0.address) + UInt64($0.size), label) }
+            // The zone's own structure, which vmmap names "<zone> zone structure" (a Malloc Metadata region).
+            owned.append((UInt64(z.addr), UInt64(z.addr) + 1, label + " zone structure"))
             var t = Totals()
             // libmalloc reports a region as several ranges; vmmap counts contiguous runs.
             var lastEnd: UInt64 = .max
@@ -373,7 +464,7 @@ enum NativeVMMap {
                     if d & VM_PAGE_QUERY_PAGE_PAGED_OUT != 0 { t.swapped += pageSize }
                 }
             }
-            zones.append((z.name + "_0x" + String(z.addr, radix: 16), t, 0, 0))
+            zones.append((label, t, 0, 0))
         }
         for (i, z) in found.enumerated() {
             var stats = malloc_statistics_t()
@@ -381,7 +472,7 @@ enum NativeVMMap {
             zones[i].count = Int(stats.blocks_in_use)
             zones[i].allocated = UInt64(stats.size_in_use)
         }
-        guard !zones.isEmpty else { return "" }
+        guard !zones.isEmpty else { return ("", owned) }
 
         func row(_ name: String, _ t: Totals, _ count: Int, _ allocated: UInt64) -> String {
             let touched = t.dirty + t.swapped
@@ -401,7 +492,7 @@ enum NativeVMMap {
             total.add(z.t); count += z.count; allocated += z.allocated
         }
         out += rule + row("TOTAL", total, count, allocated)
-        return out
+        return (out, owned)
     }
 
     /// The target zone's introspection table, as this process sees it at the same address. Checked before anything

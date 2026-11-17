@@ -247,7 +247,24 @@ struct ProcXRayApp: App {
         }
         if let i = CommandLine.arguments.firstIndex(of: "--native-vmmap") {
             guard i + 1 < CommandLine.arguments.count, let pid = pid_t(CommandLine.arguments[i + 1]) else { print("usage: --native-vmmap <pid>"); exit(2) }
-            print(NativeVMMap.summary(pid, zones: !CommandLine.arguments.contains("--no-zones")) ?? "no task port for \(pid)")
+            print(NativeVMMap.summary(pid, zones: !CommandLine.arguments.contains("--no-zones"),
+                                      list: !CommandLine.arguments.contains("--no-list")) ?? "no task port for \(pid)")
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--parse-vmmap") {
+            // vmmap output (a file, or - for stdin) through VmmapParser: what the Memory tab gets from it.
+            guard i + 1 < CommandLine.arguments.count else { print("usage: --parse-vmmap <file|->"); exit(2) }
+            let a = CommandLine.arguments[i + 1]
+            let data = a == "-" ? FileHandle.standardInput.readDataToEndOfFile() : (FileManager.default.contents(atPath: a) ?? Data())
+            let t0 = Date()
+            let s = VmmapParser.parse(String(decoding: data, as: UTF8.self))
+            let ms = -t0.timeIntervalSinceNow * 1000
+            let sum = { (k: KeyPath<VMMapEntry, UInt64>) in s.entries.reduce(0) { $0 + $1[keyPath: k] } }
+            print(String(format: "parsed in %.0f ms: %d regions, %d region types, %d zones, %d files", ms, s.entries.count,
+                         s.regions.count, s.zones.count, s.files.count))
+            print("list sums: virtual \(sum(\.virtual)) resident \(sum(\.resident)) dirty \(sum(\.dirty)) swapped \(sum(\.swapped))")
+            if let t = s.regionTotal { print("TOTAL row: virtual \(t.virtual) resident \(t.resident) dirty \(t.dirty) swapped \(t.swapped) count \(t.count)") }
+            for e in s.entries.prefix(3) + s.entries.suffix(3) { print(e) }
             exit(0)
         }
         if let i = CommandLine.arguments.firstIndex(of: "--native-mach") {

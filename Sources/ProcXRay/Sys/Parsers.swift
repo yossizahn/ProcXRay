@@ -160,7 +160,39 @@ enum LsofParser {
     }
 }
 
-// MARK: - vmmap --summary
+// MARK: - vmmap (region list and summary)
+
+/// One line of vmmap's region list: a VM region, or the part of one that a single image segment covers.
+struct VMMapEntry: Identifiable, Hashable, Sendable {
+    let id: Int
+    var type: String
+    /// nil for the lines with no address ("page table in kernel", "owned unmapped").
+    var start: UInt64?, end: UInt64?
+    var virtual: UInt64, resident: UInt64, dirty: UInt64, swapped: UInt64
+    /// "r-x", "rw-", "---".
+    var prot: String, maxProt: String
+    /// vmmap's SM= code: COW, PRV, NUL, SHM, ALI, S/A, ZER.
+    var share: String
+    /// vmmap's PURGE= code (V, N, E), or "".
+    var purge: String
+    /// The mapped file, the malloc zone, "thread 3", or what vmmap says about the line.
+    var detail: String
+    var writable: Bool { prot.contains("w") }
+    /// Sort keys for columns of optional or derived values.
+    var address: UInt64 { start ?? .max }
+    var path: String? { detail.hasPrefix("/") ? detail : nil }
+}
+
+/// Totals of the regions that map one file: an image (its segments) or a mapped file.
+struct VMFile: Identifiable, Hashable, Sendable {
+    var id: String { path }
+    var path: String
+    var name: String { (path as NSString).lastPathComponent }
+    var isImage: Bool
+    var kindName: String { isImage ? "Image" : "Mapped file" }
+    var regions: Int
+    var virtual: UInt64, resident: UInt64, dirty: UInt64, swapped: UInt64
+}
 
 struct VMRegion: Identifiable, Hashable, Sendable {
     var id: String { name }
@@ -192,9 +224,28 @@ struct VMSummary: Sendable {
     var regionTotal: VMRegion?
     var zones: [MallocZone] = []
     var zoneTotal: MallocZone?
+    /// Every region, in address order (vmmap lists non-writable regions, then writable ones).
+    var entries: [VMMapEntry] = []
     /// Lines vmmap printed about its own limits (an unreadable malloc zone makes its numbers partial).
     var warnings: [String] = []
-    var isEmpty: Bool { regions.isEmpty && zones.isEmpty }
+    var isEmpty: Bool { regions.isEmpty && zones.isEmpty && entries.isEmpty }
+
+    /// The regions grouped by the file they map, largest resident first (set by the parser).
+    var files: [VMFile] = []
+
+    /// An image is a file with a __TEXT segment.
+    static func files(_ entries: [VMMapEntry]) -> [VMFile] {
+        var by: [String: VMFile] = [:]
+        for e in entries {
+            guard let p = e.path else { continue }
+            var f = by[p] ?? VMFile(path: p, isImage: false, regions: 0, virtual: 0, resident: 0, dirty: 0, swapped: 0)
+            f.regions += 1
+            f.virtual += e.virtual; f.resident += e.resident; f.dirty += e.dirty; f.swapped += e.swapped
+            if e.type == "__TEXT" { f.isImage = true }
+            by[p] = f
+        }
+        return by.values.sorted { $0.resident > $1.resident }
+    }
 }
 
 enum VmmapParser {
@@ -208,13 +259,36 @@ enum VmmapParser {
     private static let zoneRE = try! NSRegularExpression(
         pattern: #"^(.+?)\s+"# + Array(repeating: unitSize + #"\s+"#, count: 4).joined()
             + #"(\d+)\s+"# + size + #"\s+"# + size + #"\s+(\d+)%\s+(\d+)\s*$"#)
+    /// "__TEXT   102694000-1027c0000 [ 1200K 592K 0K 0K] r-x/r-x SM=COW PURGE=N  /path". The address is
+    /// "kernel-kernel" or "unmapped-unmapped" for memory charged to the process that isn't mapped in it. Sizes
+    /// under 1K are bare byte counts ("568"), which the address in between keeps unambiguous.
+    private static let entryRE = try! NSRegularExpression(
+        pattern: #"^(.+?)\s+([0-9a-f]+|kernel|unmapped)-([0-9a-f]+|kernel|unmapped)\s+\[\s*"#
+            + Array(repeating: size, count: 4).joined(separator: #"\s+"#)
+            + #"\]\s+(\S{3})/(\S{3})\s+SM=(\S+)(?:\s+PURGE=(\S))?\s*(.*)$"#)
 
     static func parse(_ text: String) -> VMSummary {
         var s = VMSummary()
-        enum Section { case header, region, zone, other }
+        enum Section { case header, list, region, zone, other }
         var sec = Section.header
         for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
             let t = line.trimmingCharacters(in: .whitespaces)
+            // The full report: "==== Non-writable regions for process 1533", "==== Writable regions …", then a
+            // legend and "==== Summary …", whose lines read as the --summary report's do.
+            if t.hasPrefix("==== ") {
+                sec = t.contains("regions for process") ? .list : .other
+                continue
+            }
+            if sec == .list {
+                if let g = groups(entryRE, line), g.count == 12 {
+                    let b = g[3...6].map { SizeText.bytes($0) ?? 0 }
+                    s.entries.append(VMMapEntry(id: s.entries.count, type: g[0], start: UInt64(g[1], radix: 16),
+                                                end: UInt64(g[2], radix: 16), virtual: b[0], resident: b[1], dirty: b[2],
+                                                swapped: b[3], prot: g[7], maxProt: g[8], share: g[9], purge: g[10],
+                                                detail: g[11]))
+                }
+                continue
+            }
             if t.hasPrefix("REGION TYPE") { sec = .region; continue }
             if t.hasPrefix("MALLOC ZONE") { sec = .zone; continue }
             if t.isEmpty || t.hasPrefix("=====") || t.hasPrefix("VIRTUAL") { continue }
@@ -261,8 +335,11 @@ enum VmmapParser {
                                    allocations: Int(g[5]) ?? 0, allocated: SizeText.bytes(g[6]) ?? 0,
                                    fragSize: SizeText.bytes(g[7]) ?? 0, fragPercent: Int(g[8]) ?? 0, regions: Int(g[9]) ?? 0)
                 if z.name == "TOTAL" { s.zoneTotal = z } else { s.zones.append(z) }
+            case .list: break   // handled above
             }
         }
+        s.entries.sort { ($0.address, $0.id) < ($1.address, $1.id) }
+        s.files = VMSummary.files(s.entries)
         return s
     }
 }
