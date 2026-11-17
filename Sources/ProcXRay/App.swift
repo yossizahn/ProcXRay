@@ -82,6 +82,16 @@ struct ProcXRayApp: App {
             }
             RunLoop.main.run()
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--group-footprint") {
+            // --group-footprint [--local] pid…: what the group bubble shows (GroupFootprint), through the helper (or in
+            // this process with --local), next to the plain sum of the processes' footprints.
+            let a = CommandLine.arguments.dropFirst(i + 1)
+            let pids = a.compactMap { Int32($0) }
+            let plain = pids.reduce(0.0) { $0 + Double(Native.rusage($1)?.ri_phys_footprint ?? 0) }
+            guard let r = GroupFootprint.measure(pids, helper: !a.contains("--local")) else { print("footprint did not run"); exit(1) }
+            print("analyzed \(r.analyzed) of \(r.asked) in \(String(format: "%.2f", r.seconds)) s: plain sum \(UInt64(plain)) total \(UInt64(r.total)) shared \(UInt64(r.shared))")
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--filter"), i + 1 < CommandLine.arguments.count {
             exit(Bench.filter(CommandLine.arguments[i + 1]) ? 0 : 1)
         }

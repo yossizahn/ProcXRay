@@ -27,6 +27,10 @@ struct AmbientSums: Hashable, Sendable {
         }
     }
 
+    /// Before a figure: "≥ " when members couldn't be read; "~" before memory of more than one process, which
+    /// counts pages they share once per process (within 1 %, see GroupFootprint).
+    func prefix(_ m: AmbientMetric) -> String { partial ? "≥ " : m == .memory && count > 1 ? "~" : "" }
+
     /// The sums leave out members whose usage couldn't be read.
     var partial: Bool { covered < count }
     var coverageNote: String? { partial ? "Sums cover \(covered) of \(count) processes" : nil }

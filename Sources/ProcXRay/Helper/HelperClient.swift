@@ -79,6 +79,14 @@ final class HelperClient: @unchecked Sendable {
         return try? JSONDecoder().decode(ThreadSnapshot.self, from: data)
     }
 
+    /// `footprint`'s output for these processes, run as root (HelperProtocol.groupFootprint); nil when the helper
+    /// couldn't run it.
+    func groupFootprint(_ pids: [Int32]) -> String? {
+        guard let data = try? JSONEncoder().encode(pids) else { return nil }
+        let r: (String?, String?)? = call({ p, done in p.groupFootprint(data) { done(($0, $1)) } }, timeout: GroupFootprint.timeout + 5)
+        return r?.0
+    }
+
     /// Runs on a connection of its own: when the caller's `Shell.Cancel` fires (the window closed, the
     /// selection moved on), the connection is invalidated and the helper stops the tool, as the local path
     /// does. On the shared connection the helper would run it to completion as root for nobody.

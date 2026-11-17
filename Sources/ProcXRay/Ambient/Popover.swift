@@ -445,7 +445,7 @@ struct PopoverRow: View {
     private var value: String {
         if let s = sums {
             guard let v = metric.value(s) else { return "–" }
-            return (s.partial ? "≥ " : "") + metric.format(v)
+            return s.prefix(metric) + metric.format(v)
         }
         return target.flatMap { metric.value($0) }.map(metric.format) ?? "–"
     }

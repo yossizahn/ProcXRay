@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 15  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region
+    static let protocolVersion = 16  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -58,6 +58,10 @@ enum HelperConfig {
     /// JSON SecurityDetail, or nil when it can't be read (gone, or not the caller's and the caller isn't an admin).
     func securityConfig(pid: Int32, reply: @escaping (Data?) -> Void)
     func runTool(_ tool: Int, pid: Int32, reply: @escaping (String) -> Void)
+    /// `footprint` over a set of processes (JSON [Int32], at most `GroupFootprint.maxPids`), for a group's memory
+    /// with shared pages counted once (GroupFootprint). Another user's processes only for an admin caller; the
+    /// others are left out. (footprint's output, nil) or (nil, why not).
+    func groupFootprint(_ pids: Data, reply: @escaping (String?, String?) -> Void)
     /// Every process's Mach port links: `lsmp -a` paired in the helper, so the reply is the links (~1 MB of
     /// JSON MachSnapshot), not lsmp's ~40 MB. Admin callers only. (snapshot, nil) or (nil, why not).
     func machPorts(reply: @escaping (Data?, String?) -> Void)

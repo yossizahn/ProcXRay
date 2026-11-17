@@ -88,6 +88,9 @@ struct Column: Identifiable {
     enum GroupRule {
         /// The total of its processes (values that really add up).
         case sum
+        /// The total, shown as approximate ("~") for more than one process: footprints, which count pages the
+        /// processes share once per process (within 1 %, see GroupFootprint).
+        case approximateSum
         /// The members' values: the one value (dimmed when some members have none), two or three
         /// comma-separated with the most common first, or the most common and "+N".
         case same
@@ -167,12 +170,13 @@ struct Column: Identifiable {
         if unitShowsRoot, n.kind == .unit, let r = n.rootPid.flatMap({ store.procs[$0] }) { return value(r).dimmed }
         switch rule {
         case .blank: return .empty
-        case .sum:
-            var total = 0.0, any = false
+        case .sum, .approximateSum:
+            var total = 0.0, count = 0
             for m in members {
-                if let v = amount.map({ $0(m) }) ?? value(m).number { total += v; any = true }
+                if let v = amount.map({ $0(m) }) ?? value(m).number { total += v; count += 1 }
             }
-            guard any else { return members.isEmpty ? .empty : .unknown }
+            guard count > 0 else { return members.isEmpty ? .empty : .unknown }
+            if case .approximateSum = rule, count > 1 { return .number(total, "~" + format(total)) }
             return .number(total, format(total))
         case .same, .uniform:
             var seen: [String: (value: CellValue, count: Int)] = [:]
@@ -229,6 +233,7 @@ struct Column: Identifiable {
     var groupNoteText: String? {
         switch rule {
         case .sum: "the sum."
+        case .approximateSum: "the sum, approximate (~): pages the processes share count once per process. The footprint button on the row measures it exactly."
         case .same: "the value, the few values, or the most common and how many others."
         case .uniform: "the value when all agree."
         case .range: "lowest–highest."
@@ -499,7 +504,7 @@ private let catalogue: [Column] = [
     // Memory
     .amount(id: "mem", title: "Memory",
             help: "Physical footprint: the memory macOS charges to the process, as in Activity Monitor.", source: "rusage ri_phys_footprint",
-            section: .memory, minWidth: 60, width: 76, format: bytesFormat) { $0.footprint.map { Double($0) } },
+            section: .memory, minWidth: 60, width: 76, rule: .approximateSum, format: bytesFormat) { $0.footprint.map { Double($0) } },
     .amount(id: "peakMem", title: "Peak memory", help: "Highest footprint since the process started.", source: "rusage ri_lifetime_max_phys_footprint",
             section: .memory, width: 80, rule: .blank, format: bytesFormat) { $0.counters?.peakFootprint.map { Double($0) } },
     .amount(id: "resident", title: "Resident",

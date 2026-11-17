@@ -134,8 +134,12 @@ struct GroupInspectorView: View {
         return HStack(spacing: 8) {
             SparkTile(title: "CPU", value: cpu.map { "\(Fmt.pct($0)) %" } ?? "—",
                       values: summedHistory(ms, \.cpu), format: { "\(Fmt.pct($0)) %" })
-            SparkTile(title: "Memory", value: mem.map { Fmt.bytes(UInt64($0)) } ?? "—",
+            SparkTile(title: "Memory", value: mem.map { approx(ms) + Fmt.bytes(UInt64($0)) } ?? "—",
                       values: summedHistory(ms, \.memory), fromZero: false, format: { Fmt.bytes(UInt64($0)) })
+                .overlay(alignment: .topTrailing) {
+                    let pids = ms.filter { $0.footprint != nil }.map(\.pid)
+                    if pids.count > 1 { FootprintButton(pids: pids, listed: mem, helper: store.helperState.isRunning).padding(5) }
+                }
             SparkTile(title: "Disk I/O", value: disk.map(bytesPerSecFormat) ?? "—",
                       values: summedHistory(ms, \.disk), format: bytesPerSecFormat)
             SparkTile(title: "Power", value: watts.map(wattsFormat) ?? "—",
@@ -178,7 +182,7 @@ struct GroupInspectorView: View {
             ])
         }
         UsageTab.section("Memory", "memorychip", summedHistory(ms, \.memory), fromZero: false, group: true, format: { Fmt.bytes(UInt64($0)) }, rows: [
-            ("Memory", bytes(sum(ms) { $0.footprint.map { Double($0) } }), ""),
+            ("Memory", sum(ms) { $0.footprint.map { Double($0) } }.map { approx(ms) + Fmt.bytes(UInt64($0)) } ?? "—", ""),
             ("Compressed", bytes(sum(ms) { $0.compressed.map { Double($0) } }), ""),
             ("Neural Engine", bytes(sum(ms) { $0.counters?.neuralFootprint.map { Double($0) } }), ""),
             ("Page faults", rate(\.faults), count(\.faults)),
@@ -241,5 +245,25 @@ struct GroupInspectorView: View {
                 }
             }
         }
+    }
+}
+
+extension GroupInspectorView {
+    /// "~" before memory of more than one process: footprints count pages the processes share once per process.
+    func approx(_ ms: [ProcInfo]) -> String { ms.filter { $0.footprint != nil }.count > 1 ? "~" : "" }
+}
+
+/// Opens the bubble that measures a group's memory with shared pages counted once (GroupFootprintBubble).
+private struct FootprintButton: View {
+    let pids: [Int32]
+    let listed: Double?
+    let helper: Bool
+    @State private var shown = false
+
+    var body: some View {
+        Button { shown.toggle() } label: { Image(systemName: GroupFootprint.symbol).font(.system(size: 10)) }
+            .buttonStyle(.borderless).foregroundStyle(.secondary)
+            .help(GroupFootprint.help)
+            .popover(isPresented: $shown, arrowEdge: .bottom) { GroupFootprintBubble(pids: pids, listed: listed, helper: helper) }
     }
 }

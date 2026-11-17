@@ -629,7 +629,7 @@ struct TopGroupRow: View {
                         .onTapGesture { open.toggle() }
                         .help(open ? "Hide the members" : "Show the members that use the most")
                 }
-                ProcRow(proc: group.leader, detail: v.map { (group.sums.partial ? "≥ " : "") + metric.format($0) } ?? "–",
+                ProcRow(proc: group.leader, detail: v.map { group.sums.prefix(metric) + metric.format($0) } ?? "–",
                         fraction: (v ?? 0) / max(peak, 1e-9), count: group.single ? nil : group.count,
                         help: group.single ? nil
                           : "Accounting group (resource coalition) of \(group.count) processes, named after \(group.name)."

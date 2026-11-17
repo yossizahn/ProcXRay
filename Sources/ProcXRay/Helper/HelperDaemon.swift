@@ -144,6 +144,22 @@ enum HelperDaemon {
             }
         }
 
+        func groupFootprint(_ pids: Data, reply: @escaping (String?, String?) -> Void) {
+            guard let list = try? JSONDecoder().decode([Int32].self, from: pids), list.count <= GroupFootprint.maxPids else {
+                reply(nil, "helper: rejected pid list"); return
+            }
+            let ok = Array(Set(list.filter { $0 > 0 && mayInspect($0) })).sorted()
+            guard !ok.isEmpty else { reply(nil, "none of these processes can be read for this user"); return }
+            let cancel = self.cancel
+            // Off the connection's queue, like runTool: a long run mustn't hold up the metrics refresh.
+            DispatchQueue.global(qos: .utility).async {
+                let r = Shell.Cancel.$current.withValue(cancel) {
+                    Shell.exec(GroupFootprint.tool, GroupFootprint.argv(ok), mergeStderr: false, timeout: GroupFootprint.timeout)
+                }
+                r.timedOut || r.status == -1 ? reply(nil, r.annotated) : reply(r.output, nil)
+            }
+        }
+
         func bankLedger(seconds: Int, reply: @escaping (Data?, String?) -> Void) {
             guard callerIsAdmin else { reply(nil, "Recording who works for whom covers every process: only an admin user can."); return }
             guard seconds > 0 else { reply(nil, "helper: rejected duration \(seconds)"); return }

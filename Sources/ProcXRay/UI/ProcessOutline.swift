@@ -67,6 +67,7 @@ struct ProcessOutline: NSViewRepresentable {
         outline.doubleAction = #selector(Coordinator.openClicked)
         outline.onReturn = { [weak co] in co?.openSelected() }
         outline.bubbleContent = { [weak co] item in co?.bubble(for: item) }
+        outline.footprintFor = { [weak co] item in co?.footprint(for: item) }
         outline.pathFor = { [weak co] item in co?.path(for: item) }
         let menu = NSMenu()
         menu.delegate = co
@@ -602,8 +603,13 @@ struct ProcessOutline: NSViewRepresentable {
             }
             if let k = o as? KeyOutlineView, let b = cell.inspectButton {
                 b.target = k
-                b.action = #selector(KeyOutlineView.inspectClicked(_:))
-                cell.showsInspectButton = k.showsInspectButton(for: it)
+                if c.id == "name" {
+                    b.action = #selector(KeyOutlineView.footprintClicked(_:))
+                    cell.showsInspectButton = k.showsFootprintButton(for: it)
+                } else {
+                    b.action = #selector(KeyOutlineView.inspectClicked(_:))
+                    cell.showsInspectButton = k.showsInspectButton(for: it)
+                }
             }
             return cell
         }
@@ -675,6 +681,17 @@ struct ProcessOutline: NSViewRepresentable {
 
         /// The info bubble for a process row (or an app row, for the app's process): the executable's full
         /// path and its command line. Other group rows have none.
+        /// A group row's processes for the footprint bubble (GroupFootprintBubble): more than one with a footprint.
+        func footprint(for item: Any) -> (pids: [Int32], listed: Double, helper: Bool)? {
+            guard let n = (item as? Item)?.node, n.proc == nil else { return nil }
+            var ps: [ProcInfo] = []
+            func walk(_ n: ProcNode) { if let p = n.proc { ps.append(p) }; n.children?.forEach(walk) }
+            walk(n)
+            let fps = ps.compactMap { p in p.footprint.map { (p.pid, $0) } }
+            guard fps.count > 1 else { return nil }
+            return (fps.map(\.0), fps.reduce(0.0) { $0 + Double($1.1) }, parent.store.helperState.isRunning)
+        }
+
         func bubble(for item: Any) -> [InfoBubble.Section]? {
             guard let n = (item as? Item)?.node, let p = process(n) else { return nil }
             var s: [InfoBubble.Section] = []
@@ -790,6 +807,13 @@ struct ProcessOutline: NSViewRepresentable {
         var bubbleContent: ((Any) -> [InfoBubble.Section]?)?
         /// The path a row's Path cell shows; nil: no reveal button.
         var pathFor: ((Any) -> String?)?
+        /// A group row's processes for the footprint button in its Name cell; nil: no button.
+        var footprintFor: ((Any) -> (pids: [Int32], listed: Double, helper: Bool)?)?
+        private lazy var footprintPopover: NSPopover = {
+            let p = NSPopover()
+            p.behavior = .transient
+            return p
+        }()
         /// The row under the pointer; its Name and Path cells show their buttons.
         private(set) weak var hoverItem: AnyObject?
         private let bubble = InfoBubble()
@@ -836,7 +860,22 @@ struct ProcessOutline: NSViewRepresentable {
             for it in [old, item].compactMap({ $0 }) {
                 for col in Self.hoverColumns { cell(for: it, column: col)?.showsHoverButton = showsHoverButton(for: it, column: col) }
                 cell(for: it, column: "path")?.showsInspectButton = showsInspectButton(for: it)
+                cell(for: it, column: "name")?.showsInspectButton = showsFootprintButton(for: it)
             }
+        }
+
+        /// The Name cell's footprint button: on the hovered row, when it's a group of more than one process.
+        func showsFootprintButton(for item: Any) -> Bool {
+            item as AnyObject === hoverItem && footprintFor?(item) != nil
+        }
+
+        /// Opens a bubble that measures the group now (GroupFootprintBubble); nothing is kept.
+        @objc func footprintClicked(_ sender: NSButton) {
+            let r = row(for: sender)
+            guard r >= 0, let item = item(atRow: r), let f = footprintFor?(item) else { return }
+            if footprintPopover.isShown { footprintPopover.close() }
+            footprintPopover.contentViewController = NSHostingController(rootView: GroupFootprintBubble(pids: f.pids, listed: f.listed, helper: f.helper))
+            footprintPopover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
         }
 
         static let hoverColumns = ["name", "path"]
@@ -925,6 +964,13 @@ struct ProcessOutline: NSViewRepresentable {
                 b.setAccessibilityLabel("Info")
                 b.toolTip = "Path and command line"
                 hoverButton = b
+                let f = NSButton(image: NSImage(systemSymbolName: GroupFootprint.symbol, accessibilityDescription: "Shared memory") ?? NSImage(),
+                                 target: nil, action: nil)
+                f.isBordered = false
+                f.imageScaling = .scaleProportionallyDown
+                f.contentTintColor = .secondaryLabelColor
+                f.toolTip = GroupFootprint.help
+                inspectButton = f
             } else if c.id == "path" {
                 hoverButton = Reveal.button(target: nil, action: nil)
                 inspectButton = MachOOpen.button(target: nil, action: nil)
@@ -937,7 +983,7 @@ struct ProcessOutline: NSViewRepresentable {
         /// Shown on the row under the pointer (KeyOutlineView.hoverItem): the Name cell's ⓘ button, the Path
         /// cell's reveal-in-Finder button.
         private(set) var hoverButton: NSButton?
-        /// The Path cell's second button, Inspect, left of reveal.
+        /// The second button, left of the first: the Path cell's Inspect, a group row's footprint button in Name.
         private(set) var inspectButton: NSButton?
         var showsInspectButton: Bool {
             get { inspectButton.map { !$0.isHidden } ?? false }
