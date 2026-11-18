@@ -882,8 +882,10 @@ final class Store {
         if n != ghostCount { ghostCount = n }
     }
 
-    /// Three signals: (1) responsible pid points at a dead process; (2) LaunchServices marks an app
-    /// `exited-with-subordinates` — survivors share its coalition; (3) a running app lists a *different*
+    /// Four signals: (1) responsible pid points at a dead process; (2) LaunchServices marks an app
+    /// `exited-with-subordinates` — survivors share its coalition, or (2b) run a launchd job the app loaded
+    /// itself (`loadedJobs`, e.g. Rex's server agent, bootstrapped from a plist in Application Support), unless
+    /// a live app loaded the same job too (CoreSimulatorService and simdiskimaged); (3) a running app lists a *different*
     /// coalition under relatedCoalitionIDs — an earlier instance's, whose processes outlived it (LaunchServices
     /// drops the exited entry once the app is launched again). lsappinfo's `coalition:` is the *jetsam*
     /// coalition id, so match against both ids. On macOS 27 a leftover reports itself as its own
@@ -901,11 +903,14 @@ final class Store {
             }
         }
         // Survivors found by coalition are merged with any found through the responsible pid for the same app.
+        let liveJobs = Set(lsApps.lazy.filter { !$0.exited }.flatMap(\.loadedJobs))
         for a in lsApps where a.exited {
             guard let pid = a.pid else { continue }
             let listed = Set(a.coalitionPIDs + a.relatedCoalitionPIDs)
+            let jobs = Set(a.loadedJobs).subtracting(liveJobs)
             for p in procs.values where listed.contains(p.pid)
-                || (a.coalition != nil && (p.coalition == a.coalition || p.jetsamCoalition == a.coalition)) {
+                || (a.coalition != nil && (p.coalition == a.coalition || p.jetsamCoalition == a.coalition))
+                || p.launchdLabel.map(jobs.contains) == true {
                 survivors[deadGroup(pid), default: [:]][p.pid] = p
             }
             meta[deadGroup(pid)] = (pid, a.name, a)

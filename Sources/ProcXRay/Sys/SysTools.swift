@@ -18,6 +18,9 @@ struct LSApp: Identifiable, Hashable, Sendable {
     var coalitionPIDs: [pid_t] = []   // `{ … }` after the coalition id
     var relatedCoalitionIDs: [UInt64] = []
     var relatedCoalitionPIDs: [pid_t] = []   // e.g. helpers left over from a previous instance
+    /// Labels of the launchd jobs the app loaded itself (`launchctl bootstrap`, SMJobSubmit): their processes
+    /// run in coalitions of their own, so this is the only link LaunchServices keeps to them.
+    var loadedJobs: [String] = []
     var parentASN: String?
     /// The parent's ASN ("ASN:0x0-0x1001"), to find it among the apps.
     var parentASNID: String?
@@ -61,6 +64,11 @@ enum LSAppInfo {
                 c.coalitionPIDs = numbers(in: rest, between: "{", and: "}")
                 c.relatedCoalitionIDs = numbers(in: rest, after: "relatedCoalitionIDs:")
                 c.relatedCoalitionPIDs = numbers(in: rest, after: "relatedCoalitionPIDs:")
+            }
+            else if t.hasPrefix("loadedJobs:") {
+                // loadedJobs:"com.foo.server.1a2b" "com.apple.CoreSimulator.simdiskimaged"
+                c.loadedJobs = t.dropFirst("loadedJobs:".count).split(separator: "\"")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
             }
             else if t.hasPrefix("parentASN=") {
                 c.parentASN = quoted(t, "parentASN=")
