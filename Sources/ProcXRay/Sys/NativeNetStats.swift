@@ -1,7 +1,8 @@
 import Foundation
 
 /// Per-process network throughput from NetworkStatistics.framework, the private framework nettop is built on.
-/// One long-lived manager hears of every TCP and UDP socket on the Mac, any user's, without root. Each query
+/// One long-lived manager hears of every TCP and UDP socket on the Mac. As root it hears of every user's, and of
+/// user-space (Network.framework, QUIC) flows; otherwise only of the caller's own kernel sockets. Each query
 /// reports every socket's cumulative counts (~6 ms for ~130 sockets), and a socket that closes reports its final
 /// counts as it goes, so unlike consecutive nettop runs this counts connections that open and close between two
 /// readings. It also keeps each process's total: every byte of every socket it has seen the process use, over

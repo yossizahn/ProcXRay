@@ -682,7 +682,8 @@ struct UsageTab: View {
         .help("TCP and UDP traffic, loopback included, from the kernel's per-socket counts (the ones nettop shows), read every 2 s since the app started"
               + (since.map { " (\($0.formatted(date: .abbreviated, time: .standard)))" } ?? "")
               + ". \"Now\" is the last 2 s, connections that closed in them included. \"Since start\" adds up every socket seen, over each socket's whole life"
-              + (lowerBound ? ". \"≥\" and \"since\": the process started before the app, so sockets it closed before then aren't counted." : "."))
+              + (lowerBound ? ". \"≥\" and \"since\": the process started before the app, so sockets it closed before then aren't counted." : ".")
+              + (NetSampler.shared.seesEverything ? "" : " Without the helper, only your own processes' sockets are counted, and not connections made through Network.framework's own stack (QUIC and most app traffic): the kernel shows the rest only to root."))
     }
 
     /// Jetsam band and memory limits (root only: the helper's), under "Now".

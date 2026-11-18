@@ -172,6 +172,12 @@ enum HelperDaemon {
             }
         }
 
+        /// No admin check: any user can already see every process's traffic with nettop, which carries the
+        /// entitlement that lifts the same limits root does.
+        func netRates(reply: @escaping (Data) -> Void) {
+            reply(HelperNetStats.reply().flatMap { try? JSONEncoder().encode($0) } ?? Data())
+        }
+
         // MARK: syscall trace
 
         private let traceLock = NSLock()
@@ -269,5 +275,24 @@ enum MachPortCache {
         }
         lock.lock(); cached = (parsed.snapshot.at, parsed.ports); lock.unlock()
         return .success(parsed.snapshot)
+    }
+}
+
+/// The helper's network reader (HelperProtocol.netRates): one for every connection, started by the first call
+/// and kept until the helper exits, so its totals don't restart with each app connection.
+enum HelperNetStats {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var reader: NativeNetStats?
+    nonisolated(unsafe) private static var latest: NativeNetStats.Rates?
+
+    /// nil when the framework can't be read.
+    static func reply() -> NetRatesReply? {
+        lock.lock(); defer { lock.unlock() }
+        if reader == nil { reader = NativeNetStats { r in lock.lock(); latest = r; lock.unlock() } }
+        guard let reader else { return nil }
+        return NetRatesReply(since: reader.since, rates: latest.map { r in
+            r.map { .init(pid: $0.key, inPerSec: $0.value.inPerSec, outPerSec: $0.value.outPerSec,
+                          inTotal: $0.value.inTotal ?? 0, outTotal: $0.value.outTotal ?? 0) }
+        })
     }
 }

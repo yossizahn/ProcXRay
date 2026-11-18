@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 16  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint
+    static let protocolVersion = 17  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -87,6 +87,24 @@ enum HelperConfig {
     /// replies with the per-pair sums: who did work for whom. Uses kdebug, so not while a trace runs. Stops
     /// early when the connection ends. Admin callers only. (JSON BankLedger.Recording, nil) or (nil, why not).
     func bankLedger(seconds: Int, reply: @escaping (Data?, String?) -> Void)
+
+    /// Every process's network rates and totals from the helper's own NetworkStatistics reader (NativeNetStats),
+    /// started by the first call and kept for the helper's life. As root it sees every user's sockets and the
+    /// user-space (Network.framework) flows, which the kernel keeps from an unprivileged reader. JSON NetRatesReply.
+    func netRates(reply: @escaping (Data) -> Void)
+}
+
+/// The helper's network reading (HelperProtocol.netRates).
+struct NetRatesReply: Codable {
+    struct Entry: Codable {
+        var pid: Int32
+        var inPerSec: Double, outPerSec: Double
+        var inTotal: UInt64, outTotal: UInt64
+    }
+    /// When the helper's reader started (NativeNetStats.since).
+    var since: Date
+    /// nil until the reader has compared two queries (~2 s after the first call).
+    var rates: [Entry]?
 }
 
 /// What the helper traces, and the one ktrace command line it runs when it doesn't read kdebug itself.

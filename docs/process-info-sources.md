@@ -114,7 +114,7 @@ Every column (its header tooltip and "About This Column") and every inspector fi
 | `task_info TASK_VM_INFO` | Compressed memory, an optional read while the column or the Usage tab is shown |
 | `memorystatus_control GET_PRIORITY_LIST` / `GET_MEMLIMIT_PROPERTIES` | Memory-kill band and memory limits (`Jetsam.all`), root only |
 | `IORegistry accelerator clients` | GPU time per process (`ExtraRead.gpuNanosByPid`) |
-| `NetworkStatistics per-socket counts` | Network rates and totals (`NetSampler`), the counts `nettop` shows |
+| `NetworkStatistics per-socket counts` | Network rates and totals (`NetSampler`), the counts `nettop` shows. Read in the helper when it runs: unprivileged, the kernel reports only the caller's own kernel sockets, without other users' sockets or user-space (Network.framework, QUIC) flows; root, or nettop's `com.apple.private.network.statistics` entitlement, sees them all |
 | `lsmp, run as root` | Mach port counts (`MachLoader`), helper and admins only |
 | `Info.plist NSExtensionPointIdentifier` | An extension's extension point |
 | `SecCodeCopyDesignatedRequirement` | The designated requirement on the Security tab |

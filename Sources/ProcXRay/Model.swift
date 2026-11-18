@@ -413,6 +413,7 @@ final class Store {
             await MainActor.run {
                 guard gen == self.probeGen else { return }
                 AmbientMonitor.shared.helperRunning = s.isRunning
+                NetSampler.shared.setHelper(s.isRunning)
                 if self.helperState != s {
                     // Other users' processes the app couldn't read: the helper can, so try them again.
                     if s.isRunning {

@@ -739,6 +739,9 @@ enum Bench {
             func secs(_ t: timeval) -> Double { Double(t.tv_sec) + Double(t.tv_usec) / 1e6 }
             return secs(u.ru_utime) + secs(u.ru_stime) + secs(c.ru_utime) + secs(c.ru_stime)
         }
+        let helper = HelperClient.shared.probe().isRunning
+        NetSampler.shared.setHelper(helper)
+        print("helper: \(helper ? "running" : "not running")")
         let c0 = cpu(), t0 = Date()
         NetSampler.shared.want(true)
         while Date().timeIntervalSince(t0) < seconds {
@@ -746,7 +749,8 @@ enum Bench {
             NetSampler.shared.want(true)
             guard let net = NetSampler.shared.current() else { print(String(format: "%5.1f s  no rates yet", Date().timeIntervalSince(t0))); continue }
             let top = net.sorted { $0.value.inPerSec + $0.value.outPerSec > $1.value.inPerSec + $1.value.outPerSec }.prefix(5)
-            print(String(format: "%5.1f s  %d procs  ", Date().timeIntervalSince(t0), net.count) + top.map {
+            let sumIn = net.values.reduce(0) { $0 + $1.inPerSec }, sumOut = net.values.reduce(0) { $0 + $1.outPerSec }
+            print(String(format: "%5.1f s  %d procs  %@  sum in %.0f out %.0f  ", Date().timeIntervalSince(t0), net.count, NetSampler.shared.seesEverything ? "all" : "own", sumIn, sumOut) + top.map {
                 "\(Native.process($0.key)?.comm ?? "?")[\($0.key)] in \(Int($0.value.inPerSec)) out \(Int($0.value.outPerSec)) total \($0.value.inTotal.map(String.init) ?? "-")/\($0.value.outTotal.map(String.init) ?? "-")" }.joined(separator: "; "))
         }
         NetSampler.shared.want(false)

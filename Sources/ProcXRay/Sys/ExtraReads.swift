@@ -109,9 +109,13 @@ enum ExtraRead {
 
 /// Per-process network throughput. Read natively from launch to quit (NativeNetStats: a reading every 2 s,
 /// closed connections included, and per-process totals) unless the framework is missing or PROCXRAY_APPLE_TOOLS
-/// is set; then from `nettop`, only while something shows network data. nettop spends ~5 s starting up whatever it is asked, and holds its output back when writing to
+/// is set; then from `nettop`, only while something shows network data. The native reader runs in the root
+/// helper while it is up (HelperProtocol.netRates), and in the app otherwise: unprivileged, the kernel only
+/// reports the app user's own kernel sockets, without other users' sockets or any user-space (Network.framework,
+/// QUIC) flow; root, or nettop's com.apple.private.network.statistics entitlement, sees them all (measured
+/// 2026-11-18: 71 of nettop's 114 sockets in the app, all of them as root). nettop spends ~5 s starting up whatever it is asked, and holds its output back when writing to
 /// a pipe, so it can't be streamed: one-sample runs follow each other in the background, and rates come from
-/// consecutive runs (a reading every ~5 s). Both see every user's sockets without the helper. nettop's counts
+/// consecutive runs (a reading every ~5 s). nettop sees every socket without the helper. nettop's counts
 /// cover the sockets open at each run, so a connection that closed between runs drops out; a falling count is
 /// shown as no traffic, not negative.
 final class NetSampler: @unchecked Sendable {
@@ -135,13 +139,25 @@ final class NetSampler: @unchecked Sendable {
     /// started; it costs ~0.3 % of one core. nettop still runs only while something shows network data.
     static var alwaysOn: Bool { useNative }
     private var native: NativeNetStats?
+    /// Set from the store's helper probe: while the helper runs, the readings are its own.
+    private var helperUp = false
+    /// The helper's reader's start while its readings are the ones in use.
+    private var helperSince: Date?
+    private var helperMisses = 0
+    private var poll: DispatchSourceTimer?
+
+    /// Whether the helper is running (HelperClient.probe). Its readings take over once it answers with some.
+    func setHelper(_ running: Bool) { lock.lock(); helperUp = running; lock.unlock() }
+
+    /// Whether the readings cover every process's traffic: from the helper or from nettop, not the app's own reader.
+    var seesEverything: Bool { lock.lock(); defer { lock.unlock() }; return !Self.useNative || helperSince != nil }
 
     /// Starts the native reader for the app's whole life; a no-op with nettop.
     func startAtLaunch() { if Self.useNative { want(true) } }
 
     /// When the native reader started (nil with nettop): totals of processes started before it miss sockets
     /// they closed before then.
-    var since: Date? { lock.lock(); defer { lock.unlock() }; return native?.since }
+    var since: Date? { lock.lock(); defer { lock.unlock() }; return helperSince ?? native?.since }
 
     /// Called by every snapshot: starts the loop when wanted, lets it stop when not. The native reader, once
     /// started, never stops.
@@ -163,12 +179,49 @@ final class NetSampler: @unchecked Sendable {
 
     private func wantNative(_ on: Bool) {
         lock.lock(); defer { lock.unlock() }
-        guard on, native == nil else { return }
+        guard on, poll == nil else { return }
+        startLocal()
+        // Asks the helper every 2 s, as often as its reader reads; one source, so ticks never overlap.
+        let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        t.schedule(deadline: .now(), repeating: 2, leeway: .milliseconds(400))
+        t.setEventHandler { [weak self] in self?.pollHelper() }
+        t.resume()
+        poll = t
+    }
+
+    /// The app's own reader, while the helper's readings aren't in use. Under `lock`.
+    private func startLocal() {
+        guard native == nil else { return }
         native = NativeNetStats { [weak self] r in
             guard let self else { return }
             self.lock.lock(); defer { self.lock.unlock() }
+            guard self.helperSince == nil else { return }
             self.rates = r; self.compared = true
         }
+    }
+
+    private func pollHelper() {
+        lock.lock(); let up = helperUp; lock.unlock()
+        let reply = up ? HelperClient.shared.netRates() : nil
+        lock.lock(); defer { lock.unlock() }
+        if let reply, let entries = reply.rates {
+            rates = Dictionary(entries.map { ($0.pid, Rate(inPerSec: $0.inPerSec, outPerSec: $0.outPerSec, inTotal: $0.inTotal, outTotal: $0.outTotal)) },
+                               uniquingKeysWith: { a, _ in a })
+            compared = true
+            helperSince = reply.since
+            helperMisses = 0
+            // The helper's reading covers everything the app's would.
+            native?.stop(); native = nil
+            return
+        }
+        // Its reader just started and hasn't compared two queries yet: keep what there is.
+        if reply != nil { return }
+        // One missed answer isn't the helper gone; three (~6 s), or a probe that found it down, are. The app's
+        // own reader starts again, with totals from now.
+        helperMisses += 1
+        guard helperSince == nil || !up || helperMisses >= 3 else { return }
+        if helperSince != nil { helperSince = nil; rates = [:]; compared = false }
+        startLocal()
     }
 
     private func loop() {

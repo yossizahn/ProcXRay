@@ -79,6 +79,12 @@ final class HelperClient: @unchecked Sendable {
         return try? JSONDecoder().decode(ThreadSnapshot.self, from: data)
     }
 
+    /// The helper's network reading (HelperProtocol.netRates); nil when it didn't answer or can't read.
+    func netRates(timeout: Double = 3) -> NetRatesReply? {
+        guard let data = call({ p, done in p.netRates { done($0) } }, timeout: timeout) as Data? else { return nil }
+        return try? JSONDecoder().decode(NetRatesReply.self, from: data)
+    }
+
     /// `footprint`'s output for these processes, run as root (HelperProtocol.groupFootprint); nil when the helper
     /// couldn't run it.
     func groupFootprint(_ pids: [Int32]) -> String? {
