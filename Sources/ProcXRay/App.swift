@@ -180,6 +180,16 @@ struct ProcXRayApp: App {
             LaunchWatcher.bench(seconds: CommandLine.arguments.count > i + 1 ? Double(CommandLine.arguments[i + 1]) ?? 20 : 20)
             exit(0)
         }
+        if CommandLine.arguments.contains("--helper-unregister") || CommandLine.arguments.contains("--helper-register") {
+            // Run from inside the bundle: SMAppService registers the daemon of the app the binary sits in.
+            let register = CommandLine.arguments.contains("--helper-register")
+            do {
+                if register { try HelperClient.shared.register() } else { try HelperClient.shared.unregister() }
+                print(register ? "registered" : "unregistered")
+            } catch { print("failed: \(error.localizedDescription)"); exit(1) }
+            print(HelperClient.shared.probe().label)
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--helper-call") {
             Bench.helperCall(Array(CommandLine.arguments[(i + 1)...]))
             exit(0)
@@ -714,6 +724,9 @@ struct HelperSettings: View {
                         Button("Install Privileged Helper…") { store.installHelper() }
                     case .needsApproval:
                         Button("Open Login Items to Approve") { HelperClient.shared.openLoginItems(); store.probeHelper() }
+                        // Starting over when an approval doesn't take. A BTM record left orphaned by a deleted copy of
+                        // the app ("record not found" on unregister) only goes with `sfltool resetbtm` and a restart.
+                        Button("Uninstall Helper") { store.uninstallHelper() }
                     case .running, .unreachable:
                         // Unreachable: registering again is a no-op, so offer to remove it (launchd may still point
                         // at another copy of the app that took over the registration).
