@@ -318,3 +318,20 @@ enum SelfTest {
         }
     }
 }
+
+/// The big button in the middle of a tab that hasn't run yet (Memory, Sample, Logs, Syscalls).
+struct EmptyRunButton: View {
+    let title: String
+    var systemImage = "play.fill"
+    var disabledReason: String? = nil
+    var help = ""
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage).padding(.horizontal, 6)
+        }
+        .buttonStyle(.borderedProminent).controlSize(.large)
+        .disabled(disabledReason != nil)
+        .help(disabledReason ?? help)
+    }
+}

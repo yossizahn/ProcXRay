@@ -352,8 +352,15 @@ struct LogsPane: View {
 
     @ViewBuilder private var content: some View {
         if !session.started {
-            VStack(spacing: 8) {
-                Image(systemName: "play.circle").font(.largeTitle).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                EmptyRunButton(title: "Run", help: "The last 10 minutes of this process's events, and others' that mention its pid") {
+                    session.runSnapshot(pid: proc.pid)
+                }
+                EmptyRunButton(title: "Live", systemImage: "dot.radiowaves.left.and.right",
+                               disabledReason: exited ? InspectorView.exitedNote : nil,
+                               help: "This process's events from the last 10 minutes, then new ones as it logs them (log stream)") {
+                    session.startLive(pid: proc.pid, start: proc.start)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if session.isActive && (session.mode == .snapshot || (session.loadingHistory && session.entries.isEmpty)) {

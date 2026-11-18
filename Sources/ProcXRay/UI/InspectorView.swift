@@ -269,8 +269,7 @@ struct CommandTab<Parsed, Visual: View>: View {
                 }
             } else {
                 VStack(spacing: 8) {
-                    Image(systemName: disabledReason == nil ? "play.circle" : "xmark.circle")
-                        .font(.largeTitle).foregroundStyle(.secondary)
+                    EmptyRunButton(title: "Run", disabledReason: disabledReason, help: title) { run() }
                     if let disabledReason { Text(disabledReason).foregroundStyle(.secondary) }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

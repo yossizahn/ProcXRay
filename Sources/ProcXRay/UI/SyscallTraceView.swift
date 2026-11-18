@@ -239,6 +239,11 @@ struct SyscallTraceView: View {
                 .multilineTextAlignment(.center)
             Text(disabledReason ?? "Uses the kernel's kdebug trace (as Instruments' System Call Trace does). One trace at a time per machine: it can't run while Instruments or fs_usage is recording.")
                 .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            EmptyRunButton(title: "Trace", systemImage: "record.circle", disabledReason: disabledReason,
+                           help: "Trace this process's BSD syscalls and Mach traps (kdebug, as root via the helper)") {
+                tracer.start(pid: proc.pid, start: proc.start, stacks: stacks)
+            }
+            .padding(.top, 6)
         }
         .padding(30).frame(maxWidth: 520).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
