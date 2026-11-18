@@ -218,6 +218,10 @@ struct ProcNode: Identifiable, Sendable {
     var rootPid: pid_t?
     /// Rows with a fixed order sort before their siblings, in this order, whatever the sort column.
     var fixedOrder: Int?
+    /// Pinned to the top (Pins): the row itself, for its pin mark. Filled in by `Store.sorted`.
+    var pinned = false
+    /// The lowest pin rank of the row and the rows under it; rows with one sort first, before fixed order.
+    var pinRank: Int?
     /// A group row above already names this row's extension point, so the name cell doesn't repeat it.
     var extensionPointShownAbove = false
     /// Starts collapsed in the outline until the user opens it (or a search is active).
@@ -288,7 +292,7 @@ final class Store {
     @ObservationIgnored var kindCache: (gen: Int, map: [pid_t: String], roots: [pid_t: pid_t])?
     /// Bumps each time nodes() actually rebuilds, so views can skip work when it returned the cached tree.
     @ObservationIgnored private(set) var nodesVersion = 0
-    @ObservationIgnored private var nodesCache: (gen: Int, grouping: Grouping, filter: String,
+    @ObservationIgnored private var nodesCache: (gen: Int, pins: Int, grouping: Grouping, filter: String,
                                                  predicate: String, sort: ColumnSort, columns: Set<String>, nodes: [ProcNode])?
     /// Filter predicates compiled so far, by trimmed source (nil: doesn't parse). See predicate(_:).
     @ObservationIgnored var compiledPredicates: [String: PredicateFields.Compiled?] = [:]
@@ -514,6 +518,7 @@ final class Store {
                     return
                 }
                 self.procs = snap.procs
+                Pins.shared.prune()
                 if readSlow {
                     self.lsApps = snap.ls
                     self.jobs = snap.jobs
@@ -939,11 +944,12 @@ final class Store {
     /// `predicate`: a filter in the PredicateCompiler language; one that doesn't parse filters nothing.
     func nodes(grouping: Grouping, filter: String, predicate: String = "", sort: ColumnSort,
                columns: Set<String> = []) -> [ProcNode] {
-        if let c = nodesCache, c.gen == dataGen, c.grouping == grouping, c.filter == filter,
+        let pins = Pins.shared.version
+        if let c = nodesCache, c.gen == dataGen, c.pins == pins, c.grouping == grouping, c.filter == filter,
            c.predicate == predicate, c.sort == sort, c.columns == columns { return c.nodes }
         let out = buildNodes(grouping: grouping, filter: filter, predicate: self.predicate(predicate),
                              sort: sort, columns: columns)
-        nodesCache = (dataGen, grouping, filter, predicate, sort, columns, out)
+        nodesCache = (dataGen, pins, grouping, filter, predicate, sort, columns, out)
         nodesVersion &+= 1
         return out
     }
@@ -1056,6 +1062,7 @@ final class Store {
     private func sorted(_ nodes: [ProcNode], _ sort: ColumnSort, shown: [Column], sortColumn: Column?,
                         memo: ColumnMemo) -> (nodes: [ProcNode], members: [ProcInfo]) {
         var allMembers: [ProcInfo] = []
+        let pins = Pins.shared
         let out = nodes.map { n in
             var m = n
             var members: [ProcInfo] = []
@@ -1090,8 +1097,15 @@ final class Store {
             }
             m.shownCount = (n.proc == nil ? 0 : 1) + kids.reduce(0) { $0 + $1.shownCount }
             m.unitCount = kids.reduce(0) { $0 + ($1.kind == .group ? $1.unitCount : 1) }
+            if !pins.isEmpty {
+                let own = pins.rank(Pins.row(n, procs: procs))
+                m.pinned = own != nil
+                m.pinRank = ([own] + kids.map(\.pinRank)).compactMap { $0 }.min()
+            }
             return m
         }.sorted { a, b in
+            // Pinned rows (and groups holding one) first, in the order they were pinned.
+            if a.pinRank != b.pinRank { return (a.pinRank ?? .max) < (b.pinRank ?? .max) }
             if a.fixedOrder != nil || b.fixedOrder != nil, a.fixedOrder != b.fixedOrder {
                 return (a.fixedOrder ?? .max) < (b.fixedOrder ?? .max)
             }

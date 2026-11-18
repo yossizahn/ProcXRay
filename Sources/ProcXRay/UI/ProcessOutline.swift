@@ -345,6 +345,7 @@ struct ProcessOutline: NSViewRepresentable {
             withObservationTracking {
                 _ = store.procs
                 _ = store.lsApps
+                _ = Pins.shared.keys
             } onChange: { [weak self] in
                 DispatchQueue.main.async {
                     guard let self else { return }
@@ -669,9 +670,7 @@ struct ProcessOutline: NSViewRepresentable {
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
             if menu === headerMenu { buildHeaderMenu(menu); return }
-            // Process rows, and an app's unit row acting on the app's own process; other group rows have none.
-            guard let o = outline, o.clickedRow >= 0, let n = (o.item(atRow: o.clickedRow) as? Item)?.node,
-                  let p = process(n) else { return }
+            guard let o = outline, o.clickedRow >= 0, let n = (o.item(atRow: o.clickedRow) as? Item)?.node else { return }
             let parent = self.parent!
             func add(_ title: String, _ action: @escaping () -> Void) {
                 let mi = NSMenuItem(title: title, action: #selector(MenuAction.fire), keyEquivalent: "")
@@ -680,7 +679,12 @@ struct ProcessOutline: NSViewRepresentable {
                 mi.representedObject = a    // keeps the target alive while the menu is up
                 menu.addItem(mi)
             }
-            add("Inspect") { parent.onOpen(p) }
+            // Process rows, and an app's unit row acting on the app's own process; other group rows only pin.
+            let p = process(n)
+            if let p { add("Inspect") { parent.onOpen(p) } }
+            let pin = Pins.row(n, procs: procs)
+            add(Pins.shared.isPinned(pin) ? "Unpin" : "Pin to Top") { Pins.shared.toggle(pin) }
+            guard let p else { return }
             menu.addItem(.separator())
             // No signals for kernel_task (pid 0): kill(0, …) would hit ProcXRay's own process group.
             if p.pid > 0 {
@@ -1148,20 +1152,20 @@ struct ProcessOutline: NSViewRepresentable {
                 if n.kind == .unit, let r = n.rootPid.flatMap({ procs[$0] }) {
                     // An app with its helpers: the app's icon and name, in regular weight.
                     set(image: IconCache.icon(for: r) ?? Self.terminalIcon, tint: nil)
-                    set(NSAttributedString(string: n.title, attributes: [
+                    set(Self.pinMarked(NSAttributedString(string: n.title, attributes: [
                         .font: Self.body, .foregroundColor: NSColor.labelColor, .paragraphStyle: Self.truncating,
-                    ]))
+                    ]), n.pinned))
                     return
                 }
                 let image = n.isGhost ? Self.ghostIcon
                     : n.kind == .category ? n.category.flatMap { Self.symbol($0.symbol) } : Self.groupIcon
                 let ghostly = n.isGhost || n.category == .leftBehind
                 set(image: image, tint: ghostly ? .systemOrange : .secondaryLabelColor)
-                set(NSAttributedString(string: n.title, attributes: [
+                set(Self.pinMarked(NSAttributedString(string: n.title, attributes: [
                     .font: n.kind == .group ? Self.semibold : Self.bold,
                     .foregroundColor: ghostly ? NSColor.systemOrange : NSColor.labelColor,
                     .paragraphStyle: Self.truncating,
-                ]))
+                ]), n.pinned))
                 return
             }
             set(image: IconCache.icon(for: p) ?? Self.terminalIcon, tint: nil)
@@ -1188,7 +1192,27 @@ struct ProcessOutline: NSViewRepresentable {
             if p.isTranslated { badge("ROSETTA", .systemPurple) }
             if p.lsTags.contains(where: { $0.hasPrefix("exited") }) { badge("EXITED", .systemRed) }
             s.addAttribute(.paragraphStyle, value: Self.truncating, range: NSRange(location: 0, length: s.length))
-            set(s)
+            set(Self.pinMarked(s, n.pinned))
+        }
+
+        /// A pinned row's name starts with a pin (one shared attachment, so unchanged cells compare equal).
+        private static let pinMark: NSAttributedString = {
+            let a = NSTextAttachment()
+            let cfg = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+                .applying(.init(paletteColors: [.controlAccentColor]))
+            a.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Pinned")?.withSymbolConfiguration(cfg)
+            let s = NSMutableAttributedString(attachment: a)
+            s.append(NSAttributedString(string: " "))
+            return s
+        }()
+        private static func pinMarked(_ s: NSAttributedString, _ pinned: Bool) -> NSAttributedString {
+            guard pinned else { return s }
+            let out = NSMutableAttributedString(attributedString: pinMark)
+            out.append(s)
+            if let ps = s.length > 0 ? s.attribute(.paragraphStyle, at: 0, effectiveRange: nil) : nil {
+                out.addAttribute(.paragraphStyle, value: ps, range: NSRange(location: 0, length: out.length))
+            }
+            return out
         }
 
         static func context(_ n: ProcNode) -> String {

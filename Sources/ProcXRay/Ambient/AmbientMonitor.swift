@@ -323,6 +323,7 @@ final class AmbientMonitor {
                 self.procHistory = done.history
                 self.top = out.top
                 self.groups = out.groups
+                Pins.shared.prune()
                 self.topGroups = out.topGroups
                 self.groupHistory = done.groupHistory
                 self.alerts = out.alerts

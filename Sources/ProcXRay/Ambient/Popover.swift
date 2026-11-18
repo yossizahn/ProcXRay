@@ -137,14 +137,32 @@ struct MenuBarPopover: View {
 
     private var shown: [AmbientProc] {
         let me = getuid()
-        return monitor.procs.filter { filter.matches($0, me: me) }
+        let pins = Pins.shared
+        let list = monitor.procs.filter { filter.matches($0, me: me) }
             .sorted { (metric.value($0) ?? -1, $1.pid) > (metric.value($1) ?? -1, $0.pid) }
+        guard !pins.isEmpty else { return list }
+        // Pinned processes first, in the order they were pinned (a stable sort keeps the rest as they were).
+        return list.map { (pins.rank(Pins.process($0)), $0) }.enumerated()
+            .sorted { ($0.element.0 ?? .max, $0.offset) < ($1.element.0 ?? .max, $1.offset) }.map(\.element.1)
     }
 
     private var shownGroups: [AmbientGroup] {
         let me = getuid()
-        return monitor.groups.filter { filter.matches($0.leader, me: me) }
+        let pins = Pins.shared
+        let list = monitor.groups.filter { filter.matches($0.leader, me: me) }
             .sorted { (metric.value($0.sums) ?? -1, $1.leader.pid) > (metric.value($1.sums) ?? -1, $0.leader.pid) }
+        guard !pins.isEmpty else { return list }
+        // Pinned groups, and groups holding a pinned process, first, in the order they were pinned.
+        func rank(_ g: AmbientGroup) -> Int? {
+            ([pins.rank(Pins.group(leader: g.leader))] + g.members.map { pins.rank(Pins.process($0)) }).compactMap { $0 }.min()
+        }
+        return list.map { (rank($0), $0) }.enumerated()
+            .sorted { ($0.element.0 ?? .max, $0.offset) < ($1.element.0 ?? .max, $1.offset) }.map(\.element.1)
+    }
+
+    /// A member's place inside an expanded group: pinned ones first, in pin order, then by the metric.
+    private func memberOrder(_ x: (Int?, Double), _ y: (Int?, Double)) -> Bool {
+        x.0 != y.0 ? (x.0 ?? .max) < (y.0 ?? .max) : x.1 > y.1
     }
 
     @ViewBuilder
@@ -186,9 +204,11 @@ struct MenuBarPopover: View {
             guard open, !g.single else { continue }
             // The leader first, then sub-groups and the other members by the metric.
             enum Child { case sub(AmbientSubgroup), proc(AmbientProc) }
-            var kids: [(Double, Child)] = g.plain.dropFirst().map { (v($0), .proc($0)) }
-            kids += g.subgroups.map { (metric.value($0.sums) ?? -1, .sub($0)) }
-            kids.sort { $0.0 > $1.0 }
+            let pins = Pins.shared
+            let pin: (AmbientProc) -> Int? = { pins.rank(Pins.process($0)) }
+            var kids: [((Int?, Double), Child)] = g.plain.dropFirst().map { ((pin($0), v($0)), .proc($0)) }
+            kids += g.subgroups.map { (($0.members.compactMap(pin).min(), metric.value($0.sums) ?? -1), .sub($0)) }
+            kids.sort { memberOrder($0.0, $1.0) }
             out.append(procLine(g.leader, depth: 1))
             for (_, k) in kids {
                 switch k {
@@ -197,7 +217,7 @@ struct MenuBarPopover: View {
                     let sid = "\(gid)/\(sg.id)"
                     let sopen = expanded.contains(sid)
                     out.append(Line(id: sid, subject: .sub(sg), depth: 1, history: summed(sg.members), open: sopen))
-                    if sopen { out += sg.members.sorted { v($0) > v($1) }.map { procLine($0, depth: 2) } }
+                    if sopen { out += sg.members.sorted { memberOrder((pin($0), v($0)), (pin($1), v($1))) }.map { procLine($0, depth: 2) } }
                 }
             }
         }
@@ -506,6 +526,16 @@ struct PopoverRow: View {
             }
         }
     }
+    /// What pinning this row pins: a process, or an accounting group (by its leader, as the main window pins
+    /// an app's row). Sub-groups don't pin.
+    private var pinKey: String? {
+        switch subject {
+        case .proc(let p): Pins.process(p)
+        case .group(let g): Pins.group(leader: g.leader)
+        case .sub: nil
+        }
+    }
+
     private var fallbackSymbol: String {
         if case .sub(let s) = subject, case .xpc = s.id { return "shippingbox" }
         return "terminal"
@@ -531,6 +561,10 @@ struct PopoverRow: View {
             else { Image(systemName: fallbackSymbol).font(.system(size: 11)).frame(width: 16, height: 16).foregroundStyle(.secondary) }
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 4) {
+                    if Pins.shared.isPinned(pinKey) {
+                        Image(systemName: "pin.fill").font(.system(size: 8, weight: .semibold)).foregroundStyle(Color.accentColor)
+                            .help("Pinned to the top")
+                    }
                     Text(verbatim: title).lineLimit(1).truncationMode(.middle)
                         .foregroundStyle(notResponding ? Color.red : .primary)
                     if let t = inlineText {
@@ -571,6 +605,10 @@ struct PopoverRow: View {
                     Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
                 }
                 Button("Copy PID") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("\(p.pid)", forType: .string) }
+            }
+            if let k = pinKey {
+                if target != nil { Divider() }
+                Button(Pins.shared.isPinned(k) ? "Unpin" : "Pin to Top") { Pins.shared.toggle(k) }
             }
             if let open {
                 if target != nil { Divider() }
