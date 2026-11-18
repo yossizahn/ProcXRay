@@ -20,6 +20,9 @@ struct ProcessOutline: NSViewRepresentable {
     @Binding var sort: ColumnSort?
     /// Column ids shown (ColumnPrefs); shared by every window and View ▸ Columns.
     var shownColumns: Set<String> = ColumnPrefs.parse(ColumnPrefs.defaultShown)
+    /// Bumped to scroll the selected row into view (centered) even when it was already selected, and once the
+    /// outline is laid out in a window that's only just opening.
+    var scrollRequest = 0
     let onOpen: (ProcInfo) -> Void
     let onSignal: (ProcInfo, Int32, String) -> Void
 
@@ -409,6 +412,36 @@ struct ProcessOutline: NSViewRepresentable {
                 }
             }
             syncSelection(outline)
+            if parent.scrollRequest != appliedScrollRequest {
+                appliedScrollRequest = parent.scrollRequest
+                scrollToSelection(tries: 10)
+            }
+        }
+
+        private var appliedScrollRequest = 0
+
+        /// Centers the selected row. A window that's opening has no size yet: try again on later turns.
+        private func scrollToSelection(tries: Int) {
+            guard let outline, let scroll = outline.enclosingScrollView else { return }
+            let row = outline.selectedRow
+            let clip = scroll.contentView
+            guard row >= 0, outline.window != nil, clip.bounds.height > 0 else {
+                if tries > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.scrollToSelection(tries: tries - 1) }
+                }
+                return
+            }
+            outline.layoutSubtreeIfNeeded()
+            let r = outline.rect(ofRow: row)
+            // The rows show from below the header (which floats over the clip view) to the clip's bottom.
+            let inset = scroll.contentInsets.top
+            var top = clip.bounds.minY + inset
+            if let h = outline.headerView, h.window != nil { top = max(top, clip.convert(h.bounds, from: h).maxY) }
+            let above = top - clip.bounds.minY
+            var y = r.midY - above - (clip.bounds.maxY - top) / 2
+            y = max(-inset, min(y, outline.frame.height - clip.bounds.height))
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
+            scroll.reflectScrolledClipView(clip)
         }
 
         /// Brings the displayed tree to the target tree with per-parent removes, inserts and moves, then

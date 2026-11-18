@@ -33,6 +33,8 @@ struct ProcessesView: View {
     /// The predicate row was opened with its button. It also shows, whatever this says, while a predicate is on.
     @State private var predicateOpen = false
     @State private var selection: ProcNode.ID?
+    /// Bumped by a reveal so the outline scrolls the target into view even when it was already selected.
+    @State private var scrollRequest = 0
     /// The column sort, or "" for none. As in Process Hacker: with no column sort the list shows the chosen
     /// grouping in its natural order; sorting by a column shows the flat list sorted by it. Clicking a header
     /// cycles descending → ascending → none. (A new key: the old one defaulted to "pid,asc", which would now
@@ -86,6 +88,7 @@ struct ProcessesView: View {
             Divider()
             ProcessOutline(store: store, grouping: shownGrouping, filter: search, predicate: predicate,
                            selection: $selection, sort: sort, shownColumns: ColumnPrefs.parse(shownColumns),
+                           scrollRequest: scrollRequest,
                            onOpen: { p in inspect(p) },
                            onSignal: { p, sig, label in
                                // Resume is harmless: send it at once. The rest are confirmed first.
@@ -169,6 +172,7 @@ struct ProcessesView: View {
                 search = ""; predicate = ""
             }
             selection = Int(pid)
+            scrollRequest += 1
             return
         }
         guard tries > 0 else { return }

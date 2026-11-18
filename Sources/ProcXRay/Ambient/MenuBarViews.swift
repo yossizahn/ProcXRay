@@ -28,6 +28,7 @@ final class AppRouter {
 
     /// Brings the main window forward, opening one if none is open.
     static func openMain(_ openWindow: OpenWindowAction) {
+        closeMenuBarPopover()
         AppActivation.willShowWindow()
         if let w = NSApp.windows.first(where: { $0.identifier?.rawValue.hasPrefix("main") == true && $0.styleMask.contains(.titled) }) {
             if w.isMiniaturized { w.deminiaturize(nil) }
@@ -38,7 +39,17 @@ final class AppRouter {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// The menu bar popover stays open over the window it just brought forward unless it's closed. Closed as
+    /// Escape closes it: `close()` leaves MenuBarExtra thinking it's still shown (the next click on the item is
+    /// spent "closing" it), and clicking the status button programmatically does nothing.
+    static func closeMenuBarPopover() {
+        for w in NSApp.windows where w.isVisible && String(describing: type(of: w)).hasPrefix("MenuBarExtraWindow") {
+            w.cancelOperation(nil)
+        }
+    }
+
     static func inspect(_ ref: ProcessRef, _ openWindow: OpenWindowAction) {
+        closeMenuBarPopover()
         AppActivation.willShowWindow()
         openWindow(id: ProcessWindow.id, value: ref)
         NSApp.activate(ignoringOtherApps: true)
