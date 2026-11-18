@@ -73,6 +73,15 @@ struct ProcXRayApp: App {
             }
             RunLoop.main.run()
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--counters") {
+            // --counters [seconds] [filter] [--json]: every system counter (id, value, change per second), and each
+            // source's cost; --json: one reading of everything as JSON (the browser's Export Snapshot).
+            let rest = CommandLine.arguments.dropFirst(i + 1).filter { $0 != "--json" }
+            let secs = rest.first.flatMap(Double.init)
+            CounterEngine.dump(seconds: secs ?? 1, filter: rest.dropFirst(secs == nil ? 0 : 1).first,
+                               json: CommandLine.arguments.contains("--json"))
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--groups") {
             // --groups [seconds]: the dropdown's accounting groups, printed.
             let secs = CommandLine.arguments.dropFirst(i + 1).compactMap(Double.init).first ?? 2
@@ -489,6 +498,8 @@ enum Section: String, CaseIterable, Identifiable {
     case processes = "Processes"
     case background = "Background Items"
     case launchd = "launchd Jobs"
+    case overview = "Overview"
+    case counters = "All Counters"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -496,6 +507,8 @@ enum Section: String, CaseIterable, Identifiable {
         case .processes: "cpu"
         case .background: "gearshape.2"
         case .launchd: "bolt.horizontal"
+        case .overview: "chart.xyaxis.line"
+        case .counters: "gauge.with.dots.needle.33percent"
         }
     }
 
@@ -557,6 +570,12 @@ struct ContentView: View {
                     }
                     .tag(SidebarItem.section(.triage))
                 }
+                SwiftUI.Section("System") {
+                    Label(Section.overview.rawValue, systemImage: Section.overview.icon).tag(SidebarItem.section(.overview))
+                        .help("CPU, memory, power, thermal, storage, network and GPU dashboards built from the system's counters")
+                    Label(Section.counters.rawValue, systemImage: Section.counters.icon).tag(SidebarItem.section(.counters))
+                        .help("Every system-wide counter macOS exposes: Mach host statistics, sysctl, IOReport and IORegistry statistics")
+                }
                 SwiftUI.Section("Launch registries") {
                     ForEach([Section.launchd, .background]) { s in
                         Label(s.rawValue, systemImage: s.icon).tag(SidebarItem.section(s))
@@ -576,6 +595,8 @@ struct ContentView: View {
             case .processes: ProcessesView()
             case .background: BackgroundItemsView()
             case .launchd: LaunchdView()
+            case .overview: SystemOverviewView()
+            case .counters: SystemCountersView()
             }
         }
         .modifier(InspectAtLaunch())

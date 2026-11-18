@@ -8,7 +8,8 @@ import IOKit
 ///   cumulative time in IDLE/DOWN/OFF and in each performance state, lowest clock first.
 /// - "GPU Stats" / "GPU Performance States", channel GPUPH: time in OFF and in P1…P15.
 /// - "Energy Model", channel "GPU Energy": cumulative energy. The CPU energy channels in the same group read 0
-///   for an unprivileged process (measured on M1, macOS 27.2), so they aren't used.
+///   for an unprivileged process (measured on M1, macOS 27.2); the PMP group's Energy Counters have the CPU's,
+///   per cluster and per core, without privileges (the System Overview's CPU and Power tabs use them).
 ///
 /// A state's clock comes from pmgr's DVFS tables in the IORegistry ("voltage-states<N>-sram" for the CPU,
 /// "voltage-states9" for the GPU): pairs of (frequency, voltage), in Hz up to M3 and kHz from M4 on. Which
@@ -197,7 +198,8 @@ struct ClusterStats: Sendable, Hashable {
         return out
     }
 
-    private static func clock(running: [(name: String, ticks: Int64)], kind: String, table: [Double], busy: Int64) -> Double? {
+    /// Time-weighted clock over the running states, in MHz; nil when the table doesn't fit.
+    static func clock(running: [(name: String, ticks: Int64)], kind: String, table: [Double], busy: Int64) -> Double? {
         var sum = 0.0
         if kind == "GPU" {
             // P1…Pn index the table directly (entry 0 is the off state's 0 Hz).

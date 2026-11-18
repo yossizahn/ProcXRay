@@ -128,7 +128,7 @@ struct SystemStats: Sendable {
         return notify_register_check(kOSThermalNotificationPressureLevelName, &t) == NOTIFY_STATUS_OK ? t : -1
     }()
 
-    private static func thermalPressure() -> Int32? {
+    static func thermalPressure() -> Int32? {
         guard thermalToken >= 0 else { return nil }
         var v: UInt64 = 0
         guard notify_get_state(thermalToken, &v) == NOTIFY_STATUS_OK else { return nil }
@@ -172,28 +172,15 @@ struct SystemStats: Sendable {
         return any ? (r, w) : (nil, nil)
     }
 
-    /// Bytes received and sent over every interface but loopback, from the 64-bit counters (NET_RT_IFLIST2:
-    /// getifaddrs' if_data is 32-bit and wraps at 4 GB).
+    /// Bytes received and sent over every interface but loopback, from the interface MIB's exact 64-bit
+    /// counters (NET_RT_IFLIST2 cuts them to 32 bits and rounds to 1 KiB on 27.2: see `InterfaceCounters`).
     private static func netBytes() -> (UInt64?, UInt64?) {
-        var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
-        var len = 0
-        guard sysctl(&mib, 6, nil, &len, nil, 0) == 0, len > 0 else { return (nil, nil) }
-        var buf = [UInt8](repeating: 0, count: len)
-        guard sysctl(&mib, 6, &buf, &len, nil, 0) == 0 else { return (nil, nil) }
-        var i = 0, rx: UInt64 = 0, tx: UInt64 = 0
-        buf.withUnsafeBytes { raw in
-            while i + MemoryLayout<if_msghdr>.size <= len {
-                let h = raw.loadUnaligned(fromByteOffset: i, as: if_msghdr.self)
-                guard h.ifm_msglen > 0 else { break }
-                if Int32(h.ifm_type) == RTM_IFINFO2, i + MemoryLayout<if_msghdr2>.size <= len {
-                    let h2 = raw.loadUnaligned(fromByteOffset: i, as: if_msghdr2.self)
-                    if h2.ifm_flags & IFF_LOOPBACK == 0 {
-                        rx &+= h2.ifm_data.ifi_ibytes
-                        tx &+= h2.ifm_data.ifi_obytes
-                    }
-                }
-                i += Int(h.ifm_msglen)
-            }
+        let list = InterfaceCounters.list()
+        guard !list.isEmpty else { return (nil, nil) }
+        var rx: UInt64 = 0, tx: UInt64 = 0
+        for i in list where i.flags & UInt32(IFF_LOOPBACK) == 0 {
+            rx &+= i.data.ifi_ibytes
+            tx &+= i.data.ifi_obytes
         }
         return (rx, tx)
     }

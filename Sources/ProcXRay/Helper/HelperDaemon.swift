@@ -178,6 +178,12 @@ enum HelperDaemon {
             reply(HelperNetStats.reply().flatMap { try? JSONEncoder().encode($0) } ?? Data())
         }
 
+        /// No admin check: TCP's totals and the kernel zones' sizes are system-wide figures with nothing of
+        /// any user's in them, and the call takes no input.
+        func systemCounters(reply: @escaping (Data) -> Void) {
+            reply((try? JSONEncoder().encode(HelperCounters.read())) ?? Data())
+        }
+
         // MARK: syscall trace
 
         private let traceLock = NSLock()

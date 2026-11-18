@@ -101,7 +101,7 @@ enum Bench {
         }
     }
 
-    /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|stacks|powermetrics> [pid] [--full]`:
+    /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|stacks|powermetrics|counters> [pid] [--full]`:
     /// one helper call from the shell, for testing the helper without the UI. Only this exact binary is accepted by the helper.
     /// The helper's trace path without XPC: start, read every 250 ms as the app does, decode, pair.
     static func trace(pid: Int32, seconds: Double, ktrace: Bool, out: String?) {
@@ -186,6 +186,18 @@ enum Bench {
             }
             print("local:  \(names(SecurityDetail.read(pid)))")
             print("helper: \(names(c.securityDetail(pid)))")
+            return
+        }
+        if what == "counters" {
+            // counters: the root-only system counters (HelperProtocol.systemCounters).
+            let t0 = Date()
+            guard let r = c.systemCounters() else { print("counters: no reply"); return }
+            print(String(format: "counters in %.1f ms", -t0.timeIntervalSinceNow * 1000))
+            for (k, v) in r.sysctls.sorted(by: { $0.key < $1.key }) { print("  \(k): \(v.count) bytes, \(v.filter { $0 != 0 }.count) nonzero") }
+            if let z = r.zones {
+                print("  zones: \(z.count), \(Compact.bytes(Double(z.reduce(0) { $0 + $1.size })))B; largest:")
+                for x in z.sorted(by: { $0.size > $1.size }).prefix(8) { print("    \(x.name) \(Compact.bytes(Double(x.size)))B, \(x.count) elements") }
+            } else { print("  zones: \(r.zoneError ?? "none")") }
             return
         }
         if what == "mach" {

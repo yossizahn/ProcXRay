@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 17  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates
+    static let protocolVersion = 18  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -92,6 +92,10 @@ enum HelperConfig {
     /// started by the first call and kept for the helper's life. As root it sees every user's sockets and the
     /// user-space (Network.framework) flows, which the kernel keeps from an unprivileged reader. JSON NetRatesReply.
     func netRates(reply: @escaping (Data) -> Void)
+
+    /// System counters only root reads: the allowlisted sysctls (HelperCounters.sysctlAllowlist, fixed names) and
+    /// the kernel's zones. Takes no input. JSON HelperCounters.
+    func systemCounters(reply: @escaping (Data) -> Void)
 }
 
 /// The helper's network reading (HelperProtocol.netRates).
