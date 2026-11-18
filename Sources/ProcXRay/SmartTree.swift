@@ -101,13 +101,13 @@ enum SmartTree {
         return ["/System/", "/usr/", "/sbin/", "/bin/", "/Library/Apple/", "/Library/Developer/PrivateFrameworks/"].contains { path.hasPrefix($0) }
     }
 
-    static func isExtension(_ p: ProcInfo) -> Bool { p.path?.contains(".appex/") == true }
+    static func isExtension(_ p: ProcInfo) -> Bool { p.path?.containsBytes(".appex/") == true }
 
     /// The .app bundles a path lies inside, innermost first.
     static func enclosingApps(_ path: String) -> [String] {
         var out: [String] = []
         var rest = path[...]
-        while let r = rest.range(of: ".app/", options: .backwards) {
+        while let r = rest.byteRange(of: ".app/", backwards: true) {
             out.append(String(path[..<r.lowerBound]) + ".app")
             rest = path[..<r.lowerBound]
         }
@@ -162,8 +162,8 @@ enum SmartTree {
     }
 
     static func isXPCService(_ p: ProcInfo) -> Bool {
-        guard let path = p.path, let r = path.range(of: "/XPCServices/") else { return false }
-        return path[r.upperBound...].contains(".xpc/Contents/MacOS/")
+        guard let path = p.path, let r = path.byteRange(of: "/XPCServices/") else { return false }
+        return path[r.upperBound...].containsBytes(".xpc/Contents/MacOS/")
     }
 
     /// The members directly under a unit's root: extensions and XPC services grouped when there are two
@@ -452,7 +452,7 @@ enum ExtensionInfo {
     private static let lock = NSLock()
 
     static func bundle(ofExecutable path: String) -> String? {
-        guard let r = path.range(of: ".appex/", options: .backwards) else { return nil }
+        guard let r = path.byteRange(of: ".appex/", backwards: true) else { return nil }
         return String(path[..<r.lowerBound]) + ".appex"
     }
 

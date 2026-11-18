@@ -40,6 +40,21 @@ enum Bench {
         let priv = helper ? HelperClient.shared.allMetrics() : nil
         time("full snapshot()") { _ = Store.snapshot(prev: [:], signCache: [:], priv: { priv }) }
         let snap = Store.snapshot(prev: [:], signCache: [:], priv: { priv })
+        // A timer tick in steady state: LaunchServices and launchd reused, every cache warm, rates computed.
+        do {
+            let warm = Store.snapshot(prev: snap.samples, signCache: [:], priv: { priv }, ls: snap.ls, jobs: snap.jobs, otherJobs: snap.otherJobs)
+            time("tick: snapshot (ls/jobs reused)") {
+                _ = Store.snapshot(prev: warm.samples, signCache: [:], priv: { priv }, ls: snap.ls, jobs: snap.jobs, otherJobs: snap.otherJobs)
+            }
+            time("tick: per-pid cdhash") { for p in pids { _ = Native.cdhash(p) } }
+            time("tick: per-pid extensionPoint") { for p in warm.procs.values { if let path = p.path { _ = ExtensionInfo.point(forExecutable: path) } } }
+            time("tick: unresponsive check") {
+                _ = Responsiveness.unresponsive(warm.procs.values.lazy.filter { Responsiveness.isCandidate(lsType: $0.lsType) }.map(\.pid))
+            }
+            time("tick: markLeftBehind") { var p = warm.procs; Store.markLeftBehind(&p, lsApps: warm.ls) }
+            let s = Store(); s.procs = warm.procs
+            time("tick: recordHistory x120") { for _ in 0..<120 { s.benchRecordHistory(warm.procs) } }
+        }
         let store = Store(); store.procs = snap.procs; store.lsApps = snap.ls
         for g in Grouping.allCases {
             time("nodes(\(g.label))") {
@@ -77,6 +92,35 @@ enum Bench {
         time("ghosts()") { _ = Store.ghosts(procs: snap.procs, lsApps: snap.ls) }
         let one = Array(snap.procs.values.prefix(50))
         time("CodeSign.inspect x50") { for p in one { _ = CodeSign.inspect(pid: p.pid, path: p.path) } }
+    }
+
+    /// `ProcXRay --bench-tick`: steady-state timer-tick snapshots in a loop, for sampling with `sample`.
+    @MainActor static func tickLoop(seconds: Double) {
+        let first = Store.snapshot(prev: [:], signCache: [:])
+        if let g = ProcessInfo.processInfo.environment["BENCH_NODES"] {
+            // The table's rebuild instead: `g` is a grouping ("Smart", "Flat"…), BENCH_COLUMNS=all for every column.
+            let grouping = Grouping(rawValue: g) ?? .smart
+            let cols = ProcessInfo.processInfo.environment["BENCH_COLUMNS"] == "all" ? Set(Column.all.map(\.id)) : Set(Column.defaultShown)
+            let store = Store(); store.lsApps = first.ls
+            let t0 = Date()
+            var n = 0
+            while -t0.timeIntervalSinceNow < seconds {
+                store.procs = first.procs
+                _ = store.nodes(grouping: grouping, filter: "", sort: ColumnSort(id: "cpu", ascending: false), columns: cols)
+                n += 1
+            }
+            print(String(format: "%d builds, %.2f ms each", n, seconds * 1000 / Double(n)))
+            return
+        }
+        var prev = first.samples
+        let t0 = Date()
+        var n = 0
+        while -t0.timeIntervalSinceNow < seconds {
+            let s = Store.snapshot(prev: prev, signCache: [:], ls: first.ls, jobs: first.jobs, otherJobs: first.otherJobs)
+            prev = s.samples
+            n += 1
+        }
+        print(String(format: "%d ticks, %.2f ms each", n, seconds * 1000 / Double(n)))
     }
 
     /// `ProcXRay --rates <pid>…`: two snapshots `--interval` seconds apart (default 2), then each pid's

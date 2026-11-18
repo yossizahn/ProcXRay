@@ -1,4 +1,5 @@
 import Darwin
+import Synchronization
 import IOKit.pwr_mgt
 import Foundation
 
@@ -287,10 +288,17 @@ enum Native {
         return ArgsEnv(execPath: exec, args: args, env: env)
     }
 
+    /// Cached: every refresh names each process's user, and getpwuid asks opendirectoryd.
     static func userName(_ uid: uid_t) -> String {
-        if let pw = getpwuid(uid) { return String(cString: pw.pointee.pw_name) }
-        return String(uid)
+        userNames.withLock { cache in
+            if let n = cache[uid] { return n }
+            guard let pw = getpwuid(uid) else { return String(uid) }
+            let n = String(cString: pw.pointee.pw_name)
+            cache[uid] = n
+            return n
+        }
     }
+    private static let userNames = Mutex<[uid_t: String]>([:])
 
     static func isAlive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 || errno == EPERM }
 }

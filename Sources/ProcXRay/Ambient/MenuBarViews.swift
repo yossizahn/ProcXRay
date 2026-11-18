@@ -139,7 +139,7 @@ struct MenuBarLabel: View {
         r.scale = NSScreen.main?.backingScaleFactor ?? 2
         let img = r.nsImage ?? NSImage()
         img.isTemplate = !colored
-        MenuBarHit.shared.layout(Self.ranges(list, alert: alert, widgets: widgets), imageWidth: img.size.width)
+        MenuBarHit.shared.layout({ Self.ranges(list, alert: alert, widgets: widgets) }, imageWidth: img.size.width)
         return img
     }
 

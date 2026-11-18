@@ -104,6 +104,10 @@ struct ProcXRayApp: App {
         if let i = CommandLine.arguments.firstIndex(of: "--filter"), i + 1 < CommandLine.arguments.count {
             exit(Bench.filter(CommandLine.arguments[i + 1]) ? 0 : 1)
         }
+        if CommandLine.arguments.contains("--bench-tick") {
+            Bench.tickLoop(seconds: 15)
+            exit(0)
+        }
         if CommandLine.arguments.contains("--bench") {
             Bench.run()
             exit(0)

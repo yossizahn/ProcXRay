@@ -23,3 +23,9 @@ To turn SIP off in a fresh clone: `tart run --recovery <vm>`, open Terminal from
 - One-off test binaries (C or Swift) build on the host and run in the VM: `scp` them over, or `cat bin | ssh … 'cat > /tmp/bin && chmod +x /tmp/bin'`. Both are arm64 macOS 27.2, so host builds run as is.
 - Syscall trace without the UI: `sudo ProcXRay --trace <pid> <seconds> [--ktrace] [out.tsv]` runs the kdebug reader (or ktrace) in-process with the app's decoder and writes the records for diffing the two; `ProcXRay --helper-call trace <pid> <seconds> [stacks]` goes through the installed helper over XPC (`stacks`: kperf user stacks, printed symbolicated with the top callers). Only the signed bundle can talk to the helper, not the raw `swift build` binary.
 - `PROCXRAY_APPLE_TOOLS=1` in the environment of the process doing the reading forces Apple's tools instead of the native readers (`NativeTools.swift`), for comparing the two in the VM.
+
+## Profiling refresh ticks
+
+- `ProcXRay --bench` times each stage of a refresh: the snapshot's per-process reads, a steady-state timer tick (`tick:` lines), and the table's tree build per grouping and column set (`nodes(…)`). Run the release build (`swift build -c release`, `.build/release/ProcXRay --bench`).
+- `ProcXRay --bench-tick` loops steady-state snapshots for 15 s (`BENCH_NODES=Smart|Flat|…` loops the table's tree build instead, `BENCH_COLUMNS=all` with every column), to attach `sample` to. `sample` can't attach to processes on the host with SIP on; run the binary and `sample` as another user (the Atlas helper: `atlas job start`, `atlas run -- /usr/bin/sample <pid> 8 -file /tmp/x.txt`) or in the VM.
+- A second login never puts windows on screen, so the app stops refreshing there as it does when hidden; `PROCXRAY_ASSUME_VISIBLE=1` in its environment (`atlas open --env …`) keeps it refreshing, for profiling the live app.

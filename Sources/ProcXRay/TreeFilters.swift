@@ -78,20 +78,19 @@ enum TreeExtras {
 
     /// Three or more sibling rows running the same executable, with nothing under them, become one
     /// collapsed row ("plugin-container ×14"). Rows with children are units of their own and stay apart.
-    static func collapseIdentical(_ nodes: [ProcNode], parent: Int = 0) -> [ProcNode] {
-        let mapped = nodes.map { n -> ProcNode in
-            guard let c = n.children else { return n }
-            var m = n
-            m.children = collapseIdentical(c, parent: n.id)
-            return m
+    /// In place: rebuilding the tree copied every node, each with its ProcInfo.
+    static func collapseIdentical(_ nodes: inout [ProcNode], parent: Int = 0) {
+        for i in nodes.indices where nodes[i].children != nil {
+            collapseIdentical(&nodes[i].children!, parent: nodes[i].id)
         }
         var byBinary: [String: [Int]] = [:]
-        for (i, n) in mapped.enumerated() {
-            guard let p = n.proc, n.children?.isEmpty ?? true else { continue }
+        for i in nodes.indices {
+            guard nodes[i].children?.isEmpty ?? true, let p = nodes[i].proc else { continue }
             byBinary[p.path ?? "comm:" + p.comm, default: []].append(i)
         }
         let sets = byBinary.filter { $0.value.count >= 3 }
-        guard !sets.isEmpty else { return mapped }
+        guard !sets.isEmpty else { return }
+        let mapped = nodes
         var drop: Set<Int> = []
         var out: [ProcNode] = []
         for (binary, idx) in sets {
@@ -104,7 +103,7 @@ enum TreeExtras {
             g.extensionPointShownAbove = kids[0].extensionPointShownAbove
             out.append(g)
         }
-        return out + mapped.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
+        nodes = out + mapped.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
     }
 
     // MARK: Pruning by search text, chips and the filter predicate

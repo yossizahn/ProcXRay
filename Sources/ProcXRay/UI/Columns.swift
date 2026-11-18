@@ -42,7 +42,13 @@ enum CellValue: Equatable, Sendable {
         }
     }
     var date: Date? { if case .date(let d, _) = self { d } else { nil } }
-    var hasValue: Bool { self != .empty && self != .unknown }
+    /// A switch, not `!= .empty`: the synthesized == compares payloads, and the sort asks this on every comparison.
+    var hasValue: Bool {
+        switch self {
+        case .empty, .unknown: false
+        default: true
+        }
+    }
 
     /// Ascending order between two values. Empty and unknown values are not ordered here: the caller
     /// keeps them last whichever way the column is sorted.

@@ -6,16 +6,29 @@ import SwiftUI
 
 struct ProcInfo: Identifiable, Hashable, Sendable {
     var id: pid_t { pid }
-    var pid: pid_t
+    let pid: pid_t
     var ppid: pid_t
     var pgid: pid_t
     var uid: uid_t
     var user: String
-    var comm: String
-    var path: String?
-    var start: Date
+    var comm: String { didSet { name = ProcInfo.displayName(path: path, comm: comm) } }
+    var path: String? { didSet { name = ProcInfo.displayName(path: path, comm: comm) } }
+    let start: Date
     var stat: Int8
     var pflags: Int32
+    /// The name shown for it (displayName). Stored, as the table reads it for every row on every rebuild.
+    private(set) var name: String
+    /// pid and start time, which together name one process (pids are reused). Stored: it's looked up for
+    /// every process several times per refresh, and formatting the Double each time showed in profiles.
+    let key: String
+
+    init(pid: pid_t, ppid: pid_t, pgid: pid_t, uid: uid_t, user: String, comm: String, path: String?,
+         start: Date, stat: Int8, pflags: Int32) {
+        self.pid = pid; self.ppid = ppid; self.pgid = pgid; self.uid = uid; self.user = user; self.comm = comm
+        self.path = path; self.start = start; self.stat = stat; self.pflags = pflags
+        key = "\(pid):\(start.timeIntervalSince1970)"
+        name = ProcInfo.displayName(path: path, comm: comm)
+    }
 
     var responsible: pid_t?
     var coalition: UInt64?
@@ -100,13 +113,11 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
         return "\(leftBehindApp ?? "exited app") (\(leftBehindPid.map { "pid \($0)" } ?? "previous instance"))"
     }
 
-    var key: String { "\(pid):\(start.timeIntervalSince1970)" }
     /// CDHash of the running code (see Native.cdhash); changes when the process execs something else.
     var cdhash: String?
     /// Key for signing details: pid and start time survive exec, so the running code is part of it.
     /// Without it a process could show an Apple signature while running unsigned code it exec'd.
     var codeKey: String { "\(key):\(cdhash ?? path ?? comm)" }
-    var name: String { ProcInfo.displayName(path: path, comm: comm) }
 
     /// The executable's file name, or, when that file is named for a version, the folder it's installed in:
     /// Claude Code runs as ~/.local/share/claude/versions/2.1.325 (the kernel's name for it is "2.1.325" too),
@@ -144,13 +155,13 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
 
     /// Bundle (.app) that owns the executable, if any.
     var bundlePath: String? {
-        guard let p = path, let r = p.range(of: ".app/", options: .backwards) else { return nil }
+        guard let p = path, let r = p.byteRange(of: ".app/", backwards: true) else { return nil }
         return String(p[..<r.lowerBound]) + ".app"
     }
 
     /// For an app extension inside an app: that app's name.
     var containingAppName: String? {
-        guard path?.contains(".appex/") == true, let b = bundlePath else { return nil }
+        guard path?.containsBytes(".appex/") == true, let b = bundlePath else { return nil }
         return ((b as NSString).lastPathComponent as NSString).deletingPathExtension
     }
 }
@@ -376,14 +387,18 @@ final class Store {
     /// Space or behind a locked screen all count as off screen; nothing is refreshed then, so the app
     /// costs ~0 while it sits in the background.
     @ObservationIgnored private(set) var onScreen = true
+    private static let assumeVisible = ProcessInfo.processInfo.environment["PROCXRAY_ASSUME_VISIBLE"] != nil
     @ObservationIgnored private var visibilityObservers: [NSObjectProtocol] = []
 
     private func visibilityChanged() {
         // Titled windows only: the menu bar item and its popover are windows too, always "visible", and
         // keeping the process table refreshing for them would cost the snapshot every tick for nothing (the
         // popover has its own light sampler, AmbientMonitor).
+        // PROCXRAY_ASSUME_VISIBLE: for profiling in a session that's never on screen (a second login, where
+        // every window counts as occluded).
         let visible = !NSApp.isHidden && NSApp.windows.contains {
-            $0.styleMask.contains(.titled) && $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible)
+            $0.styleMask.contains(.titled) && $0.isVisible && !$0.isMiniaturized
+                && ($0.occlusionState.contains(.visible) || Self.assumeVisible)
         }
         guard visible != onScreen else { return }
         onScreen = visible
@@ -539,12 +554,18 @@ final class Store {
         }
     }
 
+    func benchRecordHistory(_ procs: [pid_t: ProcInfo]) { recordHistory(procs) }
+
     /// Appends this refresh to each process's history and forgets processes that are gone.
     private func recordHistory(_ procs: [pid_t: ProcInfo]) {
+        // Taken out of the old table, so each series is uniquely owned and the append is in place: a copy left
+        // in `history` made every append copy all five arrays of every process.
+        var old = history
+        history = [:]
         var next: [String: History] = [:]
         next.reserveCapacity(procs.count)
         for p in procs.values {
-            var h = history[p.key] ?? History()
+            var h = old.removeValue(forKey: p.key) ?? History()
             h.append(p)
             next[p.key] = h
         }
@@ -574,6 +595,7 @@ final class Store {
                 // snapshot() already applied every older cache entry; patch only the processes that were
                 // just inspected, on a local copy, and publish once. Writing self.procs[pid] in a loop
                 // copied the whole dictionary per write and invalidated the table ~700 times.
+                guard self.publishFill(found.count) else { self.signing = false; return }
                 var procs = self.procs
                 var changed = false
                 for (pid, p) in procs {
@@ -586,6 +608,12 @@ final class Store {
             }
         }
     }
+
+    /// Whether a fill pass patches the table now. The few processes that started since the last refresh wait
+    /// for the next one, which applies them from the caches: publishing them now rebuilt the whole table a
+    /// second time every refresh. A big batch (launch, a full refresh) shows at once, and so does anything
+    /// while paused, when no refresh is coming.
+    private func publishFill(_ count: Int) -> Bool { paused || count > 8 }
 
     /// Reads argv for processes not in argvCache yet, in the background, and merges it like signatures.
     private func fillCommandLines() {
@@ -603,13 +631,16 @@ final class Store {
                 // Read from another process (the pid was reused) or other code (it exec'd since the
                 // snapshot): leave it for the next refresh, whose key matches what's running.
                 guard Native.isSame(pid, start: start), Native.cdhash(pid) == expected else { continue }
-                acc[k] = args.map(Self.joinArgs)
+                // .some: assigning the bare optional (inferred as String??) removed the key for unreadable argv,
+                // so every unreadable process was read again on every refresh.
+                acc[k] = .some(args.map(Self.joinArgs))
             }
             let found = acc
             await MainActor.run {
                 self.argvCache.merge(found) { a, _ in a }
                 let live = Set(self.procs.values.map(\.codeKey))
                 self.argvCache = self.argvCache.filter { live.contains($0.key) }
+                guard self.publishFill(found.count) else { self.readingArgv = false; return }
                 var procs = self.procs
                 var changed = false
                 for (pid, p) in procs {
@@ -628,7 +659,10 @@ final class Store {
     /// when a new process is a child of launchd; most domains are empty (54 hosts among ~480 processes measured).
     private func fillPidDomains() {
         guard !readingDomains else { return }
-        let missing = procs.values.filter { $0.pid > 0 && !$0.isZombie && domainReads[$0.key] == nil }
+        // Not this app's own children (launchctl, lsappinfo): they host no domain, and reading one spawns
+        // launchctl, which the next refresh would find as a new process to read, every refresh.
+        let me = getpid()
+        let missing = procs.values.filter { $0.pid > 0 && !$0.isZombie && $0.ppid != me && domainReads[$0.key] == nil }
         guard !missing.isEmpty else { return }
         // launchd starts what runs in a pid domain, so only a new child of launchd can be in one read before.
         let hostKeys = missing.contains { $0.ppid == 1 }
@@ -644,7 +678,8 @@ final class Store {
                 let kids = PidDomain.read(pid, ownedByUser: own, viaHelper: helper)
                 // The pid was reused while reading: the domain belongs to someone else; the next pass asks again.
                 guard Native.isSame(pid, start: start) else { continue }
-                acc[key] = kids.map { $0.compactMap { keyOf[$0] }.filter { $0 != key } }
+                // .some keeps "couldn't be read" (nil) cached, as for argv.
+                acc[key] = .some(kids.map { $0.compactMap { keyOf[$0] }.filter { $0 != key } })
             }
             let found = acc
             await MainActor.run {
@@ -655,7 +690,7 @@ final class Store {
                 for (host, kids) in self.domainReads { for k in kids ?? [] { hostOf[k] = host } }
                 let changed = hostOf != self.domainHostOf
                 self.domainHostOf = hostOf
-                if changed {
+                if changed, self.publishFill(found.count) {
                     var procs = self.procs
                     Self.applyDomainOwners(&procs, hostOf)
                     self.procs = procs
@@ -686,6 +721,7 @@ final class Store {
             let result = found
             await MainActor.run {
                 self.jobParentCache.merge(result) { _, b in b }
+                guard self.publishFill(result.count) else { self.readingJobParents = false; return }
                 var procs = self.procs
                 var changed = false
                 for (pid, p) in procs {
@@ -793,7 +829,7 @@ final class Store {
 
         let now = DispatchTime.now().uptimeNanoseconds
         var users: [uid_t: String] = [:]
-        var out: [pid_t: ProcInfo] = [:]
+        var built: [ProcInfo] = []
         var samples: [String: Sample] = [:]
 
         let list: [Native.KProc]
@@ -801,19 +837,33 @@ final class Store {
         case .success(let l): list = l
         case .failure(let e): return Snapshot(procs: [:], ls: ls, jobs: jobs, otherJobs: otherJobs, samples: prev, error: e.message)
         }
+        built.reserveCapacity(list.count)
+        samples.reserveCapacity(list.count)
         for k in list where k.pid >= 0 {
             let user = users[k.uid] ?? { let u = Native.userName(k.uid); users[k.uid] = u; return u }()
             var p = ProcInfo(pid: k.pid, ppid: k.ppid, pgid: k.pgid, uid: k.uid, user: user, comm: k.comm,
-                             path: Native.path(k.pid), start: k.start, stat: k.stat, pflags: k.flags)
+                             path: nil, start: k.start, stat: k.stat, pflags: k.flags)
             p.cdhash = Native.cdhash(k.pid)
-            p.responsible = Native.responsible(k.pid)
-            if let c = Native.coalition(k.pid) { p.coalition = c.0; p.jetsamCoalition = c.1 }
+            // What can't change while the same code runs comes from the last refresh: re-reading it for every
+            // process was over a quarter of each refresh. An exec (new cdhash) reads it all again.
+            // The cdhash is unreadable for some processes (another user's, without the helper); the kernel's name
+            // for the process changes on exec too.
+            let fixed = prev[p.key]?.fixed.flatMap { $0.cdhash == p.cdhash && $0.comm == k.comm ? $0 : nil }
+            if let fixed, let path = fixed.path {
+                p.path = path
+                p.extensionPoint = fixed.extensionPoint
+            } else {
+                p.path = Native.path(k.pid)
+                if let path = p.path { p.extensionPoint = ExtensionInfo.point(forExecutable: path) }
+            }
+            p.responsible = fixed?.responsible ?? Native.responsible(k.pid)
+            if let c = fixed?.coalition { p.coalition = c; p.jetsamCoalition = fixed?.jetsamCoalition }
+            else if let c = Native.coalition(k.pid) { p.coalition = c.0; p.jetsamCoalition = c.1 }
             _ = p.fill(from: .read(k.pid))
             if let j = labelByPid[k.pid] { p.launchdLabel = j.label; p.launchdDomain = j.domain }
             if let b = jobParents[p.key] { p.launchdParentBundle = b }
             if let a = lsByPid[k.pid] { p.lsAppName = a.name; p.lsTags = a.stateTags; p.lsType = a.type }
             if k.tty != -1 { p.tty = k.tty }   // NODEV: no controlling terminal
-            if let path = p.path { p.extensionPoint = ExtensionInfo.point(forExecutable: path) }
             if let s = signCache[p.codeKey] { p.signer = s.shortSigner; p.signID = s.identifier }
             if let c = argvCache[p.codeKey] { p.commandLine = c; p.commandLineRead = true }
             if extras.contains(.openFiles) { p.openFiles = ExtraRead.openFiles(k.pid) }
@@ -833,27 +883,36 @@ final class Store {
             if let mach, p.start <= mach.at { p.machPorts = mach.counts[k.pid] }
             if let jetsam { p.jetsam = jetsam[k.pid] }
             if extras.contains(.idleExit) { p.idleExit = IdleExitState.read(k.pid) }
-            out[k.pid] = p
+            built.append(p)
         }
         let priv = privSource()
-        for (pid, var p) in out {
+        // Into an array first: writing back into a dictionary being iterated copied all of it.
+        for i in built.indices {
+            var p = built[i]
+            let pid = p.pid
             if let m = priv?[pid] {
                 // Field by field: a value read locally stays, and the helper fills only what's missing.
                 // (task info and rusage can fail independently, and the helper's own entry may be empty.)
                 p.viaHelper = p.fill(from: m)
                 if p.responsible == nil { p.responsible = m.responsible }
             }
+            let before = prev[p.key]
+            // sandbox check is cheap but noisy for zombies. A process can enter a sandbox but never leave it, so
+            // one seen sandboxed isn't asked again: confirming a "yes" costs a sysctl (Native.isSame).
+            if before?.sandboxed == true { p.sandboxed = true }
+            else if !p.isZombie { p.sandboxed = Native.sandboxed(pid, start: p.start) ?? priv?[pid]?.sandboxed }
             let sample = Sample(p, at: now)
-            if let before = prev[p.key], now > before.at {
+            if let before, now > before.at {
                 let r = Rates(from: before, to: sample)
                 p.cpuPercent = r.cpuPercent
                 p.rates = r
             }
             samples[p.key] = sample
-            // sandbox check is cheap but noisy for zombies
-            if !p.isZombie { p.sandboxed = Native.sandboxed(pid, start: p.start) ?? priv?[pid]?.sandboxed }
-            out[pid] = p
+            built[i] = p
         }
+        var out = [pid_t: ProcInfo](minimumCapacity: built.count)
+        for p in built { out[p.pid] = p }
+        built = []
         if !domainHosts.isEmpty { applyDomainOwners(&out, domainHosts) }
         for pid in Responsiveness.unresponsive(out.values.lazy.filter { Responsiveness.isCandidate(lsType: $0.lsType) }.map(\.pid)) {
             out[pid]?.notResponding = true
@@ -1014,22 +1073,30 @@ final class Store {
         case .bySigner, .byUser, .byDomain, .bySandbox, .byArch:
             roots = TreeExtras.pivot(grouping, all)
         }
-        if grouping != .flat { roots = TreeExtras.collapseIdentical(roots) }
-        roots = roots.map(Self.counted)
-        if !filter.isEmpty || predicate != nil {
+        if grouping != .flat { TreeExtras.collapseIdentical(&roots) }
+        // Every pass works on the tree in place: each copy of it copied every node's ProcInfo.
+        let pruning = !filter.isEmpty || predicate != nil
+        if pruning {
+            Self.count(&roots)
             let now = Date()
             roots = TreeExtras.prune(roots, text: filter, keep: predicate.map { p in { p.test($0, now) } })
         }
         let shown = Column.all.filter { columns.contains($0.id) && $0.id != "name" && $0.id != "context" }
-        return sorted(roots, sort, shown: shown, sortColumn: Column.byID[sort.id], memo: ColumnMemo()).nodes
+        // Unpruned, the totals are the shown counts, which the sort pass works out anyway.
+        _ = sorted(&roots, sort, shown: shown, sortColumn: Column.byID[sort.id], memo: ColumnMemo(), totals: !pruning)
+        return roots
     }
 
     /// Sets totalCount (processes in the subtree) before the search filter prunes anything.
-    private static func counted(_ n: ProcNode) -> ProcNode {
-        var m = n
-        m.children = n.children?.map(counted)
-        m.totalCount = (n.proc == nil ? 0 : 1) + (m.children?.reduce(0) { $0 + $1.totalCount } ?? 0)
-        return m
+    private static func count(_ nodes: inout [ProcNode]) {
+        for i in nodes.indices {
+            var total = nodes[i].proc == nil ? 0 : 1
+            if nodes[i].children != nil {
+                count(&nodes[i].children!)
+                total += nodes[i].children!.reduce(0) { $0 + $1.totalCount }
+            }
+            nodes[i].totalCount = total
+        }
     }
 
     /// Build a forest using `parentOf`; unknown parents (negative ids) become temporary placeholder roots.
@@ -1059,69 +1126,78 @@ final class Store {
     /// Children are sorted first so each node's cpuKey/memKey (subtree totals) is set before it is compared.
     /// Also fills each group row's value for every shown column (by the column's group rule) and each
     /// row's value in the sort column. Returns the processes under `nodes`, for the parent's group values.
-    private func sorted(_ nodes: [ProcNode], _ sort: ColumnSort, shown: [Column], sortColumn: Column?,
-                        memo: ColumnMemo) -> (nodes: [ProcNode], members: [ProcInfo]) {
+    /// `totals`: also set totalCount (nothing was pruned, so it equals shownCount).
+    private func sorted(_ nodes: inout [ProcNode], _ sort: ColumnSort, shown: [Column], sortColumn: Column?,
+                        memo: ColumnMemo, totals: Bool) -> [ProcInfo] {
         var allMembers: [ProcInfo] = []
         let pins = Pins.shared
-        let out = nodes.map { n in
-            var m = n
+        for i in nodes.indices {
             var members: [ProcInfo] = []
-            if let c = n.children {
-                let r = sorted(c, sort, shown: shown, sortColumn: sortColumn, memo: memo)
-                m.children = r.nodes
-                members = r.members
+            if nodes[i].children != nil {
+                members = sorted(&nodes[i].children!, sort, shown: shown, sortColumn: sortColumn, memo: memo, totals: totals)
             }
-            if let p = n.proc { members.append(p) }
+            let proc = nodes[i].proc
+            if let p = proc { members.append(p) }
             allMembers += members
-            if n.proc == nil {
-                for (i, col) in shown.enumerated() {
-                    m.groupValues[col.id] = col.groupValue(m, members: members, store: self) { memo.value(i, col, $0, self) }
+            if proc == nil {
+                for (c, col) in shown.enumerated() {
+                    let v = col.groupValue(nodes[i], members: members, store: self) { memo.value(c, col, $0, self) }
+                    nodes[i].groupValues[col.id] = v
                 }
             }
             if sort.id == "name" {
-                m.sortValue = .text(n.title)
+                nodes[i].sortValue = .text(nodes[i].title)
             } else if let col = sortColumn {
-                m.sortValue = n.proc.map { col.sortValue($0, self) } ?? m.groupValues[col.id]
-                    ?? col.groupValue(m, members: members, store: self) { col.value($0, self) }
+                let v = proc.map { col.sortValue($0, self) } ?? nodes[i].groupValues[col.id]
+                    ?? col.groupValue(nodes[i], members: members, store: self) { col.value($0, self) }
+                nodes[i].sortValue = v
             }
-            let kids = m.children ?? []
-            if let p = n.proc {
-                m.cpuKey = p.cpuPercent ?? 0
-                m.memKey = p.footprint ?? 0
-                m.diskKey = ProcNode.disk(p)
+            let kids = nodes[i].children ?? []
+            if let p = proc {
+                nodes[i].cpuKey = p.cpuPercent ?? 0
+                nodes[i].memKey = p.footprint ?? 0
+                nodes[i].diskKey = ProcNode.disk(p)
             } else {
-                m.cpuKey = kids.reduce(0) { $0 + $1.cpuKey }
-                m.memKey = kids.reduce(0) { $0 + $1.memKey }
+                nodes[i].cpuKey = kids.reduce(0) { $0 + $1.cpuKey }
+                nodes[i].memKey = kids.reduce(0) { $0 + $1.memKey }
                 let known = kids.map(\.diskKey).filter { $0 >= 0 }
-                m.diskKey = known.isEmpty ? -1 : known.reduce(0, &+)
+                nodes[i].diskKey = known.isEmpty ? -1 : known.reduce(0, &+)
             }
-            m.shownCount = (n.proc == nil ? 0 : 1) + kids.reduce(0) { $0 + $1.shownCount }
-            m.unitCount = kids.reduce(0) { $0 + ($1.kind == .group ? $1.unitCount : 1) }
+            nodes[i].shownCount = (proc == nil ? 0 : 1) + kids.reduce(0) { $0 + $1.shownCount }
+            if totals { nodes[i].totalCount = nodes[i].shownCount }
+            nodes[i].unitCount = kids.reduce(0) { $0 + ($1.kind == .group ? $1.unitCount : 1) }
             if !pins.isEmpty {
-                let own = pins.rank(Pins.row(n, procs: procs))
-                m.pinned = own != nil
-                m.pinRank = ([own] + kids.map(\.pinRank)).compactMap { $0 }.min()
+                let own = pins.rank(Pins.row(nodes[i], procs: procs))
+                nodes[i].pinned = own != nil
+                nodes[i].pinRank = ([own] + kids.map(\.pinRank)).compactMap { $0 }.min()
             }
-            return m
-        }.sorted { a, b in
-            // Pinned rows (and groups holding one) first, in the order they were pinned.
-            if a.pinRank != b.pinRank { return (a.pinRank ?? .max) < (b.pinRank ?? .max) }
-            if a.fixedOrder != nil || b.fixedOrder != nil, a.fixedOrder != b.fixedOrder {
-                return (a.fixedOrder ?? .max) < (b.fixedOrder ?? .max)
-            }
-            // Rows without a value go last, whichever way the column is sorted.
-            let av = a.sortValue.hasValue, bv = b.sortValue.hasValue
-            if av != bv { return av }
-            if av {
-                switch CellValue.compare(a.sortValue, b.sortValue) {
-                case .orderedAscending: return sort.ascending
-                case .orderedDescending: return !sort.ascending
-                case .orderedSame: break
-                }
-            }
-            return a.id < b.id
         }
-        return (out, allMembers)
+        // Sorts positions by small keys, then places each node once: sorting the nodes themselves moved whole
+        // ProcNodes (a ProcInfo each) at every comparison step, which was most of a rebuild.
+        struct Key { var pin: Int?; var fixed: Int?; var value: CellValue; var has: Bool; var id: Int }
+        let keys = nodes.map { Key(pin: $0.pinRank, fixed: $0.fixedOrder, value: $0.sortValue, has: $0.sortValue.hasValue, id: $0.id) }
+        let order = keys.withUnsafeBufferPointer { k in
+            k.indices.sorted { i, j in
+                let a = k[i], b = k[j]
+                // Pinned rows (and groups holding one) first, in the order they were pinned.
+                if a.pin != b.pin { return (a.pin ?? .max) < (b.pin ?? .max) }
+                if a.fixed != nil || b.fixed != nil, a.fixed != b.fixed {
+                    return (a.fixed ?? .max) < (b.fixed ?? .max)
+                }
+                // Rows without a value go last, whichever way the column is sorted.
+                if a.has != b.has { return a.has }
+                if a.has {
+                    switch CellValue.compare(a.value, b.value) {
+                    case .orderedAscending: return sort.ascending
+                    case .orderedDescending: return !sort.ascending
+                    case .orderedSame: break
+                    }
+                }
+                return a.id < b.id
+            }
+        }
+        if !order.elementsEqual(order.indices) { nodes = order.map { nodes[$0] } }
+        return allMembers
     }
 
     // MARK: Actions
@@ -1215,9 +1291,25 @@ struct Sample: Sendable {
     var pCore, instructions, cycles, logicalWrites, gpu: UInt64?
     var qos: [UInt64]?
     var contextSwitches, faults, pageins, machMsgsSent, machMsgsReceived, unixSyscalls, machSyscalls: UInt32?
+    /// Carried to the next refresh, which reuses it instead of reading it again (see Store.snapshot).
+    var fixed: Fixed?
+    var sandboxed: Bool?
+
+    /// What doesn't change while a process runs the same code (`cdhash`).
+    struct Fixed: Sendable {
+        var cdhash: String?
+        var comm: String
+        var path: String?
+        var extensionPoint: String?
+        var responsible: pid_t?
+        var coalition, jetsamCoalition: UInt64?
+    }
 
     init(_ p: ProcInfo, at: UInt64) {
         self.at = at
+        fixed = Fixed(cdhash: p.cdhash, comm: p.comm, path: p.path, extensionPoint: p.extensionPoint, responsible: p.responsible,
+                      coalition: p.coalition, jetsamCoalition: p.jetsamCoalition)
+        sandboxed = p.sandboxed
         cpu = p.cpuNanos; waiting = p.counters?.waitingNanos
         diskRead = p.diskRead; diskWrite = p.diskWrite; energy = p.energyNJ; wakeups = p.wakeups
         let c = p.counters

@@ -207,10 +207,12 @@ struct SystemCountersView: View {
 
     var body: some View {
         @Bindable var b = b
+        // The list, the status line and the table are views of their own: the once-a-second readings then
+        // update the table and status only, instead of re-diffing the whole group list with them.
         HSplitView {
-            groupList.frame(minWidth: 220, idealWidth: 280, maxWidth: 420)
+            CounterGroupList().frame(minWidth: 220, idealWidth: 280, maxWidth: 420)
             SplitPane(id: "counters", defaultFraction: 0.6, showsBottom: selection.flatMap { b.counters[$0] } != nil) {
-                table
+                CounterTable(selection: $selection, sort: $sort)
             } bottom: {
                 if let id = selection, let c = b.counters[id] {
                     CounterDetail(info: c).id(id)
@@ -256,12 +258,14 @@ struct SystemCountersView: View {
         selection = id
         b.pendingSelection = nil
     }
+}
 
-    // MARK: Groups
+/// System ▸ All Counters' group list.
+private struct CounterGroupList: View {
+    @State private var b = CounterBrowser.shared
 
-    private var groupList: some View {
-        @Bindable var b = b
-        return ScrollViewReader { proxy in groupListBody(proxy) }
+    var body: some View {
+        ScrollViewReader { proxy in groupListBody(proxy) }
     }
 
     private func groupListBody(_ proxy: ScrollViewProxy) -> some View {
@@ -297,15 +301,20 @@ struct SystemCountersView: View {
         .onChange(of: [b.groups.isEmpty, b.changing == nil], initial: true) { _, _ in
             if !b.groups.isEmpty { DispatchQueue.main.async { proxy.scrollTo(b.selectedGroup, anchor: .center) } }
         }
-        .safeAreaInset(edge: .bottom) { status.padding(8).frame(maxWidth: .infinity, alignment: .leading) }
+        .safeAreaInset(edge: .bottom) { CounterStatus().padding(8).frame(maxWidth: .infinity, alignment: .leading) }
     }
 
     private func countText(_ g: CounterGroup) -> String {
         guard let n = b.changingCount(g) else { return "\(g.counters.count)" }
         return b.changingOnly ? "\(n)" : "\(n)/\(g.counters.count)"
     }
+}
 
-    private var status: some View {
+/// The status line under the group list: totals and the last reading's time, which changes every second.
+private struct CounterStatus: View {
+    @State private var b = CounterBrowser.shared
+
+    var body: some View {
         let total = b.counters.count
         var parts = ["\(total.formatted()) counters"]
         if let c = b.changing { parts.append("\(c.count.formatted()) changing") }
@@ -317,8 +326,15 @@ struct SystemCountersView: View {
         .font(.caption).foregroundStyle(.secondary)
         .help("The groups on screen and the pinned counters are read once a second; \"read in\" is the last reading's time")
     }
+}
 
-    // MARK: Table
+/// System ▸ All Counters' table of the selected group's counters.
+private struct CounterTable: View {
+    @State private var b = CounterBrowser.shared
+    @Binding var selection: String?
+    @Binding var sort: [KeyPathComparator<CounterRow>]
+
+    var body: some View { table(rows) }
 
     private var rows: [CounterRow] {
         let searching = !b.search.trimmingCharacters(in: .whitespaces).isEmpty || b.selectedGroup == CounterBrowser.pinnedID
@@ -334,7 +350,7 @@ struct SystemCountersView: View {
         .sorted(using: sort)
     }
 
-    private var table: some View {
+    private func table(_ rows: [CounterRow]) -> some View {
         Table(rows, selection: $selection, sortOrder: $sort) {
             TableColumn("Counter", value: \.order) { r in
                 HStack(spacing: 4) {
@@ -369,6 +385,7 @@ struct SystemCountersView: View {
         NSPasteboard.general.setString(s, forType: .string)
     }
 }
+
 
 struct CounterRow: Identifiable {
     var id: String

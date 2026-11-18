@@ -19,14 +19,15 @@ final class MenuBarHit {
     private(set) var metric: AmbientMetric?
     private(set) var opens = 0
 
-    /// Each widget's x range in the label image, in points, and the image's width.
-    @ObservationIgnored private var ranges: [(AmbientMetric, ClosedRange<CGFloat>)] = []
+    /// Works out each widget's x range in the label image, in points, as of the last render; and the image's width.
+    /// Measuring renders every widget again, so it's done when the popover opens, not on every render.
+    @ObservationIgnored private var ranges: @MainActor () -> [(AmbientMetric, ClosedRange<CGFloat>)] = { [] }
     @ObservationIgnored private var imageWidth: CGFloat = 0
     @ObservationIgnored private var observer: NSObjectProtocol?
 
     /// Called by the label each time it renders.
-    func layout(_ ranges: [(AmbientMetric, ClosedRange<CGFloat>)], imageWidth: CGFloat) {
-        if Self.logging, imageWidth != self.imageWidth { NSLog("menubar layout: image %.1f, %@", imageWidth, Self.describe(ranges)) }
+    func layout(_ ranges: @escaping @MainActor () -> [(AmbientMetric, ClosedRange<CGFloat>)], imageWidth: CGFloat) {
+        if Self.logging, imageWidth != self.imageWidth { NSLog("menubar layout: image %.1f, %@", imageWidth, Self.describe(ranges())) }
         self.ranges = ranges
         self.imageWidth = imageWidth
         if observer == nil {
@@ -43,7 +44,7 @@ final class MenuBarHit {
         let over = f.insetBy(dx: 0, dy: -2).contains(mouse)
         // The status button centers the image in its window.
         let x = mouse.x - f.minX - (f.width - imageWidth) / 2
-        let hit = over ? Self.metric(at: x, in: ranges) : nil
+        let hit = over ? Self.metric(at: x, in: ranges()) : nil
         if Self.logging {
             NSLog("menubar open: mouse %@, item %@, x in image %.1f -> %@", NSStringFromPoint(mouse), NSStringFromRect(f), x,
                   hit?.rawValue ?? (over ? "none" : "not over the item"))
