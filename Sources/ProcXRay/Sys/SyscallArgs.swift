@@ -444,7 +444,9 @@ enum SyscallFlags {
             let bitsWord = a[2] & 0xffff_ffff, size = a[2] >> 32
             let remote = a[3] & 0xffff_ffff, local = a[3] >> 32
             let rType = one(bitsWord & 0x1f, msgTypes), lType = one((bitsWord >> 8) & 0x1f, msgTypes)
-            var h = "\(size) bytes to 0x" + String(remote, radix: 16) + " (\(rType))"
+            // With MACH64_MSG_VECTOR (XPC) the size word counts the message's vectors (header, then payload), not bytes.
+            let what = opts & 0x1_0000_0000 != 0 ? "\(size) vector\(size == 1 ? "" : "s")" : "\(size) bytes"
+            var h = what + " to 0x" + String(remote, radix: 16) + " (\(rType))"
             if local != 0 { h += ", reply 0x" + String(local, radix: 16) + " (\(lType))" }
             if bitsWord & u(MACH_MSGH_BITS_COMPLEX) != 0 { h += ", complex" }
             parts.append(h)

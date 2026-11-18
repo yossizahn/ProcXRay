@@ -2,27 +2,76 @@ import XCTest
 @testable import ProcXRay
 
 final class SyscallActivityTests: XCTestCase {
-    private func record(_ id: Int, _ name: String, _ time: UInt64, thread: UInt64 = 7) -> SyscallRecord {
+    private func record(_ id: Int, _ name: String, _ time: UInt64, thread: UInt64 = 7, args: [UInt64] = [3],
+                        ret: UInt64 = 10, label: String? = "/tmp/a") -> SyscallRecord {
         SyscallRecord(id: id, start: time, end: time + 5, thread: thread, mach: false, number: 0,
-                      name: name, args: [3], ret: 10, firstFDLabel: "/tmp/a")
+                      name: name, args: args, ret: ret, firstFDLabel: label)
     }
 
-    func testReadBursts() {
-        let a = record(1, "read", 10)
-        var b = record(2, "pread_nocancel", 20)
+    func testDescriptorLife() {
+        var open = record(1, "open_nocancel", 0, args: [0, 0], label: nil)
+        open.paths = ["/tmp/a"]
+        open.ret = 3
+        let a = record(2, "read", 10)
+        var b = record(3, "pread_nocancel", 20)
         b.ret1 = 1
-        let close = record(3, "close", 30)
-        let c = record(4, "read", 40)
-        let d = record(5, "read", 600_000_100)
-        var failure = record(6, "read", 600_000_110)
+        let fstat = record(4, "fstat64", 25)
+        let close = record(5, "close", 30)
+        // Same descriptor number, no open seen: a life of its own; 0.6 s later still the same life.
+        let c = record(6, "read", 40)
+        let d = record(7, "write", 600_000_100)
+        var failure = record(8, "read", 600_000_110)
         failure.failed = true
         failure.error = 5
-        let records = [b, a, close, c, d, failure]
+        // More than a second later: a new activity.
+        let e = record(9, "write", 2_000_000_000)
+        let records = [b, a, open, fstat, close, c, d, failure, e]
         let groups = SyscallActivity.build(records, filter: "", errorsOnly: false)
-        XCTAssertEqual(groups.map { $0.calls.map(\.id) }, [[6], [5], [4], [1, 2]])
-        XCTAssertEqual(groups.last?.bytes, 4_294_967_316)
-        XCTAssertEqual(groups.first?.bytes, 0)
-        XCTAssertEqual(SyscallActivity.build(records, filter: "read", errorsOnly: true).map(\.id), [6])
+        XCTAssertEqual(groups.map { $0.calls.map(\.id) }, [[9], [6, 7, 8], [1, 2, 3, 4, 5]])
+        XCTAssertEqual(groups.map(\.operation), [.write, .readWrite, .read])
+        XCTAssertEqual(groups.last?.target, "/tmp/a")
+        XCTAssertEqual(groups.last?.bytesIn, 4_294_967_316)
+        XCTAssertEqual(groups[1].failures, 1)
+        XCTAssertTrue(groups[1].detail.contains("1 failed"))
+        XCTAssertEqual(SyscallActivity.build(records, filter: "read", errorsOnly: true).map(\.id), [8])
+    }
+
+    func testSocketLife() {
+        let socket = record(1, "socket", 0, args: [UInt64(AF_INET), UInt64(SOCK_STREAM)], ret: 5, label: nil)
+        var connect = record(2, "connect", 10, args: [5], label: "TCP 10.0.0.1:50000->1.2.3.4:443")
+        connect.failed = true
+        connect.error = Int64(EINPROGRESS)
+        let send = record(3, "sendto", 20, args: [5], ret: 100, label: "TCP 10.0.0.1:50000->1.2.3.4:443")
+        let recv = record(4, "recvfrom", 30, args: [5], ret: 2000, label: "TCP 10.0.0.1:50000->1.2.3.4:443")
+        let groups = SyscallActivity.build([socket, connect, send, recv], filter: "", errorsOnly: false)
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups[0].operation, .connection)
+        XCTAssertEqual(groups[0].target, "TCP 10.0.0.1:50000->1.2.3.4:443")
+        XCTAssertEqual(groups[0].bytesOut, 100)
+        XCTAssertEqual(groups[0].bytesIn, 2000)
+        XCTAssertEqual(groups[0].failures, 0)
+    }
+
+    func testMessagesAndPathCalls() {
+        let send = UInt64(MACH_SEND_MSG), rcv = UInt64(MACH_RCV_MSG)
+        // mach_msg2_trap(data, options, bits | size << 32, remote | local << 32)
+        var m1 = record(1, "mach_msg2_trap", 0, args: [1, send | rcv, 0x13 | 64 << 32, 0x903], label: nil)
+        m1.end = 1_000
+        let m2 = record(2, "mach_msg2_trap", 100_000, args: [1, send, 0x13 | 40 << 32, 0x903], label: nil)
+        let m3 = record(3, "mach_msg2_trap", 200_000, args: [1, send, 0x13 | 40 << 32, 0xa03], label: nil)
+        var stat1 = record(4, "stat64", 300_000, label: nil)
+        stat1.paths = ["/missing"]; stat1.failed = true; stat1.error = Int64(ENOENT)
+        let stat2 = SyscallRecord(id: 5, start: 400_000, end: 400_005, thread: 7, mach: false, number: 0, name: "stat64",
+                              args: [0], error: Int64(ENOENT), paths: ["/missing"], failed: true)
+        let kill = record(6, "kill", 500_000, args: [77, UInt64(SIGTERM)], ret: 0, label: nil)
+        let context = SyscallActivity.Context(pid: 10, ports: [0x903: 42], processNames: [42: "cfprefsd"])
+        let groups = SyscallActivity.build([m1, m2, m3, stat1, stat2, kill], filter: "", errorsOnly: false, context: context)
+        XCTAssertEqual(groups.map(\.operation), [.signal, .lookup, .message, .message])
+        XCTAssertEqual(groups.map(\.target), ["SIGTERM to pid 77", "/missing", "port 0xa03", "cfprefsd (42)"])
+        XCTAssertEqual(groups[1].calls.map(\.id), [4, 5])
+        XCTAssertEqual(groups[3].calls.map(\.id), [1, 2])
+        XCTAssertEqual(groups[3].bytesOut, 104)
+        XCTAssertEqual(groups[3].replyTime, 1_000)
     }
 
     func testWaitsAndConnection() {

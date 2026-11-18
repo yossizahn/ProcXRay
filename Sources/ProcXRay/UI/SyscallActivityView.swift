@@ -8,7 +8,7 @@ struct SyscallActivityView: View {
         if groups.isEmpty {
             ContentUnavailableView(filtered ? "No matching activity" : "No activity to show",
                                    systemImage: "waveform.path.ecg",
-                                   description: Text(filtered ? "Try another filter." : "File operations, connection attempts and waits appear here. See Calls for the full trace."))
+                                   description: Text(filtered ? "Try another filter." : "Files, connections, Mach messages, launches and waits appear here. See Calls for the full trace."))
         } else {
             List(groups) { group in
                 DisclosureGroup {
@@ -28,7 +28,7 @@ struct SyscallActivityView: View {
                             Text(group.target).lineLimit(1).truncationMode(.middle).help(group.target)
                         }
                         Spacer(minLength: 8)
-                        Text(group.detail).foregroundStyle(group.calls[0].failed && group.operation != .waits ? Color.red : .secondary)
+                        Text(group.detail).foregroundStyle(group.allFailed ? Color.red : group.failures > 0 ? .orange : .secondary)
                     }
                     .font(.callout)
                 }

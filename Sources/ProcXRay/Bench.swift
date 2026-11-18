@@ -148,7 +148,7 @@ enum Bench {
     /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|stacks|powermetrics|counters> [pid] [--full]`:
     /// one helper call from the shell, for testing the helper without the UI. Only this exact binary is accepted by the helper.
     /// The helper's trace path without XPC: start, read every 250 ms as the app does, decode, pair.
-    static func trace(pid: Int32, seconds: Double, ktrace: Bool, out: String?) {
+    static func trace(pid: Int32, seconds: Double, ktrace: Bool, activity: Bool = false, out: String?) {
         let t0 = Date()
         let source: TraceSource
         if ktrace {
@@ -192,6 +192,18 @@ enum Bench {
         print(String(format: "%@: started in %.0f ms; %d events, %d bytes, %d bad, %d gaps; %d records + %d in flight; decode+pair %.3f s; CPU %.3f s here + %.3f s ktrace",
                      ktrace ? "ktrace" : "kdebug", started * 1000, events, bytes, bad, dec.gaps, recs.count, inFlight.count, decodeTime,
                      secs(ru.ru_utime) + secs(ru.ru_stime), secs(rc.ru_utime) + secs(rc.ru_stime)))
+        if activity {
+            var context = SyscallActivity.Context(pid: pid)
+            switch MachPortNames.resolveHere(pid: pid) {
+            case .success(let n): context.ports = n.ports; context.processNames = n.names
+            case .failure(let e): print("ports: " + e.message)
+            }
+            print("\(context.ports.count) port names resolved")
+            for g in SyscallActivity.build(recs + inFlight, filter: "", errorsOnly: false, context: context).reversed() {
+                let at = g.calls[0].start.map { String(format: "%8.3f", Double($0) / 1e9) } ?? "  before"
+                print("\(at)  \(g.operation.rawValue)  \(g.target)  ·  \(g.detail)")
+            }
+        }
         guard let out else { return }
         var text = ""
         for r in recs + inFlight {

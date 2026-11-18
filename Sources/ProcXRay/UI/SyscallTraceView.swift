@@ -13,8 +13,19 @@ final class SyscallTracer {
     private(set) var events = 0
     /// Oldest records let go to stay under `cap`.
     private(set) var dropped = 0
-    /// Bumped on every change to `records`, so views can key recomputation on one number.
+    /// Bumped on every change to `records` or `context`, so views can key recomputation on one number.
     private(set) var revision = 0
+    /// The traced pid and where its Mach messages go (MachPortNames), for the Activity view.
+    private(set) var context = SyscallActivity.Context()
+    /// Messages went to ports the last port listing didn't have: list again.
+    private var unresolvedPorts = false
+    /// Destination ports of the trace's messages. Ones a listing has already missed (kernel objects, the
+    /// process's own ports) don't ask for another.
+    private var seenPorts: Set<UInt32> = []
+    private var listedPorts: Set<UInt32> = []
+    private var listing: Set<UInt32> = []
+    /// Counts traces, so a port listing for an earlier trace is dropped.
+    private var generation = 0
     private var stopFlag: Shell.Cancel?
     /// Whether the current trace asked for stacks, and the names for their frames.
     private(set) var withStacks = false
@@ -27,6 +38,10 @@ final class SyscallTracer {
     func start(pid: Int32, start: Date, stacks: Bool) {
         guard !isActive else { return }
         records = []; pending = []; notes = []; events = 0; dropped = 0; revision += 1
+        context = SyscallActivity.Context(pid: pid)
+        unresolvedPorts = false; seenPorts = []; listedPorts = []; listing = []
+        generation += 1
+        let gen = generation
         withStacks = stacks
         symbols = StackSymbols()
         let symbols = symbols
@@ -37,6 +52,55 @@ final class SyscallTracer {
         Task.detached(priority: .userInitiated) { [self] in
             await Self.run(pid: pid, start: start, stacks: stacks, symbols: symbols, flag: flag, tracer: self)
         }
+        Task.detached(priority: .utility) { [self] in await Self.namePorts(pid: pid, start: start, generation: gen, tracer: self) }
+    }
+
+    /// Lists the process's Mach ports when the trace starts, again every 30 s while messages go to ports that
+    /// listing lacked (a new connection), and once more when the trace stops if any still do. Each listing is a
+    /// helper port walk of every process (~3 s of lsmp with SIP on).
+    private nonisolated static func namePorts(pid: Int32, start: Date, generation gen: Int, tracer: SyscallTracer) async {
+        var last = Date.distantPast
+        var noted = false
+        while true {
+            guard await tracer.generation == gen else { return }
+            let active = await tracer.isActive
+            if last != .distantPast {
+                guard await tracer.unresolvedPorts else {
+                    if !active { return }
+                    try? await Task.sleep(for: .seconds(2)); continue
+                }
+                if active && Date().timeIntervalSince(last) < 30 { try? await Task.sleep(for: .seconds(2)); continue }
+            }
+            guard Native.isSame(pid, start: start) else { return }
+            last = Date()
+            await tracer.beginListing(generation: gen)
+            switch MachPortNames.resolve(pid: pid) {
+            case .success(let r): await tracer.addPorts(r.ports, names: r.names, generation: gen)
+            case .failure(let e):
+                if !noted { noted = true; await tracer.note("Message destinations unknown: \(e.message)", generation: gen) }
+                return
+            }
+            if !active { return }
+        }
+    }
+
+    private func beginListing(generation gen: Int) {
+        guard gen == generation else { return }
+        listing = seenPorts
+        unresolvedPorts = false
+    }
+
+    private func addPorts(_ ports: [UInt32: Int32], names: [Int32: String], generation gen: Int) {
+        guard gen == generation else { return }
+        context.ports.merge(ports) { _, new in new }
+        context.processNames.merge(names) { _, new in new }
+        listedPorts.formUnion(listing)
+        revision += 1
+    }
+
+    private func note(_ text: String, generation gen: Int) {
+        guard gen == generation, !notes.contains(text) else { return }
+        notes.append(text)
     }
 
     func stop() {
@@ -118,6 +182,12 @@ final class SyscallTracer {
             }
         }
         guard !recs.isEmpty else { return }
+        for r in recs where r.name == "mach_msg2_trap" {
+            guard let a = r.args, a.count > 3, a[1] & UInt64(MACH_SEND_MSG) != 0 else { continue }
+            let port = UInt32(truncatingIfNeeded: a[3])
+            guard port != 0, seenPorts.insert(port).inserted else { continue }
+            if context.ports[port] == nil && !listedPorts.contains(port) { unresolvedPorts = true }
+        }
         records.append(contentsOf: recs)
         if records.count > Self.cap {
             // Drop in slabs of 10%, not one by one: removeFirst is O(n).
@@ -251,7 +321,7 @@ struct SyscallTraceView: View {
     private var placeholder: some View {
         VStack(spacing: 8) {
             Image(systemName: "waveform.path.ecg").font(.largeTitle).foregroundStyle(.tertiary)
-            Text(mode == "Activity" ? "Follow file operations, connection attempts and waits. Expand an activity to inspect its syscalls." : "Every syscall and Mach trap this process makes, with arguments, results, errors, durations and file paths.")
+            Text(mode == "Activity" ? "Follow what the process does with files, connections and Mach messages, and where it waits. Expand an activity to inspect its syscalls." : "Every syscall and Mach trap this process makes, with arguments, results, errors, durations and file paths.")
                 .multilineTextAlignment(.center)
             Text(disabledReason ?? "Uses the kernel's kdebug trace (as Instruments' System Call Trace does). One trace at a time per machine: it can't run while Instruments or fs_usage is recording.")
                 .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -346,10 +416,10 @@ struct SyscallTraceView: View {
     private func recompute() async {
         guard !Task.isCancelled else { return }
         let all = tracer.records + tracer.pending
-        let filter = filter, errorsOnly = errorsOnly, sort = sort, summaryMode = mode == "Summary", summarySort = summarySort
+        let filter = filter, errorsOnly = errorsOnly, context = tracer.context, sort = sort, summaryMode = mode == "Summary", summarySort = summarySort
         if mode == "Activity" {
             let groups = await Task.detached(priority: .userInitiated) {
-                SyscallActivity.build(all, filter: filter, errorsOnly: errorsOnly)
+                SyscallActivity.build(all, filter: filter, errorsOnly: errorsOnly, context: context)
             }.value
             if !Task.isCancelled { activities = groups }
             return
