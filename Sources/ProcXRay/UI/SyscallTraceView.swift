@@ -75,7 +75,7 @@ final class SyscallTracer {
             last = Date()
             await tracer.beginListing(generation: gen)
             switch MachPortNames.resolve(pid: pid) {
-            case .success(let r): await tracer.addPorts(r.ports, names: r.names, generation: gen)
+            case .success(let r): await tracer.addPorts(r.ports, names: r.names, kinds: r.kinds, generation: gen)
             case .failure(let e):
                 if !noted { noted = true; await tracer.note("Message destinations unknown: \(e.message)", generation: gen) }
                 return
@@ -90,10 +90,11 @@ final class SyscallTracer {
         unresolvedPorts = false
     }
 
-    private func addPorts(_ ports: [UInt32: Int32], names: [Int32: String], generation gen: Int) {
+    private func addPorts(_ ports: [UInt32: Int32], names: [Int32: String], kinds: [UInt32: String], generation gen: Int) {
         guard gen == generation else { return }
         context.ports.merge(ports) { _, new in new }
         context.processNames.merge(names) { _, new in new }
+        context.portKinds.merge(kinds) { _, new in new }
         listedPorts.formUnion(listing)
         revision += 1
     }
@@ -183,10 +184,10 @@ final class SyscallTracer {
         }
         guard !recs.isEmpty else { return }
         for r in recs where r.name == "mach_msg2_trap" {
-            guard let a = r.args, a.count > 3, a[1] & UInt64(MACH_SEND_MSG) != 0 else { continue }
-            let port = UInt32(truncatingIfNeeded: a[3])
-            guard port != 0, seenPorts.insert(port).inserted else { continue }
-            if context.ports[port] == nil && !listedPorts.contains(port) { unresolvedPorts = true }
+            // Replies go over send-once rights the send uses up: no listing finds them.
+            guard let a = r.args, let (port, once) = SyscallActivity.Context.messagePort(a), !once, port != 0,
+                  seenPorts.insert(port).inserted else { continue }
+            if context.ports[port] == nil && context.portKinds[port] == nil && !listedPorts.contains(port) { unresolvedPorts = true }
         }
         records.append(contentsOf: recs)
         if records.count > Self.cap {
@@ -222,6 +223,8 @@ struct SyscallTraceView: View {
     @State private var summary: [SyscallSummaryRow] = []
     @State private var summarySort = [KeyPathComparator(\SyscallSummaryRow.totalNanos, order: .reverse)]
     @State private var selection: Set<SyscallRecord.ID> = []
+    @State private var summarySelection: Set<SyscallSummaryRow.ID> = []
+    @State private var activitySelection: Set<ActivityRowID> = []
 
     private var disabledReason: String? {
         if exited { return InspectorView.exitedNote }
@@ -248,7 +251,7 @@ struct SyscallTraceView: View {
             if tracer.phase == .idle {
                 placeholder
             } else if mode == "Activity" {
-                SyscallActivityView(groups: activities, filtered: !filter.isEmpty || errorsOnly)
+                SyscallActivityView(groups: activities, filtered: !filter.isEmpty || errorsOnly, selection: $activitySelection)
             } else if mode == "Summary" {
                 summaryTable
             } else {
@@ -299,7 +302,17 @@ struct SyscallTraceView: View {
             }
             Toggle("Errors only", isOn: $errorsOnly).toggleStyle(.checkbox).font(.caption)
             TextField("filter", text: $filter).textFieldStyle(.roundedBorder).frame(width: 160)
-            Button("Clear") { tracer.clear(); selection = [] }.disabled(tracer.isActive || tracer.phase == .idle)
+            Menu {
+                Button("Copy All") { Pasteboard.copy(exportText()) }
+                Button("Save as Text…") { save() }
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .disabled(tracer.phase == .idle)
+            .help("Copy or save the \(mode) view as text, everything the filter shows")
+            Button("Clear") { tracer.clear(); selection = []; summarySelection = []; activitySelection = [] }
+                .disabled(tracer.isActive || tracer.phase == .idle)
         }
         .padding(6)
     }
@@ -390,7 +403,7 @@ struct SyscallTraceView: View {
     }
 
     private var summaryTable: some View {
-        Table(summary, sortOrder: $summarySort) {
+        Table(summary, selection: $summarySelection, sortOrder: $summarySort) {
             TableColumn("Syscall", value: \.name) { s in
                 HStack(spacing: 4) {
                     Text(s.name).truncationHelp(s.name)
@@ -409,6 +422,15 @@ struct SyscallTraceView: View {
             TableColumn("Longest", value: \.maxNanos) { s in Text(Self.duration(s.maxNanos)).monospacedDigit() }.width(min: 70, ideal: 90)
         }
         .font(.system(size: 11, design: .monospaced))
+        .contextMenu(forSelectionType: SyscallSummaryRow.ID.self) { ids in
+            Button("Copy") { Pasteboard.copy(summaryText(ids)) }
+            if ids.count == 1, let name = ids.first, let page = ManPage.page(for: name) {
+                Button("\(page)(2) Man Page") { ManPage.open(page) }
+            }
+        }
+        .onCopyCommand { [ids = summarySelection] in
+            [NSItemProvider(object: summaryText(ids) as NSString)]
+        }
         .onChange(of: summarySort) { summary.sort(using: summarySort) }
     }
 
@@ -469,20 +491,49 @@ struct SyscallTraceView: View {
         .frame(height: min(CGFloat(frames.count) * 16 + 14, 200))
     }
 
-    private func copy(_ ids: Set<SyscallRecord.ID>) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text(for: ids), forType: .string)
+    private func copy(_ ids: Set<SyscallRecord.ID>) { Pasteboard.copy(text(for: ids)) }
+
+    private func text(for ids: Set<SyscallRecord.ID>?) -> String {
+        shown.filter { ids?.contains($0.id) ?? true }.map { r in
+            Self.line(r, argNames: argNames) + tracer.symbols.frames(r.stack).map { "\n    " + $0.text }.joined()
+        }.joined(separator: "\n")
     }
 
-    /// strace-style lines: `+1.234567 [tid] name(args) = result <duration> path`.
-    private func text(for ids: Set<SyscallRecord.ID>) -> String {
-        shown.filter { ids.contains($0.id) }.map { r in
-            let t = r.start.map(Self.seconds) ?? "before"
-            let d = r.duration.map { " <\(Self.duration($0))>" } ?? ""
-            let p = r.paths.isEmpty ? "" : "  \(r.pathText)"
-            let stack = tracer.symbols.frames(r.stack).map { "\n    " + $0.text }.joined()
-            return "\(t) [\(r.thread)] \(r.name)(\(argNames ? r.namedArgsText : r.argsText)) = \(r.resultText)\(d)\(p)\(stack)"
-        }.joined(separator: "\n")
+    /// strace-style: `+1.234567 [tid] name(args) = result <duration> path`, and the caller when stacks were on.
+    nonisolated static func line(_ r: SyscallRecord, argNames: Bool = true) -> String {
+        let t = r.start.map(seconds) ?? "before"
+        let d = r.duration.map { " <\(duration($0))>" } ?? ""
+        let p = r.paths.isEmpty ? "" : "  \(r.pathText)"
+        let c = r.caller.isEmpty ? "" : "  ← \(r.caller)"
+        return "\(t) [\(r.thread)] \(r.name)(\(argNames ? r.namedArgsText : r.argsText)) = \(r.resultText)\(d)\(p)\(c)"
+    }
+
+    /// Tab-separated with a header row, in the table's order.
+    private func summaryText(_ ids: Set<SyscallSummaryRow.ID>?) -> String {
+        let rows = summary.filter { ids?.contains($0.id) ?? true }.map { s in
+            [s.name, String(s.calls), String(s.errors), Self.duration(s.totalNanos), Self.duration(s.avgNanos), Self.duration(s.maxNanos)]
+                .joined(separator: "\t")
+        }
+        return (["Syscall\tCalls\tErrors\tTotal time\tAverage\tLongest"] + rows).joined(separator: "\n")
+    }
+
+    /// Everything the current mode shows (after the filter).
+    private func exportText() -> String {
+        switch mode {
+        case "Activity": SyscallActivityView.text(activities)
+        case "Summary": summaryText(nil)
+        default: text(for: nil)
+        }
+    }
+
+    private func save() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [mode == "Summary" ? .tabSeparatedText : .plainText]
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        panel.nameFieldStringValue = "\(proc.name) \(mode) \(f.string(from: Date())).\(mode == "Summary" ? "tsv" : "txt")"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        try? exportText().write(to: url, atomically: true, encoding: .utf8)
     }
 
     nonisolated static func seconds(_ ns: UInt64) -> String { String(format: "+%.6f", Double(ns) / 1e9) }
