@@ -49,6 +49,8 @@ struct SyscallRecord: Identifiable, Sendable, Hashable {
     // Display text, built once (off the main thread) so the table only reads strings.
     /// The first frame outside libsystem_kernel (the syscall stubs), symbolicated; empty without a stack.
     var caller = ""
+    /// Resolved resource for syscalls whose first argument is a descriptor.
+    var firstFDLabel: String?
     /// One display text per argument shown ("…" alone when the entry, and so the arguments, wasn't seen).
     var argValues: [String] = []
     var argsText: String { argValues.joined(separator: ", ") }
@@ -420,7 +422,7 @@ struct FdLabeler {
         guard let a = r.args else { return [] }
         let base = r.name.hasSuffix("_nocancel") ? String(r.name.dropLast(9)) : r.name
         var idx: [Int] = []
-        if ["fcntl", "setsockopt", "getsockopt", "openat"].contains(base) { idx = [0] }
+        if ["fcntl", "setsockopt", "getsockopt", "openat", "connectx"].contains(base) { idx = [0] }
         else if let sig = SyscallFormat.signature(base) { idx = sig.indices.filter { sig[$0] == .fd || sig[$0] == .dirfd } }
         return idx.compactMap { i in
             guard i < a.count, i < r.argValues.count else { return nil }
@@ -484,7 +486,10 @@ struct FdLabeler {
             for (i, fd) in Self.fdArgs(recs[n]) {
                 let answer = (lastChange[fd] ?? -1) <= n ? answers[fd] : nil
                 let label = refreshable.contains(fd) ? (answer ?? known[fd]) : (known[fd] ?? answer)
-                if let label, !label.isEmpty { recs[n].argValues[i] += " (" + label + ")" }
+                if let label, !label.isEmpty {
+                    recs[n].argValues[i] += " (" + label + ")"
+                    if i == 0 { recs[n].firstFDLabel = label }
+                }
             }
             for e in Self.effects(recs[n]) { apply(e, to: &known, soft: &refreshable, at: n, lastChange: &scratch) }
         }
@@ -821,7 +826,7 @@ enum SyscallFormat {
     static let wideReturns: Set<String> = ["mmap", "bsdthread_create", "lseek", "read", "write", "pread", "pwrite", "readv", "writev", "preadv", "pwritev",
                                            "recvfrom", "sendto", "recvmsg", "sendmsg", "recvmsg_x", "sendmsg_x", "getxattr", "fgetxattr",
                                            "listxattr", "flistxattr", "getdirentries64", "sendfile"]
-    private static func wide(_ r: SyscallRecord) -> UInt64 { (r.ret & 0xffff_ffff) | r.ret1 << 32 }
+    static func wide(_ r: SyscallRecord) -> UInt64 { (r.ret & 0xffff_ffff) | r.ret1 << 32 }
 
     /// The path as the kernel looked it up. After a symlink that is the link's target (with the rest of the
     /// path), not the string the caller passed: /etc/hosts shows as "private/etc/hosts", since /etc is a

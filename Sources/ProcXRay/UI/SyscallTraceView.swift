@@ -141,13 +141,14 @@ struct SyscallTraceView: View {
     let proc: ProcInfo
     let exited: Bool
     @State private var tracer = SyscallTracer()
-    @AppStorage("syscallTrace.mode") private var mode = "Calls"
+    @AppStorage("syscallTrace.mode") private var mode = "Activity"
     @AppStorage("syscallTrace.stacks") private var stacks = false
     @AppStorage("syscallTrace.argNames") private var argNames = true
     @State private var filter = ""
     @State private var errorsOnly = false
     @State private var sort = [KeyPathComparator(\SyscallRecord.time, order: .reverse)]
     @State private var shown: [SyscallRecord] = []
+    @State private var activities: [SyscallActivity] = []
     @State private var summary: [SyscallSummaryRow] = []
     @State private var summarySort = [KeyPathComparator(\SyscallSummaryRow.totalNanos, order: .reverse)]
     @State private var selection: Set<SyscallRecord.ID> = []
@@ -159,7 +160,7 @@ struct SyscallTraceView: View {
     }
 
     private var key: String {
-        "\(tracer.revision)\u{0}\(filter)\u{0}\(errorsOnly)\u{0}\(mode)\u{0}\(sort.first.map { "\($0.keyPath)\($0.order == .forward)" } ?? "")"
+        "\(tracer.phase)\u{0}\(filter)\u{0}\(errorsOnly)\u{0}\(mode)\u{0}\(sort.first.map { "\($0.keyPath)\($0.order == .forward)" } ?? "")"
     }
 
     var body: some View {
@@ -176,6 +177,8 @@ struct SyscallTraceView: View {
             Divider()
             if tracer.phase == .idle {
                 placeholder
+            } else if mode == "Activity" {
+                SyscallActivityView(groups: activities, filtered: !filter.isEmpty || errorsOnly)
             } else if mode == "Summary" {
                 summaryTable
             } else {
@@ -183,7 +186,17 @@ struct SyscallTraceView: View {
                 if let r = selectedStackRecord { Divider(); stackPane(r) }
             }
         }
-        .task(id: key) { await recompute() }
+        .task(id: key) {
+            var lastRevision = -1
+            repeat {
+                if lastRevision != tracer.revision {
+                    lastRevision = tracer.revision
+                    await recompute()
+                }
+                guard tracer.isActive else { break }
+                try? await Task.sleep(for: .milliseconds(300))
+            } while !Task.isCancelled
+        }
         .onDisappear { tracer.stop() }
     }
 
@@ -205,12 +218,15 @@ struct SyscallTraceView: View {
             Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationHelp(status)
             Spacer()
             Picker("", selection: $mode) {
+                Text("Activity").tag("Activity")
                 Text("Calls").tag("Calls")
                 Text("Summary").tag("Summary")
             }
             .pickerStyle(.segmented).labelsHidden().fixedSize()
-            Toggle("Names", isOn: $argNames).toggleStyle(.checkbox).font(.caption)
+            if mode == "Calls" {
+                Toggle("Names", isOn: $argNames).toggleStyle(.checkbox).font(.caption)
                 .help("Show argument names (as xnu declares them) with the values")
+            }
             Toggle("Errors only", isOn: $errorsOnly).toggleStyle(.checkbox).font(.caption)
             TextField("filter", text: $filter).textFieldStyle(.roundedBorder).frame(width: 160)
             Button("Clear") { tracer.clear(); selection = [] }.disabled(tracer.isActive || tracer.phase == .idle)
@@ -235,7 +251,7 @@ struct SyscallTraceView: View {
     private var placeholder: some View {
         VStack(spacing: 8) {
             Image(systemName: "waveform.path.ecg").font(.largeTitle).foregroundStyle(.tertiary)
-            Text("Every syscall and Mach trap this process makes, with arguments, results, errors, durations and file paths.")
+            Text(mode == "Activity" ? "Follow file operations, connection attempts and waits. Expand an activity to inspect its syscalls." : "Every syscall and Mach trap this process makes, with arguments, results, errors, durations and file paths.")
                 .multilineTextAlignment(.center)
             Text(disabledReason ?? "Uses the kernel's kdebug trace (as Instruments' System Call Trace does). One trace at a time per machine: it can't run while Instruments or fs_usage is recording.")
                 .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -328,10 +344,16 @@ struct SyscallTraceView: View {
 
     /// Filter and sort off the main thread; while tracing, at most ~3 times a second.
     private func recompute() async {
-        if tracer.phase == .running { try? await Task.sleep(for: .milliseconds(300)) }
         guard !Task.isCancelled else { return }
         let all = tracer.records + tracer.pending
         let filter = filter, errorsOnly = errorsOnly, sort = sort, summaryMode = mode == "Summary", summarySort = summarySort
+        if mode == "Activity" {
+            let groups = await Task.detached(priority: .userInitiated) {
+                SyscallActivity.build(all, filter: filter, errorsOnly: errorsOnly)
+            }.value
+            if !Task.isCancelled { activities = groups }
+            return
+        }
         let result = await Task.detached(priority: .userInitiated) { () -> ([SyscallRecord], [SyscallSummaryRow]) in
             let rows = all.filter { r in
                 (!errorsOnly || r.failed) &&

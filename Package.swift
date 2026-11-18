@@ -12,6 +12,7 @@ let package = Package(
             dependencies: ["CSandbox"],
             path: "Sources/ProcXRay",
             linkerSettings: [.linkedFramework("Security"), .linkedFramework("AppKit"), .linkedFramework("IOKit"), .linkedLibrary("sqlite3")]
-        )
+        ),
+        .testTarget(name: "ProcXRayTests", dependencies: ["ProcXRay"])
     ]
 )
