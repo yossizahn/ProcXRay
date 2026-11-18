@@ -4,6 +4,11 @@
 
 `./build-app.sh` builds `build/Proc X-Ray Dev.app` (bundle id `local.procxray.dev`, its own helper and settings); `--release` builds `build/Proc X-Ray.app`, `--install` also replaces the copy in /Applications. It needs full Xcode, not the Command Line Tools. See the script's header.
 
+## The dev helper
+
+- Never install the helper from the Atlas login (or any second login). Atlas opens a copy of the bundle and deletes it afterwards, which leaves the helper's background-item record orphaned under "Unknown Developer": launchd logs "The specified path is not a bundle", unregistering fails with "record not found", and the user's own dev helper is blocked until `sudo sfltool resetbtm` and a restart (which resets every app's background items). Test helper-backed features in the user's login or in the VM.
+- `ProcXRay --helper-register` / `--helper-unregister`, run from inside the bundle, register or remove the helper without the UI.
+
 ## Test VM (Tart): root, SIP off
 
 The host Mac runs with SIP on and has no passwordless sudo, so anything that needs root on demand, or SIP off (task ports for the native readers, `task_for_pid`, kdebug benchmarks), is tested in a Tart VM.
@@ -21,7 +26,7 @@ To turn SIP off in a fresh clone: `tart run --recovery <vm>`, open Terminal from
 - SSH: key at `~/.tart/ssh_key` (one-time setup in the header of `tools/vm-deploy.sh`), then `ssh -i ~/.tart/ssh_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@$(tart ip pxr-dev)`.
 - Deploy and launch a build: `./build-app.sh && tools/vm-deploy.sh` (`--release` for the release bundle, a VM name as the last argument for another VM).
 - One-off test binaries (C or Swift) build on the host and run in the VM: `scp` them over, or `cat bin | ssh … 'cat > /tmp/bin && chmod +x /tmp/bin'`. Both are arm64 macOS 27.2, so host builds run as is.
-- Syscall trace without the UI: `sudo ProcXRay --trace <pid> <seconds> [--ktrace] [--activity] [out.tsv]` runs the kdebug reader (or ktrace) in-process with the app's decoder and writes the records for diffing the two (`--activity` prints the Activity view's grouping, Mach message destinations named); `ProcXRay --helper-call trace <pid> <seconds> [stacks]` goes through the installed helper over XPC (`stacks`: kperf user stacks, printed symbolicated with the top callers). Only the signed bundle can talk to the helper, not the raw `swift build` binary.
+- Syscall trace without the UI: `sudo ProcXRay --trace <pid> <seconds> [--ktrace] [--activity] [out.tsv]` runs the kdebug reader (or ktrace) in-process with the app's decoder and writes the records for diffing the two (`--activity` prints the Activity view's grouping, Mach message destinations named); `ProcXRay --helper-call trace <pid> <seconds> [stacks] [activity]` goes through the installed helper over XPC (`stacks`: kperf user stacks, printed symbolicated with the top callers; `activity`: the Activity grouping, as the app builds it). Only the signed bundle can talk to the helper, not the raw `swift build` binary.
 - `PROCXRAY_APPLE_TOOLS=1` in the environment of the process doing the reading forces Apple's tools instead of the native readers (`NativeTools.swift`), for comparing the two in the VM.
 
 ## Profiling refresh ticks

@@ -22,16 +22,29 @@ struct SyscallActivity: Identifiable, Sendable {
         /// Port names in the traced process's port space → the process holding the receive right (MachPortNames).
         var ports: [UInt32: Int32] = [:]
         var processNames: [Int32: String] = [:]
+        /// Port names that lead to no other process: "task port", "IOKit connection (…)", "own port".
+        var portKinds: [UInt32: String] = [:]
 
         func process(_ pid: Int32) -> String {
             if pid == self.pid { return "itself" }
             return processNames[pid].map { "\($0) (\(pid))" } ?? "pid \(pid)"
         }
 
-        /// Where a mach_msg2_trap send goes: "cfprefsd (412)", or the port's name when no process receives on it
-        /// (a kernel object, a port of the process's own) or it is newer than the last port listing.
-        func destination(_ port: UInt32) -> String {
-            ports[port].map(process) ?? "port 0x" + String(port, radix: 16)
+        /// Where a mach_msg2_trap send goes: "cfprefsd (412)", "Kernel: task port", "Own port", "Reply (send-once)"
+        /// for an answer to a request (its send-once right is used up by the send, so no listing finds it), or the
+        /// port's name when it came and went between port listings.
+        func destination(_ port: UInt32, sendOnce: Bool = false) -> String {
+            if let p = ports[port] { return process(p) }
+            if let k = portKinds[port] { return k == "own port" ? "Own port" : "Kernel: " + k }
+            if sendOnce { return "Reply (send-once)" }
+            // Seen in Finder: runs of new port names, each used for a request or two and gone before any listing.
+            return "port 0x" + String(port, radix: 16) + " (not in the port listing)"
+        }
+
+        /// A send's destination port and whether it is a send-once right (MACH_MSG_TYPE_MOVE_SEND_ONCE: a reply).
+        static func messagePort(_ a: [UInt64]) -> (port: UInt32, sendOnce: Bool)? {
+            guard a.count > 3, a[1] & UInt64(MACH_SEND_MSG) != 0 else { return nil }
+            return (UInt32(truncatingIfNeeded: a[3]), a[2] & 0x1f == UInt64(MACH_MSG_TYPE_MOVE_SEND_ONCE))
         }
     }
 
@@ -262,7 +275,7 @@ struct SyscallActivity: Identifiable, Sendable {
         let a = r.args ?? []
         switch op {
         case .message:
-            return a.count > 3 ? context.destination(UInt32(truncatingIfNeeded: a[3])) : "Destination unavailable"
+            return Context.messagePort(a).map { context.destination($0.port, sendOnce: $0.sendOnce) } ?? "Destination unavailable"
         case .signal:
             guard a.count > 1 else { return "Target unavailable" }
             return SyscallFormat.signalName(Int32(truncatingIfNeeded: a[1])) + " to " + context.process(Int32(truncatingIfNeeded: a[0]))

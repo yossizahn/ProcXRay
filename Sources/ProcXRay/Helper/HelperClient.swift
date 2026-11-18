@@ -158,6 +158,23 @@ final class HelperClient: @unchecked Sendable {
         return .failure(.init(message: out.1 ?? "unreadable reply from the helper"))
     }
 
+    /// One process's port names that lead to no other process (HelperProtocol.machPortKinds).
+    func machPortKinds(pid: Int32, timeout: Double = 60) -> Swift.Result<[UInt32: String], MachLoader.Failure> {
+        let c = makeConnection()
+        defer { c.invalidate() }
+        let lock = NSLock()
+        var out: (Data?, String?) = (nil, "the helper did not answer")
+        let sem = DispatchSemaphore(value: 0)
+        guard let p = c.remoteObjectProxyWithErrorHandler({ e in
+            lock.lock(); out = (nil, "helper: \(e.localizedDescription)"); lock.unlock(); sem.signal()
+        }) as? HelperProtocol else { return .failure(.init(message: "no helper connection")) }
+        p.machPortKinds(pid: pid) { d, e in lock.lock(); out = (d, e); lock.unlock(); sem.signal() }
+        _ = sem.wait(timeout: .now() + timeout)
+        lock.lock(); defer { lock.unlock() }
+        if let d = out.0, let r = try? JSONDecoder().decode([UInt32: String].self, from: d) { return .success(r) }
+        return .failure(.init(message: out.1 ?? "unreadable reply from the helper"))
+    }
+
     /// Voucher settlements per pair of processes over `seconds` (HelperProtocol.bankLedger), on a connection of
     /// its own so a cancelled caller (Shell.Cancel.current) stops the recording in the helper.
     func bankLedger(seconds: Int) -> Swift.Result<BankLedger.Recording, MachLoader.Failure> {

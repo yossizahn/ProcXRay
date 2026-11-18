@@ -192,24 +192,27 @@ enum Bench {
         print(String(format: "%@: started in %.0f ms; %d events, %d bytes, %d bad, %d gaps; %d records + %d in flight; decode+pair %.3f s; CPU %.3f s here + %.3f s ktrace",
                      ktrace ? "ktrace" : "kdebug", started * 1000, events, bytes, bad, dec.gaps, recs.count, inFlight.count, decodeTime,
                      secs(ru.ru_utime) + secs(ru.ru_stime), secs(rc.ru_utime) + secs(rc.ru_stime)))
-        if activity {
-            var context = SyscallActivity.Context(pid: pid)
-            switch MachPortNames.resolveHere(pid: pid) {
-            case .success(let n): context.ports = n.ports; context.processNames = n.names
-            case .failure(let e): print("ports: " + e.message)
-            }
-            print("\(context.ports.count) port names resolved")
-            for g in SyscallActivity.build(recs + inFlight, filter: "", errorsOnly: false, context: context).reversed() {
-                let at = g.calls[0].start.map { String(format: "%8.3f", Double($0) / 1e9) } ?? "  before"
-                print("\(at)  \(g.operation.rawValue)  \(g.target)  ·  \(g.detail)")
-            }
-        }
+        if activity { printActivity(recs + inFlight, pid: pid, names: MachPortNames.resolveHere(pid: pid)) }
         guard let out else { return }
         var text = ""
         for r in recs + inFlight {
             text += "\(r.name)\t\(r.argsText)\t\(r.resultText)\t\(r.pathText)\t\(r.state)\n"
         }
         FileManager.default.createFile(atPath: out, contents: Data(text.utf8))
+    }
+
+    /// The Activity view's grouping, oldest first, with Mach message destinations named from `names`.
+    static func printActivity(_ recs: [SyscallRecord], pid: Int32, names: Result<MachPortNames.Names, MachLoader.Failure>) {
+        var context = SyscallActivity.Context(pid: pid)
+        switch names {
+        case .success(let n): context.ports = n.ports; context.processNames = n.names; context.portKinds = n.kinds
+        case .failure(let e): print("ports: " + e.message)
+        }
+        print("\(context.ports.count) port names resolved, \(context.portKinds.count) kernel or own")
+        for g in SyscallActivity.build(recs, filter: "", errorsOnly: false, context: context).reversed() {
+            let at = g.calls[0].start.map { String(format: "%8.3f", Double($0) / 1e9) } ?? "  before"
+            print("\(at)  \(g.operation.rawValue)  \(g.target)  ·  \(g.detail)")
+        }
     }
 
     static func helperCall(_ args: [String]) {
@@ -357,7 +360,8 @@ enum Bench {
             return
         }
         if what == "trace" {
-            // trace <pid> <seconds> [stacks]: through the helper over XPC, as SyscallTracer does.
+            // trace <pid> <seconds> [stacks] [show] [activity]: through the helper over XPC, as SyscallTracer does.
+            // `activity` prints the Activity view's grouping, message destinations named through the helper.
             let secs = args.dropFirst(2).first.flatMap { Double($0) } ?? 3
             let stacks = args.contains("stacks")
             let s = HelperTraceSession()
@@ -374,7 +378,10 @@ enum Bench {
             var names: [String: Int] = [:]
             let symbols = StackSymbols()
             var withStack = 0, callers: [String: Int] = [:], examples: [String: SyscallRecord] = [:]
+            let activity = args.contains("activity")
+            var all: [SyscallRecord] = []
             func take(_ rs: [SyscallRecord]) {
+                if activity { all += rs }
                 for r in rs {
                     recs += 1; names[r.name, default: 0] += 1
                     guard !r.stack.isEmpty else { continue }
@@ -398,6 +405,11 @@ enum Bench {
                 if d.count < SyscallTraceConfig.maxRead / 2 { usleep(250_000) }
             }
             take(dec.flush())
+            if activity {
+                // As SyscallTracer does: names for message destinations through the helper.
+                printActivity(all + dec.pending(), pid: pid, names: MachPortNames.resolve(pid: pid))
+                return
+            }
             // Calls whose arguments have no signature yet (shown as raw words), by count.
             let unknown = names.filter { SyscallFormat.signature($0.key) == nil && $0.key != "mach_msg2_trap" && !["fcntl", "fcntl_nocancel", "open", "open_nocancel", "openat", "openat_nocancel", "setsockopt", "getsockopt", "proc_info", "proc_info_extended_id"].contains($0.key) }
             print("no signature: " + unknown.sorted { $0.value > $1.value }.prefix(15).map { "\($0.key) \($0.value)" }.joined(separator: ", "))

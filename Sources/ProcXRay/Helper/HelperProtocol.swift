@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 18  // 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
+    static let protocolVersion = 19  // 19: machPortKinds, 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -68,6 +68,10 @@ enum HelperConfig {
     /// The ports behind the Mach link between two processes, both directions, from the helper's last lsmp
     /// run (or a new one if it has none). Admin callers only. (JSON MachPortDetailReply, nil) or (nil, why not).
     func machPortDetail(pid: Int32, peer: Int32, reply: @escaping (Data?, String?) -> Void)
+    /// One process's port names that lead to no other process, from the same lsmp run: name → "task port",
+    /// "IOKit connection (…)", "own port"… (MachSnapshot.portKinds). Admin callers only. (JSON [UInt32: String], nil)
+    /// or (nil, why not).
+    func machPortKinds(pid: Int32, reply: @escaping (Data?, String?) -> Void)
 
     /// Syscall trace of one process (kdebug, read by the helper itself or through `ktrace trace`), at most one
     /// per connection. The trace stops when the connection ends, so the app gives each trace a connection of its own.

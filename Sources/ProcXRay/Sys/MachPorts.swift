@@ -309,6 +309,51 @@ struct MachSnapshot: Codable, Sendable {
         return (snap, details)
     }
 
+    /// Per process, what its port names that lead to no other process are: a kernel object ("task port",
+    /// "IOKit connection (IOSurfaceRootUserClient)") or a port it receives on itself ("own port"). Names a syscall
+    /// trace's message destinations that the links between processes can't (MachPortNames).
+    static func portKinds(processes procs: [[String: Any]]) -> [Int32: [UInt32: String]] {
+        var receiver: [String: Int32] = [:]
+        func receivers(_ pid: Int32, _ q: [String: Any]) {
+            if let o = q["ipc-object"] as? String, (q["rights"] as? [String])?.contains("recv") == true { receiver[o] = pid }
+            for m in q["members"] as? [[String: Any]] ?? [] { receivers(pid, m) }
+        }
+        var kinds: [Int32: [UInt32: String]] = [:]
+        func sends(_ pid: Int32, _ q: [String: Any]) {
+            defer { for m in q["members"] as? [[String: Any]] ?? [] { sends(pid, m) } }
+            guard let r = q["rights"] as? [String], r.contains("send") || r.contains("send once"),
+                  let name = (q["name"] as? String).flatMap(MachPortNames.number) else { return }
+            if let t = q["type"] as? String, !["port", "port set", "dead name", "UNKNOWN"].contains(t) {
+                kinds[pid, default: [:]][name] = kernelKind(t, q["description"] as? String)
+            } else if let o = q["ipc-object"] as? String, receiver[o] == pid {
+                kinds[pid, default: [:]][name] = "own port"
+            }
+        }
+        for p in procs {
+            guard let pid = (p["pid"] as? NSNumber)?.int32Value else { continue }
+            for q in p["ports"] as? [[String: Any]] ?? [] { receivers(pid, q) }
+        }
+        for p in procs {
+            guard let pid = (p["pid"] as? NSNumber)?.int32Value else { continue }
+            for q in p["ports"] as? [[String: Any]] ?? [] { sends(pid, q) }
+        }
+        return kinds
+    }
+
+    /// lsmp's kernel object type, in words: "TASK-CONTROL" → "task port", "IOKIT-CONNECT" → "IOKit connection (…)".
+    static func kernelKind(_ type: String, _ desc: String?) -> String {
+        switch type {
+        case "IOKIT-CONNECT": return "IOKit connection" + (className(desc).map { " (\($0))" } ?? "")
+        case "IOKIT-OBJECT", "IOKIT-IDENT": return "IOKit object" + (className(desc).map { " (\($0))" } ?? "")
+        case _ where type.hasPrefix("TASK"): return "task port"
+        case _ where type.hasPrefix("THREAD"): return "thread port"
+        case _ where type.hasPrefix("HOST"): return "host port"
+        case "SEMAPHORE": return "semaphore"
+        case "VOUCHER": return "voucher"
+        default: return type.lowercased().replacingOccurrences(of: "-", with: " ")
+        }
+    }
+
     /// " BAD_ACCESS BAD_INSTRUCTION RESOURCE" → ["bad access", "bad instruction", "resource"].
     static func exceptionMask(_ s: String?) -> [String] {
         (s ?? "").split(separator: " ").map { $0.lowercased().replacingOccurrences(of: "_", with: " ") }

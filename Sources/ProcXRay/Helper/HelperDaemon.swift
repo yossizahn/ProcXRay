@@ -123,6 +123,15 @@ enum HelperDaemon {
             }
         }
 
+        func machPortKinds(pid: Int32, reply: @escaping (Data?, String?) -> Void) {
+            guard callerIsAdmin else { reply(nil, "Mach ports of every process can only be read for an admin user."); return }
+            let cancel = self.cancel
+            DispatchQueue.global(qos: .userInitiated).async {
+                if MachPortCache.last() == nil, case .failure(let e) = MachPortCache.run(cancel: cancel) { reply(nil, e.message); return }
+                reply(try? JSONEncoder().encode(MachPortCache.kinds(of: pid)), nil)
+            }
+        }
+
         /// Runs off the connection's queue: messages on one connection are delivered one at a time, so a
         /// 13 s sample run inline held up the app's metrics refresh and health probe behind it.
         func runTool(_ tool: Int, pid: Int32, reply: @escaping (String) -> Void) {
@@ -254,13 +263,17 @@ enum HelperDaemon {
 enum MachPortCache {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var cached: (at: Date, ports: [PortPair: [MachPortDetail]])?
+    /// Per process, its port names that lead to no other process (MachSnapshot.portKinds), from the same run.
+    nonisolated(unsafe) private static var kinds: [Int32: [UInt32: String]] = [:]
 
     static func last() -> (at: Date, ports: [PortPair: [MachPortDetail]])? { lock.lock(); defer { lock.unlock() }; return cached }
+    static func kinds(of pid: Int32) -> [UInt32: String] { lock.lock(); defer { lock.unlock() }; return kinds[pid] ?? [:] }
 
     static func run(cancel: Shell.Cancel?) -> Swift.Result<MachSnapshot, MachLoader.Failure> {
         if NativeTools.enabled, let procs = NativeMach.processes() {
             let parsed = MachSnapshot.parseWithPorts(processes: procs)
-            lock.lock(); cached = (parsed.snapshot.at, parsed.ports); lock.unlock()
+            let k = MachSnapshot.portKinds(processes: procs)
+            lock.lock(); cached = (parsed.snapshot.at, parsed.ports); kinds = k; lock.unlock()
             return .success(parsed.snapshot)
         }
         // lsmp writes its JSON to a path. A directory of root's own (umask 077), so no other user can
@@ -275,11 +288,15 @@ enum MachPortCache {
             // Its text listing (as long as the JSON) goes nowhere; stderr comes back for errors.
             Shell.exec("/usr/bin/lsmp", ["-a", "-j", file], timeout: 40, discardStdout: true)
         }
-        guard let data = FileManager.default.contents(atPath: file), let parsed = MachSnapshot.parseWithPorts(data) else {
+        guard let data = FileManager.default.contents(atPath: file),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let procs = root["processes"] as? [[String: Any]] else {
             let why = r.timedOut ? "lsmp ran past its time limit" : r.output.trimmingCharacters(in: .whitespacesAndNewlines)
             return .failure(.init(message: "lsmp failed: \(why.isEmpty ? "exit \(r.status)" : why)"))
         }
-        lock.lock(); cached = (parsed.snapshot.at, parsed.ports); lock.unlock()
+        let parsed = MachSnapshot.parseWithPorts(processes: procs)
+        let k = MachSnapshot.portKinds(processes: procs)
+        lock.lock(); cached = (parsed.snapshot.at, parsed.ports); kinds = k; lock.unlock()
         return .success(parsed.snapshot)
     }
 }

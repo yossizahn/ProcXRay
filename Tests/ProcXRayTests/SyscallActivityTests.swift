@@ -67,7 +67,7 @@ final class SyscallActivityTests: XCTestCase {
         let context = SyscallActivity.Context(pid: 10, ports: [0x903: 42], processNames: [42: "cfprefsd"])
         let groups = SyscallActivity.build([m1, m2, m3, stat1, stat2, kill], filter: "", errorsOnly: false, context: context)
         XCTAssertEqual(groups.map(\.operation), [.signal, .lookup, .message, .message])
-        XCTAssertEqual(groups.map(\.target), ["SIGTERM to pid 77", "/missing", "port 0xa03", "cfprefsd (42)"])
+        XCTAssertEqual(groups.map(\.target), ["SIGTERM to pid 77", "/missing", "port 0xa03 (not in the port listing)", "cfprefsd (42)"])
         XCTAssertEqual(groups[1].calls.map(\.id), [4, 5])
         XCTAssertEqual(groups[3].calls.map(\.id), [1, 2])
         XCTAssertEqual(groups[3].bytesOut, 104)
@@ -88,5 +88,55 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertEqual(groups[1].threads, [7, 8])
         XCTAssertEqual(groups[1].longest, 5)
         XCTAssertEqual(groups[1].calls.map(\.id), [2, 3])
+    }
+
+    func testMessageDestinationKinds() {
+        let send = UInt64(MACH_SEND_MSG)
+        let copySend = UInt64(MACH_MSG_TYPE_COPY_SEND), sendOnce = UInt64(MACH_MSG_TYPE_MOVE_SEND_ONCE)
+        let task = record(1, "mach_msg2_trap", 0, args: [1, send, copySend | 40 << 32, 0x203], label: nil)
+        let own = record(2, "mach_msg2_trap", 1_000_000_000, args: [1, send, copySend | 40 << 32, 0x1103], label: nil)
+        let reply = record(3, "mach_msg2_trap", 2_000_000_000, args: [1, send, sendOnce | 40 << 32, 0x4407], label: nil)
+        let gone = record(4, "mach_msg2_trap", 3_000_000_000, args: [1, send, copySend | 40 << 32, 0x5503], label: nil)
+        let context = SyscallActivity.Context(pid: 10, portKinds: [0x203: "task port", 0x1103: "own port"])
+        let groups = SyscallActivity.build([task, own, reply, gone], filter: "", errorsOnly: false, context: context)
+        XCTAssertEqual(groups.map(\.target), ["port 0x5503 (not in the port listing)", "Reply (send-once)", "Own port", "Kernel: task port"])
+    }
+
+    func testPortKinds() {
+        // lsmp's per-process records: a task port, an IOKit connection, a port the process receives on itself,
+        // and a send right to another process's port.
+        let procs: [[String: Any]] = [
+            ["pid": NSNumber(value: 10), "ports": [
+                ["name": "0x00000203", "ipc-object": "0xa", "rights": ["send"], "type": "TASK-CONTROL"],
+                ["name": "0x00000307", "ipc-object": "0xb", "rights": ["send"], "type": "IOKIT-CONNECT",
+                 "description": "IOSurfaceRootUserClient(0x1)"],
+                ["name": "0x00001103", "ipc-object": "0xc", "rights": ["recv", "send"], "type": "port"],
+                ["name": "0x00002203", "ipc-object": "0xd", "rights": ["send"], "type": "port"],
+            ]],
+            ["pid": NSNumber(value: 20), "ports": [
+                ["name": "0x00000903", "ipc-object": "0xd", "rights": ["recv"], "type": "port"],
+            ]],
+        ]
+        let kinds = MachSnapshot.portKinds(processes: procs)
+        XCTAssertEqual(kinds[10], [0x203: "task port", 0x307: "IOKit connection (IOSurfaceRootUserClient)", 0x1103: "own port"])
+        XCTAssertNil(kinds[20])
+    }
+
+    func testRootSymlinkPaths() {
+        // VFS_LOOKUP: first event (func 1) args[0] = vnode id, then path bytes; last event has func 2.
+        func words(_ s: String) -> [UInt64] {
+            var b = Array(s.utf8); while b.count % 8 != 0 { b.append(0) }
+            return stride(from: 0, to: b.count, by: 8).map { i in b[i..<i + 8].enumerated().reduce(0) { $0 | UInt64($1.element) << (8 * $1.offset) } }
+        }
+        let w = words("private/etc/hosts")   // 3 words: fits the first event's three
+        let lookupID: UInt32 = 3 << 24 | 1 << 16 | 0x24 << 2
+        let openID: UInt32 = 4 << 24 | 0x0c << 16 | 5 << 2
+        var dec = SyscallDecoder()
+        let out = dec.feed([
+            KdebugEvent(ts: 1, debugid: openID | 1, arg: [0, 0, 0, 0], thread: 7),
+            KdebugEvent(ts: 2, debugid: lookupID | 3, arg: [99] + w, thread: 7),
+            KdebugEvent(ts: 3, debugid: openID | 2, arg: [0, 3, 0, 0], thread: 7),
+        ])
+        XCTAssertEqual(out.first?.paths, ["/private/etc/hosts"])
     }
 }

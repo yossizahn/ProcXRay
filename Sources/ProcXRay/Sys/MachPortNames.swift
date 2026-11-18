@@ -6,17 +6,19 @@ import Foundation
 /// a syscall trace, whose fourth argument carries the destination port's name.
 ///
 /// Rights to kernel objects (task, thread, IOKit connections) and to the process's own ports pair with no other
-/// process and stay unnamed, as do ports made after the listing.
+/// process: `kinds` says what those are (MachSnapshot.portKinds). Ports made and gone between listings stay unnamed.
 enum MachPortNames {
-    typealias Names = (ports: [UInt32: Int32], names: [Int32: String])
+    typealias Names = (ports: [UInt32: Int32], names: [Int32: String], kinds: [UInt32: String])
 
     /// Through the helper.
     static func resolve(pid: Int32) -> Result<Names, MachLoader.Failure> {
         HelperClient.shared.machPorts().map { snapshot in
-            names(pid: pid, snapshot: snapshot) { peer in
+            let n = names(pid: pid, snapshot: snapshot) { peer in
                 if case .success(let d) = HelperClient.shared.machPortDetail(pid: pid, peer: peer, timeout: 10) { return d.ports }
                 return []
             }
+            let kinds = (try? HelperClient.shared.machPortKinds(pid: pid, timeout: 10).get()) ?? [:]
+            return (n.ports, n.names, kinds)
         }
     }
 
@@ -24,11 +26,12 @@ enum MachPortNames {
     static func resolveHere(pid: Int32) -> Result<Names, MachLoader.Failure> {
         MachPortCache.run(cancel: nil).map { snapshot in
             let ports = MachPortCache.last()?.ports ?? [:]
-            return names(pid: pid, snapshot: snapshot) { ports[PortPair(pid, $0)] ?? [] }
+            let n = names(pid: pid, snapshot: snapshot) { ports[PortPair(pid, $0)] ?? [] }
+            return (n.ports, n.names, MachPortCache.kinds(of: pid))
         }
     }
 
-    private static func names(pid: Int32, snapshot: MachSnapshot, detail: (Int32) -> [MachPortDetail]) -> Names {
+    private static func names(pid: Int32, snapshot: MachSnapshot, detail: (Int32) -> [MachPortDetail]) -> (ports: [UInt32: Int32], names: [Int32: String]) {
         var ports: [UInt32: Int32] = [:]
         var names: [Int32: String] = [:]
         for peer in snapshot.peers(of: pid) where peer.sendsTo > 0 {

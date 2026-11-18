@@ -380,7 +380,11 @@ struct SyscallDecoder: Sendable {
         for w in words { withUnsafeBytes(of: w.littleEndian) { bytes.append(contentsOf: $0) } }
         guard e.fn & 2 != 0 else { lookups[e.thread] = bytes; return }
         lookups[e.thread] = nil
-        let path = String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+        var path = String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+        // The event carries the lookup's path buffer as it ended: after a symlink, its target with the rest of the
+        // path, relative to the link's folder. /etc, /tmp and /var link to private/… from the root, so
+        // open("/etc/hosts") arrives as "private/etc/hosts". A deeper relative link's folder isn't in the event.
+        if path.hasPrefix("private/") { path = "/" + path }
         guard !path.isEmpty, var stack = open[e.thread], !stack.isEmpty else { return }
         stack[stack.count - 1].rec.paths.append(path)
         open[e.thread] = stack
