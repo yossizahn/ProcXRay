@@ -965,7 +965,8 @@ struct LaunchTab: View {
                 }
             }
             if p.ppid == 1, record == nil {
-                Text(LaunchWatcher.shared.since.map { "Launch log traced from \(Fmt.date.string(from: $0)); this launch wasn't seen." }
+                Text(LaunchWatcher.shared.unavailable
+                     ?? LaunchWatcher.shared.since.map { "Launch log traced from \(Fmt.date.string(from: $0)); this launch wasn't seen." }
                      ?? "Launch tracing isn't running.")
                     .font(.caption).foregroundStyle(.tertiary)
             }

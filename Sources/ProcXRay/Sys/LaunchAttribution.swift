@@ -54,6 +54,10 @@ final class LaunchWatcher: @unchecked Sendable {
     }()
     private var started = false
     private(set) var since: Date?
+    /// Why the stream isn't running, when it can't: `log stream` refuses a user who isn't an admin (exit 77).
+    private(set) var unavailable: String?
+    /// Restarts after the stream ended quickly, for the backoff.
+    private var quickExits = 0
 
     /// Starts watching (once). Launches made before this are not seen.
     func start() {
@@ -83,10 +87,12 @@ final class LaunchWatcher: @unchecked Sendable {
         // `log stream` doesn't exit when the terminal it writes to goes away (checked: it kept running after its
         // reader quit, through later writes), so a small sh script owns it and kills it when its stdin, a pipe
         // whose other end only this process holds, reaches end of file: when this process exits in any way,
-        // a crash or SIGKILL included. When `log stream` itself ends, so does the script, and it's restarted.
+        // a crash or SIGKILL included. When `log stream` itself ends, the script stops that watcher too (it holds
+        // the terminal open, which would keep the reader thread below blocked in read forever: one leaked
+        // thread, pty and sh per restart) and exits with the stream's status.
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         // stdin goes to fd 3 first: sh gives a background command /dev/null as its stdin when job control is off.
-        p.arguments = ["-c", #"exec 3<&0; /usr/bin/log stream --level info --style ndjson --predicate "$1" </dev/null & L=$!; (read _ <&3; kill $L 2>/dev/null) & wait $L"#,
+        p.arguments = ["-c", #"exec 3<&0; /usr/bin/log stream --level info --style ndjson --predicate "$1" </dev/null & L=$!; (read _ <&3; kill $L 2>/dev/null) & W=$!; wait $L; S=$?; kill $W 2>/dev/null; exit $S"#,
                        "sh", #"process == "CoreServicesUIAgent" AND category == "open" AND (eventMessage BEGINSWITH "LAUNCH: Setting launcherAuditToken" OR eventMessage BEGINSWITH "LAUNCH: Successful launched")"#]
         p.standardOutput = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
         p.standardError = FileHandle.nullDevice
@@ -94,10 +100,22 @@ final class LaunchWatcher: @unchecked Sendable {
         let lifelineRead = dup(lifeline.read)
         guard lifeline.read >= 0, lifelineRead >= 0 else { close(master); close(slave); return }
         p.standardInput = FileHandle(fileDescriptor: lifelineRead, closeOnDealloc: false)
-        p.terminationHandler = { [weak self] _ in
-            // logd restarted or the stream ended: start again after a pause.
-            DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
-                guard let self else { return }
+        let startedAt = Date()
+        p.terminationHandler = { [weak self] proc in
+            guard let self else { return }
+            self.lock.lock()
+            // 77 (EX_NOPERM): "Must be admin to run 'stream' command". Retrying can't help.
+            if proc.terminationStatus == 77 {
+                self.unavailable = "Launch tracing needs an admin user (log stream refuses others)."
+                self.process = nil
+                self.lock.unlock()
+                return
+            }
+            // logd restarted or the stream ended: start again after a pause, longer each time it ends quickly.
+            self.quickExits = -startedAt.timeIntervalSinceNow < 30 ? self.quickExits + 1 : 0
+            let delay = min(600, 5 * pow(2, Double(max(0, self.quickExits - 1))))
+            self.lock.unlock()
+            DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
                 self.lock.lock(); defer { self.lock.unlock() }
                 self.spawn()
             }
