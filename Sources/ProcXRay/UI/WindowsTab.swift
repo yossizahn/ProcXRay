@@ -73,10 +73,17 @@ struct WindowsTab: View {
         } else {
             FastTable(rows: rows, columns: Self.columns, initialSort: ("layer", true),
                       menu: { menu($0, r) }, onOpen: { w in act { WindowActions.raise(pid: proc.pid, window: w.id) } },
-                      onSpace: { w in
+                      onSpace: { w, row in
                           if ScreenshotWindow.isShowing(w.id) { ScreenshotWindow.close() }
-                          else if r.screenRecording { screenshot(w, .show) }
+                          else if r.screenRecording { screenshot(w, .show, above: row) }
                           else { actionNote = "Screenshots need Screen Recording permission for Proc X-Ray." }
+                      },
+                      onSelect: { w, row in
+                          // Like Quick Look: an open preview follows the selection. The table re-selects the
+                          // same row on every refresh, which mustn't re-capture it.
+                          if ScreenshotWindow.isOpen, !ScreenshotWindow.isShowing(w.id), r.screenRecording {
+                              screenshot(w, .show, above: row)
+                          }
                       })
         }
     }
@@ -121,14 +128,20 @@ struct WindowsTab: View {
 
     private enum ShotMode { case show, copy, save }
 
-    private func screenshot(_ w: WindowList.Window, _ mode: ShotMode) {
+    /// `above`: the row's frame on screen, for the preview to sit over.
+    private func screenshot(_ w: WindowList.Window, _ mode: ShotMode, above row: NSRect? = nil) {
         let name = "\(proc.name) window \(w.id)" + (w.shownTitle.map { " “\($0)”" } ?? "")
+        if mode == .show { ScreenshotWindow.requested = w.id }
         Task { @MainActor in
             do {
                 let img = try await WindowActions.screenshot(window: w.id)
                 actionNote = nil
                 switch mode {
-                case .show: ScreenshotWindow.show(img, title: name, windowID: w.id)
+                case .show:
+                    // Arrowing through rows starts captures that can finish out of order: show only the latest,
+                    // and nothing if the preview was closed meanwhile.
+                    guard ScreenshotWindow.requested == w.id else { return }
+                    ScreenshotWindow.show(img, title: name, windowID: w.id, above: row)
                 case .copy: try ScreenshotWindow.copy(img)
                 case .save: try ScreenshotWindow.save(img, name: name)
                 }
@@ -282,14 +295,21 @@ final class ScreenshotWindow: NSObject, NSWindowDelegate {
 
     /// Whether the preview of `id` is the one on screen.
     static func isShowing(_ id: CGWindowID) -> Bool { current?.windowID == id && current?.panel.isVisible == true }
+    static var isOpen: Bool { current?.panel.isVisible == true }
 
-    static func close() { current?.panel.close() }
+    static func close() { requested = nil; current?.panel.close() }
+    /// The window whose preview was asked for last.
+    static var requested: CGWindowID?
 
-    static func show(_ image: CGImage, title: String, windowID: CGWindowID) {
-        // Replacing a preview keeps its place on screen.
+    /// `row`: the table row's frame on screen; the panel sits centered just above it (below, if there's no room).
+    /// Without one (from the menu), a replacement keeps the previous panel's place.
+    static func show(_ image: CGImage, title: String, windowID: CGWindowID, above row: NSRect? = nil) {
         let previous = current?.panel.frame
+        // Replaced, not closed by the user: a capture still on its way for a later row must still show.
+        current?.panel.delegate = nil
         current?.panel.close()
         let c = ScreenshotWindow(image, title: title, windowID: windowID, near: previous)
+        if let row, row.width > 0 { c.place(above: row) }
         current = c
         c.panel.orderFront(nil)
     }
@@ -387,10 +407,22 @@ final class ScreenshotWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    private func place(above row: NSRect) {
+        let size = panel.frame.size
+        let gap: CGFloat = 4
+        let screen = (NSScreen.screens.first { $0.frame.intersects(row) } ?? NSScreen.main)?.visibleFrame ?? .zero
+        var origin = NSPoint(x: row.midX - size.width / 2, y: row.maxY + gap)
+        // No room above (a row near the top of the screen): just below it instead.
+        if origin.y + size.height > screen.maxY { origin.y = row.minY - gap - size.height }
+        origin.x = min(max(origin.x, screen.minX), screen.maxX - size.width)
+        origin.y = min(max(origin.y, screen.minY), screen.maxY - size.height)
+        panel.setFrameOrigin(origin)
+    }
+
     @objc private func copyImage() { try? Self.copy(image) }
     @objc private func saveImage() { try? Self.save(image, name: name) }
 
     func windowWillClose(_ notification: Notification) {
-        if Self.current === self { Self.current = nil }
+        if Self.current === self { Self.current = nil; Self.requested = nil }
     }
 }

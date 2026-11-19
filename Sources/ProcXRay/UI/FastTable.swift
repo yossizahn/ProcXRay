@@ -36,8 +36,11 @@ struct FastTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
     var initialSort: (String, ascending: Bool)
     var menu: (([Row]) -> [FastMenuItem])? = nil
     var onOpen: ((Row) -> Void)? = nil
-    /// Space with a row selected (the first selected row), as Finder's Quick Look; nil leaves Space to the table.
-    var onSpace: ((Row) -> Void)? = nil
+    /// Space with a row selected (the first selected row, with its frame on screen), as Finder's Quick Look; nil
+    /// leaves Space to the table.
+    var onSpace: ((Row, _ rowOnScreen: NSRect) -> Void)? = nil
+    /// The selection moved to a single row (with its frame on screen): for a preview that follows it.
+    var onSelect: ((Row, _ rowOnScreen: NSRect) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -155,8 +158,21 @@ struct FastTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
         /// Whether Space was handled.
         func space() -> Bool {
             guard let table, let onSpace = parent.onSpace, let i = table.selectedRowIndexes.first, i < shown.count else { return false }
-            onSpace(shown[i])
+            onSpace(shown[i], screenRect(ofRow: i, in: table))
             return true
+        }
+
+        /// The row's visible part, in screen coordinates: what a popup over the row lines up with.
+        private func screenRect(ofRow i: Int, in table: NSTableView) -> NSRect {
+            table.scrollRowToVisible(i)
+            let inTable = table.rect(ofRow: i).intersection(table.visibleRect)
+            return table.window.map { $0.convertToScreen(table.convert(inTable, to: nil)) } ?? .zero
+        }
+
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            guard let table, let onSelect = parent.onSelect, table.selectedRowIndexes.count == 1,
+                  let i = table.selectedRowIndexes.first, i < shown.count else { return }
+            onSelect(shown[i], screenRect(ofRow: i, in: table))
         }
 
         @objc func doubleClicked() {
