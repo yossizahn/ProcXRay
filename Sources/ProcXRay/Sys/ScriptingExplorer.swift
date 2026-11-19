@@ -203,6 +203,10 @@ enum ScriptingExplorer {
         /// The value is another object: it can be explored.
         var reference: NSAppleEventDescriptor?
         var failed = false
+        /// The value as the app sent it, for showing it by kind (Shown).
+        var descriptor: NSAppleEventDescriptor?
+        /// The property's type in the dictionary ("text", "RGB color", "list of file").
+        var type = ""
     }
     struct ElementKind {
         var name: String
@@ -234,7 +238,7 @@ enum ScriptingExplorer {
                 guard let v = rec.atIndex(i) else { continue }
                 if key == fcc("pcls"), v.descriptorType == typeType, model.classInfo(v.typeCodeValue) != nil { known = v.typeCodeValue }
                 out.properties.append(Value(name: model.propertyName(key), code: key, text: describe(v, model),
-                                            reference: v.descriptorType == typeObjectSpecifier ? v : nil))
+                                            reference: v.descriptorType == typeObjectSpecifier ? v : nil, descriptor: v))
             }
             // In the dictionary's order, not the reply's.
             if let c = known, let info = model.classInfo(c) {
@@ -252,7 +256,7 @@ enum ScriptingExplorer {
                 case .success(let v):
                     if p.code == fcc("pcls"), v.descriptorType == typeType, model.classInfo(v.typeCodeValue) != nil { known = v.typeCodeValue }
                     out.properties.append(Value(name: p.name, code: p.code, text: describe(v, model),
-                                                reference: v.descriptorType == typeObjectSpecifier ? v : nil))
+                                                reference: v.descriptorType == typeObjectSpecifier ? v : nil, descriptor: v))
                 case .failure(let f):
                     out.properties.append(Value(name: p.name, code: p.code, text: f.text, failed: true))
                 }
@@ -260,6 +264,10 @@ enum ScriptingExplorer {
         }
         out.classCode = known
         out.className = known.map(model.className)
+        if let info = known.flatMap({ model.classInfo($0) }) {
+            let types = Dictionary(info.properties.map { ($0.code, $0.type) }, uniquingKeysWith: { a, _ in a })
+            for i in out.properties.indices { out.properties[i].type = types[out.properties[i].code] ?? "" }
+        }
         for e in known.flatMap({ model.classInfo($0) })?.elements ?? [] {
             out.elements.append(ElementKind(name: e.name, plural: e.plural, code: e.code, count: count(pid, spec, e.code)))
         }
@@ -381,6 +389,79 @@ enum ScriptingExplorer {
         }
         guard let from = r.forKeyword(AEKeyword(keyAEContainer)), from.descriptorType != fcc("ccnt") else { return head }
         return head + " of " + reference(from, m)
+    }
+}
+
+// MARK: - Values by kind, for the explorer's property view
+
+extension ScriptingExplorer {
+    /// A reply value, sorted by what it is so the explorer can show each kind its own way.
+    indirect enum Shown {
+        case text(String)
+        case number(String)
+        case bool(Bool)
+        case date(Date)
+        /// An enumerator or a class name: `icon view`, `Finder window`.
+        case constant(String)
+        /// Another object: its AppleScript reference, and the specifier to explore it.
+        case reference(String, NSAppleEventDescriptor)
+        case file(String)
+        case missing
+        /// An "RGB color": 16-bit components scaled to 0…1, with the values as sent.
+        case color(r: Double, g: Double, b: Double, raw: String)
+        case list([Shown], more: Int)
+        case record([(String, Shown)])
+        /// Points and rectangles: `{421, 136}`.
+        case geometry(String)
+        case other(String)
+        case error(String)
+    }
+
+    static func shown(_ v: Value, _ m: Model) -> Shown {
+        if v.failed { return .error(v.text) }
+        guard let d = v.descriptor else { return .other(v.text) }
+        return shown(d, m, type: v.type)
+    }
+
+    static func shown(_ d: NSAppleEventDescriptor, _ m: Model, type: String = "", depth: Int = 0) -> Shown {
+        let t = d.descriptorType
+        switch t {
+        case typeNull: return .missing
+        case typeUnicodeText, typeUTF8Text, fcc("TEXT"), typeUTF16ExternalRepresentation, typeStyledText, fcc("intl"):
+            return .text(d.stringValue ?? "")
+        case typeTrue: return .bool(true)
+        case typeFalse: return .bool(false)
+        case typeBoolean: return .bool(d.booleanValue)
+        case typeSInt16, typeSInt32, typeUInt16, typeUInt32, typeSInt64, typeUInt64, typeIEEE32BitFloatingPoint, typeIEEE64BitFloatingPoint:
+            return .number(describe(d, m))
+        case typeLongDateTime: return d.dateValue.map { .date($0) } ?? .other(describe(d, m))
+        case typeType: return d.typeCodeValue == fcc("msng") ? .missing : .constant(m.className(d.typeCodeValue))
+        case typeEnumerated: return .constant(m.constantName(d.enumCodeValue))
+        case typeObjectSpecifier: return .reference(reference(d, m), d)
+        case typeFileURL, typeAlias, fcc("bmrk"), fcc("fsrf"), fcc("fss "):
+            return d.fileURLValue.map { .file($0.path) } ?? .other(describe(d, m))
+        case fcc("QDpt"), fcc("qdrt"): return .geometry(describe(d, m))
+        case typeAEList:
+            let n = d.numberOfItems
+            let items = (0..<min(n, 50)).compactMap { d.atIndex($0 + 1) }
+            // An RGB color: three 16-bit numbers, in a property the dictionary calls a color.
+            if type.lowercased().contains("color"), items.count == 3 || items.count == 4,
+               items.allSatisfy({ [typeSInt16, typeSInt32, typeUInt16, typeUInt32, typeIEEE64BitFloatingPoint].contains($0.descriptorType) }) {
+                let c = items.prefix(3).map { $0.coerce(toDescriptorType: typeIEEE64BitFloatingPoint)?.doubleValue ?? 0 }
+                let scale = (c.max() ?? 0) > 255 ? 65535.0 : 255.0
+                return .color(r: c[0] / scale, g: c[1] / scale, b: c[2] / scale, raw: describe(d, m))
+            }
+            if depth > 3 { return .other(describe(d, m)) }
+            return .list(items.map { shown($0, m, depth: depth + 1) }, more: max(0, n - items.count))
+        default:
+            if d.isRecordDescriptor || t == typeAERecord {
+                if depth > 3 { return .other(describe(d, m)) }
+                return .record((0..<min(d.numberOfItems, 50)).compactMap { i in
+                    d.atIndex(i + 1).map { (m.propertyName(d.keywordForDescriptor(at: i + 1)), shown($0, m, depth: depth + 1)) }
+                })
+            }
+            return .other(describe(d, m))
+        }
     }
 }
 

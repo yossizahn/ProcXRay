@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import SwiftUI
 
 /// A running app's AppleScript objects, explored live: an outline from `application` down through its
 /// elements (windows, documents, disks…) and the objects its properties point to, with the selected object's
@@ -28,9 +29,16 @@ final class ScriptingExplorerWindow: NSWindowController, NSWindowDelegate {
         later(3) { ctl.expandForTest(level: 0) }
         later(6) { ctl.expandForTest(level: 1) }
         later(9) {
-            guard let v = c.window?.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
-            v.cacheDisplay(in: v.bounds, to: rep)
-            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+            // A real capture of the window (SwiftUI doesn't draw into cacheDisplay); needs Screen Recording.
+            guard let id = c.window?.windowNumber else { return }
+            Task {
+                do {
+                    let img = try await WindowActions.screenshot(window: CGWindowID(id))
+                    try WindowActions.png(img)?.write(to: URL(fileURLWithPath: path))
+                } catch {
+                    try? "\(error)".write(toFile: path + ".error", atomically: true, encoding: .utf8)
+                }
+            }
         }
     }
 
@@ -84,7 +92,7 @@ final class ExplorerController: NSViewController, NSOutlineViewDataSource, NSOut
     private let queue: DispatchQueue
     private var root: ObjectNode
     private let outline = NSOutlineView()
-    private let detail = NSTextView()
+    private let detail = ObjectDetailModel()
     private let status = NSTextField(wrappingLabelWithString: "Checking permission…")
     private let action = NSButton(title: "", target: nil, action: nil)
     private var permission: ScriptingExplorer.Permission?
@@ -116,16 +124,16 @@ final class ExplorerController: NSViewController, NSOutlineViewDataSource, NSOut
         left.hasVerticalScroller = true
         left.hasHorizontalScroller = true
 
-        detail.isEditable = false
-        detail.isSelectable = true
-        detail.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        detail.textContainerInset = NSSize(width: 8, height: 8)
-        detail.isVerticallyResizable = true
-        detail.autoresizingMask = [.width]
-        detail.string = "Select an object to see its properties. Right-click to copy its reference."
-        let right = NSScrollView()
-        right.documentView = detail
-        right.hasVerticalScroller = true
+        detail.follow = { [weak self] name in self?.openChild { $0.kind == .object && $0.title == name } }
+        detail.openElements = { [weak self] code in self?.openChild { $0.kind == .elements && $0.elementCode == code } }
+        detail.readMore = { [weak self] in
+            guard let self, let g = self.outline.item(atRow: self.outline.selectedRow) as? ObjectNode, g.kind == .elements else { return }
+            self.outline.expandItem(g)
+            self.loadPage(g)
+        }
+        let right = NSHostingView(rootView: ObjectDetailView(model: detail))
+        // Its content's size must not size the window: the pane scrolls on its own.
+        right.sizingOptions = []
 
         let reload = NSButton(title: "Reload", target: self, action: #selector(reloadAll))
         reload.bezelStyle = .accessoryBarAction
@@ -300,6 +308,18 @@ final class ExplorerController: NSViewController, NSOutlineViewDataSource, NSOut
         if list.isEmpty { list.append(ObjectNode(.note, spec: g.spec, title: "None.", subtitle: "")) }
         g.children = list
         outline.reloadItem(g, reloadChildren: true)
+        if outline.item(atRow: outline.selectedRow) as? ObjectNode === g { showDetail(g) }
+    }
+
+    /// Selects a row under the selected object (a property's object, or a kind of element), expanding it.
+    private func openChild(_ match: (ObjectNode) -> Bool) {
+        guard let n = outline.item(atRow: outline.selectedRow) as? ObjectNode, let child = n.children?.first(where: match) else { return }
+        outline.expandItem(n)
+        let row = outline.row(forItem: child)
+        guard row >= 0 else { return }
+        outline.selectRowIndexes([row], byExtendingSelection: false)
+        outline.scrollRowToVisible(row)
+        if child.kind == .elements { outline.expandItem(child) }
     }
 
     private func failureText(_ f: ScriptingExplorer.Failure) -> String {
@@ -322,43 +342,36 @@ final class ExplorerController: NSViewController, NSOutlineViewDataSource, NSOut
     // MARK: Detail
 
     private func showDetail(_ n: ObjectNode) {
+        let ref = n.kind == .object && n === root ? "application \"\(name)\"" : ScriptingExplorer.reference(n.spec, model)
         switch n.kind {
         case .object:
-            var s = "Reference\n  " + (n === root ? "application \"\(name)\"" : ScriptingExplorer.reference(n.spec, model)) + "\n"
             guard let c = n.contents else {
-                detail.string = s + "\nReading…"
+                detail.content = .loading(reference: ref)
                 load(n)
                 return
             }
-            if let f = c.failure { detail.string = s + "\n" + failureText(f); return }
-            if let cl = c.className { s += "\nClass\n  \(cl)\n" }
-            if let note = c.propertiesNote { s += "\n\(note)\n" }
-            if !c.properties.isEmpty {
-                let w = min(28, c.properties.map(\.name.count).max() ?? 0)
-                s += "\nProperties\n"
-                for p in c.properties {
-                    s += "  " + p.name.padding(toLength: max(w, p.name.count), withPad: " ", startingAt: 0) + "  " + p.text + "\n"
-                }
-            }
-            if !c.elements.isEmpty {
-                s += "\nElements\n"
-                for e in c.elements {
-                    let v: String
+            if let f = c.failure { detail.content = .failed(reference: ref, failureText(f)); return }
+            detail.content = .object(.init(
+                reference: ref, className: c.className,
+                properties: c.properties.map { p in
+                    .init(name: p.name, type: p.type, shown: ScriptingExplorer.shown(p, model), text: p.text, followable: p.reference != nil)
+                },
+                elements: c.elements.map { e in
                     switch e.count {
-                    case .success(let k): v = "\(k)"
-                    case .failure(let f): v = f.text
+                    case .success(let k): .init(plural: e.plural, code: e.code, count: k)
+                    case .failure(let f): .init(plural: e.plural, code: e.code, count: nil, error: f.text)
                     }
-                    s += "  \(e.plural): \(v)\n"
-                }
-            }
-            detail.string = s
+                },
+                note: c.propertiesNote))
         case .elements:
-            detail.string = "every \(model.className(n.elementCode)) of " + ScriptingExplorer.reference(n.spec, model)
-                + "\n\n" + (n.total.map { "\($0) in all. Read \(ScriptingExplorer.pageSize) at a time." } ?? n.subtitle)
+            let read = (n.children ?? []).filter { $0.kind == .object }.count
+            let more = n.children?.contains { $0.kind == .more } ?? false
+            detail.content = .elements(title: n.title, reference: "every \(model.className(n.elementCode)) of \(ref)",
+                                       total: n.total, read: read, canReadMore: more)
         case .more:
             load(n)
         case .note:
-            detail.string = n.title
+            detail.content = .message(n.title)
         }
     }
 
