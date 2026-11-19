@@ -370,7 +370,7 @@ final class Store {
         // A dropped helper connection (helper died, disabled, replaced): re-probe right away rather than
         // keep showing it as running until the next probe.
         HelperClient.shared.onConnectionLost = { [weak self] in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.probeHelper() } }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.probeAfterConnectionLoss() } }
         }
         probeHelper()
         refresh()
@@ -429,6 +429,29 @@ final class Store {
     /// Only the latest probe may publish: an older one still in flight (up to 3 s) would otherwise
     /// overwrite a newer answer, e.g. "running" landing after Uninstall.
     @ObservationIgnored private var probeGen = 0
+
+    /// Re-probing on every lost connection can loop: the probe opens a connection, it drops, that probes
+    /// again. Each probe asks SMAppService for the status, and backgroundtaskmanagementd answers by
+    /// re-hashing the whole app binary (~18 MB, uncached), so the loop kept it at ~40% CPU. The first loss
+    /// after a quiet minute re-probes at once; repeated ones back off from 2 s to 60 s, one pending at a time.
+    @ObservationIgnored private var lossProbePending = false
+    @ObservationIgnored private var lastLossProbe = Date.distantPast
+    @ObservationIgnored private var lossBackoff: TimeInterval = 0
+
+    private func probeAfterConnectionLoss() {
+        guard !lossProbePending else { return }
+        lossProbePending = true
+        let since = Date().timeIntervalSince(lastLossProbe)
+        lossBackoff = since > 60 ? 0 : min(max(lossBackoff * 2, 2), 60)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, lossBackoff - since)) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.lossProbePending = false
+                self.lastLossProbe = Date()
+                self.probeHelper()
+            }
+        }
+    }
 
     func probeHelper() {
         probeGen &+= 1
