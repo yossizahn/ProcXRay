@@ -474,15 +474,20 @@ struct ProcessCommands: Commands {
             Divider()
             // kernel_task (pid 0): kill(0, …) would signal ProcXRay's own process group.
             let canSignal = (p?.pid ?? 0) > 0
-            Button("Terminate…") { signal(SIGTERM, "SIGTERM") }.disabled(!canSignal)
-            Button("Kill…") { signal(SIGKILL, "SIGKILL") }.disabled(!canSignal)
-            Button("Suspend") { signal(SIGSTOP, "SIGSTOP") }.disabled(!canSignal)
-            Button("Resume") { signal(SIGCONT, "SIGCONT") }.disabled(!canSignal)
+            let isApp = p?.lsAppName != nil
+            Button("Quit…") { signal(.quit) }.disabled(!canSignal || !isApp)
+            Menu("Send Signal") {
+                if isApp { Button(ProcSignal.quit.menuTitle) { signal(.quit) }; Divider() }
+                ForEach(ProcSignal.common) { s in Button(s.menuTitle) { signal(s) } }
+                Divider()
+                ForEach(ProcSignal.others) { s in Button(s.menuTitle) { signal(s) } }
+            }
+            .disabled(!canSignal)
         }
     }
 
-    private func signal(_ sig: Int32, _ label: String) {
-        if let t = target, let p = t.current(), p.pid > 0 { t.signal(p, sig, label) }
+    private func signal(_ s: ProcSignal) {
+        if let t = target, let p = t.current(), p.pid > 0 { t.signal(p, s) }
     }
 
     /// Switches the focused inspector to `t`, or opens an inspector on it.
@@ -507,7 +512,7 @@ struct ProcessTarget {
     /// Selects (or, in an inspector window, shows) another process.
     let select: (pid_t) -> Void
     /// Sends a signal, confirming the destructive ones first.
-    let signal: (ProcInfo, Int32, String) -> Void
+    let signal: (ProcInfo, ProcSignal) -> Void
 }
 
 /// Whether the Processes view shows the selected process in a pane below the list (off: inspector windows only).

@@ -589,18 +589,23 @@ struct ProcRow: View {
             Button("Copy PID") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("\(proc.pid)", forType: .string) }
             if running {
                 Divider()
-                Button("Quit (SIGTERM)…") { signal(SIGTERM, "Quit") }
-                Button("Force Quit (SIGKILL)…") { signal(SIGKILL, "Force Quit") }
+                if proc.isApp { Button("Quit…") { signal(.quit, "Quit") } }
+                Button(proc.isApp ? "Terminate (SIGTERM)…" : "Quit (SIGTERM)…") { signal(.unix(SIGTERM), proc.isApp ? "Terminate" : "Quit") }
+                Button("Force Quit (SIGKILL)…") { signal(.unix(SIGKILL), "Force Quit") }
             }
         }
     }
 
     private func inspect() { AppRouter.inspect(proc.ref, openWindow) }
 
-    private func signal(_ sig: Int32, _ verb: String) {
+    private func signal(_ sig: ProcSignal, _ verb: String) {
         let a = NSAlert()
         a.messageText = "\(verb) \(proc.name) (pid \(proc.pid))?"
-        a.informativeText = sig == SIGKILL ? "The process ends at once and loses anything unsaved." : "The process is asked to quit."
+        a.informativeText = switch sig {
+        case .quit: "The app is asked to quit, as ⌘Q does; it may ask to save first."
+        case .unix(SIGKILL): "The process ends at once and loses anything unsaved."
+        default: "The process is asked to quit."
+        }
         a.addButton(withTitle: verb)
         a.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
@@ -609,7 +614,14 @@ struct ProcRow: View {
         guard let live = Native.process(proc.pid), live.start.timeIntervalSince1970 == proc.start.timeIntervalSince1970 else {
             NSSound.beep(); return
         }
-        if kill(proc.pid, sig) != 0 {
+        if case .quit = sig {
+            if NSRunningApplication(processIdentifier: proc.pid)?.terminate() != true {
+                let e = NSAlert()
+                e.messageText = "Couldn't quit \(proc.name)"
+                e.informativeText = "It didn't accept the request to quit."
+                e.runModal()
+            }
+        } else if case .unix(let n) = sig, kill(proc.pid, n) != 0 {
             let e = NSAlert()
             e.messageText = "Couldn't \(verb.lowercased()) \(proc.name)"
             e.informativeText = errno == EPERM ? "It belongs to another user or is protected by macOS." : String(cString: strerror(errno))

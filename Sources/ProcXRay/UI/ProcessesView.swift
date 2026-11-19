@@ -57,7 +57,7 @@ struct ProcessesView: View {
     private var groupingChoice: Binding<Grouping> {
         Binding(get: { shownGrouping }, set: { grouping = $0; savedSort = "" })
     }
-    @State private var pendingSignal: (ProcInfo, Int32, String)?
+    @State private var pendingSignal: (ProcInfo, ProcSignal)?
     @State private var signalError: String?
     /// The pane's history. Kept here so hiding the pane doesn't lose it; this view never reads it.
     @State private var paneNav = InspectorNavigation()
@@ -90,9 +90,9 @@ struct ProcessesView: View {
                            selection: $selection, sort: sort, shownColumns: ColumnPrefs.parse(shownColumns),
                            scrollRequest: scrollRequest,
                            onOpen: { p in inspect(p) },
-                           onSignal: { p, sig, label in
-                               // Resume is harmless: send it at once. The rest are confirmed first.
-                               if sig == SIGCONT { send(sig, label, to: p) } else { pendingSignal = (p, sig, label) }
+                           onSignal: { p, s in
+                               // Resume and the ignored-by-default signals go at once; the rest are confirmed first.
+                               if s.isHarmless { send(s, to: p) } else { pendingSignal = (p, s) }
                            })
                 // Tree ↔ flat re-parents nearly every row; start from a fresh outline (all expanded).
                 .id(shownGrouping)
@@ -106,8 +106,8 @@ struct ProcessesView: View {
             current: { [store] in selectedPid.flatMap { store.procs[$0] } },
             inspect: hasProcessSelected ? { inspectSelected() } : nil,
             select: { pid in reveal(pid, tries: 0) },
-            signal: { p, sig, label in
-                if sig == SIGCONT { send(sig, label, to: p) } else { pendingSignal = (p, sig, label) }
+            signal: { p, s in
+                if s.isHarmless { send(s, to: p) } else { pendingSignal = (p, s) }
             }))
         .searchable(text: $search, placement: .toolbar, prompt: "name, pid, path, team, bundle, label…")
         .toolbar {
@@ -154,13 +154,7 @@ struct ProcessesView: View {
             oldChips = ""
         }
         .onChange(of: AppRouter.shared.reveal, initial: true) { _, r in if let r { reveal(r.pid, tries: 4) } }
-        .confirmationDialog(pendingSignal.map { "Send \($0.2) to \($0.0.name) (pid \($0.0.pid))?" } ?? "",
-                            isPresented: Binding(get: { pendingSignal != nil }, set: { if !$0 { pendingSignal = nil } })) {
-            Button(pendingSignal?.2 ?? "Send", role: .destructive) {
-                if let (p, sig, label) = pendingSignal { send(sig, label, to: p) }
-                pendingSignal = nil
-            }
-        }
+        .signalConfirmation($pendingSignal) { p, s in send(s, to: p) }
         .signalFailureAlert($signalError)
     }
 
@@ -180,10 +174,10 @@ struct ProcessesView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { reveal(pid, tries: tries - 1) }
     }
 
-    private func send(_ sig: Int32, _ label: String, to p: ProcInfo) {
-        if let err = store.send(sig, to: p) {
+    private func send(_ s: ProcSignal, to p: ProcInfo) {
+        if let err = store.send(s, to: p) {
             // Next turn of the run loop: the confirmation dialog is still being dismissed here.
-            let msg = "Couldn't send \(label) to \(p.name) (pid \(p.pid)).\n\n\(err)"
+            let msg = "Couldn't send \(s.label) to \(p.name) (pid \(p.pid)).\n\n\(err)"
             DispatchQueue.main.async { signalError = msg }
         }
         store.refresh()
@@ -191,6 +185,22 @@ struct ProcessesView: View {
 }
 
 extension View {
+    /// Asks before sending: "Send SIGTERM (15) to Safari (pid 123)?", or "Quit Safari (pid 123)?".
+    func signalConfirmation(_ pending: Binding<(ProcInfo, ProcSignal)?>, send: @escaping (ProcInfo, ProcSignal) -> Void) -> some View {
+        let title = pending.wrappedValue.map { p, s in
+            s == .quit ? "Quit \(p.name) (pid \(p.pid))?" : "Send \(s.label) to \(p.name) (pid \(p.pid))?"
+        }
+        return confirmationDialog(title ?? "", isPresented: Binding(get: { pending.wrappedValue != nil },
+                                                                   set: { if !$0 { pending.wrappedValue = nil } })) {
+            Button(pending.wrappedValue.map { $0.1 == .quit ? "Quit" : "Send \($0.1.name)" } ?? "Send", role: .destructive) {
+                if let (p, s) = pending.wrappedValue { send(p, s) }
+                pending.wrappedValue = nil
+            }
+        } message: {
+            if let s = pending.wrappedValue?.1 { Text(verbatim: s.detail.prefix(1).uppercased() + s.detail.dropFirst() + ".") }
+        }
+    }
+
     /// Says why a signal wasn't sent; a beep alone left people guessing whether anything happened.
     func signalFailureAlert(_ message: Binding<String?>) -> some View {
         alert("Signal not sent", isPresented: Binding(get: { message.wrappedValue != nil },
@@ -280,7 +290,7 @@ struct ProcessWindow: View {
     /// window forward, and a restored window comes back on it.
     @Binding var ref: ProcessRef?
     @State private var nav = InspectorNavigation()
-    @State private var pendingSignal: (ProcInfo, Int32, String)?
+    @State private var pendingSignal: (ProcInfo, ProcSignal)?
     @State private var signalError: String?
 
     var body: some View {
@@ -303,22 +313,16 @@ struct ProcessWindow: View {
             current: { [store] in nav.current.flatMap { store.live($0.proc) } },
             inspect: nil,
             select: { [store] pid in if let p = store.procs[pid] { nav.push(p) } },
-            signal: { p, sig, label in
-                if sig == SIGCONT { send(sig, label, to: p) } else { pendingSignal = (p, sig, label) }
+            signal: { p, s in
+                if s.isHarmless { send(s, to: p) } else { pendingSignal = (p, s) }
             }))
-        .confirmationDialog(pendingSignal.map { "Send \($0.2) to \($0.0.name) (pid \($0.0.pid))?" } ?? "",
-                            isPresented: Binding(get: { pendingSignal != nil }, set: { if !$0 { pendingSignal = nil } })) {
-            Button(pendingSignal?.2 ?? "Send", role: .destructive) {
-                if let (p, sig, label) = pendingSignal { send(sig, label, to: p) }
-                pendingSignal = nil
-            }
-        }
+        .signalConfirmation($pendingSignal) { p, s in send(s, to: p) }
         .signalFailureAlert($signalError)
     }
 
-    private func send(_ sig: Int32, _ label: String, to p: ProcInfo) {
-        if let err = store.send(sig, to: p) {
-            let msg = "Couldn't send \(label) to \(p.name) (pid \(p.pid)).\n\n\(err)"
+    private func send(_ s: ProcSignal, to p: ProcInfo) {
+        if let err = store.send(s, to: p) {
+            let msg = "Couldn't send \(s.label) to \(p.name) (pid \(p.pid)).\n\n\(err)"
             DispatchQueue.main.async { signalError = msg }
         }
         store.refresh()

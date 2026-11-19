@@ -1243,10 +1243,15 @@ final class Store {
     /// Signals `p` only if its pid still belongs to the same process (same start time): the pid may have
     /// been reused since the row or dialog showed it. Refuses pid <= 0: kill(0, …) signals ProcXRay's own
     /// process group and kill(-n, …) a whole group, never the kernel_task row the user clicked.
-    func send(_ sig: Int32, to p: ProcInfo) -> String? {
+    func send(_ s: ProcSignal, to p: ProcInfo) -> String? {
         guard p.pid > 0 else { return "pid \(p.pid) can't be signalled" }
         guard let live = Native.process(p.pid) else { return "process \(p.pid) has exited" }
         guard live.start == p.start else { return "pid \(p.pid) now belongs to a different process" }
+        guard case .unix(let sig) = s else {
+            // The quit Apple Event, as ⌘Q. `true` only means it was sent: the app may still ask to save or refuse.
+            guard let app = NSRunningApplication(processIdentifier: p.pid) else { return "\(p.name) isn't an app that can be asked to quit." }
+            return app.terminate() ? nil : "\(p.name) didn't accept the request to quit."
+        }
         guard kill(p.pid, sig) != 0 else { return nil }
         let e = errno
         return e == EPERM ? "Operation not permitted: the process belongs to another user or is protected by macOS."
