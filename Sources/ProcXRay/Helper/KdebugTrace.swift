@@ -189,12 +189,24 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         defer { buf.deallocate() }
         var failure: String?
         var last = false
+        var settleFrom: UInt64?
+        var emptyReads = 0
         while true {
             lock.lock(); let stopping = stopRequested; lock.unlock()
             if stopping || mach_absolute_time() >= deadline {
-                // Stop logging, then drain what is left.
-                _ = Self.op(Self.KERN_KDENABLE, 0)
-                last = true
+                // The kernel hands over the newest events only on a later read while tracing is still on: a read after
+                // KDENABLE 0 left out the last ~10–100 ms (a short program's end: its writes and exit, seen with `ls -l`
+                // launched and traced, stopped once it exited). So keep reading for 150 ms, then until two reads in a
+                // row come back empty (500 ms at most), and only then stop logging and drain.
+                let now = mach_absolute_time()
+                if settleFrom == nil { settleFrom = now }
+                let settled = (now - settleFrom!) * numer / denom / 1_000_000
+                if settled < 500 && (settled < 150 || emptyReads < 2) {
+                    usleep(20_000)
+                } else {
+                    _ = Self.op(Self.KERN_KDENABLE, 0)
+                    last = true
+                }
             } else {
                 var ms = Self.waitMs
                 _ = Self.call([CTL_KERN, KERN_KDEBUG, Self.KERN_KDBUFWAIT], nil, &ms)
@@ -205,6 +217,7 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
                 break
             }
             if n > 0 { take(buf, n) }
+            emptyReads = n == 0 ? emptyReads + 1 : 0
             if last { break }
         }
         Self.cleanUp()
