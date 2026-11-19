@@ -114,7 +114,7 @@ final class CounterBrowser {
     private func load() {
         loading = true
         let engine = CounterEngine.shared
-        engine.queue.async {
+        engine.queue.async { [weak self] in
             let g = engine.catalog()
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -133,7 +133,7 @@ final class CounterBrowser {
         guard !discovering, !groups.isEmpty else { return }
         discovering = true
         let engine = CounterEngine.shared
-        engine.queue.async {
+        engine.queue.async { [weak self] in
             let a = engine.read(nil)
             Thread.sleep(forTimeInterval: 1.5)
             let b = engine.read(nil)
@@ -154,7 +154,7 @@ final class CounterBrowser {
         guard !want.isEmpty else { return }
         reading = true
         let engine = CounterEngine.shared
-        engine.queue.async {
+        engine.queue.async { [weak self] in
             let t = DispatchTime.now().uptimeNanoseconds
             let r = engine.read(want)
             let ms = Double(DispatchTime.now().uptimeNanoseconds - t) / 1e6

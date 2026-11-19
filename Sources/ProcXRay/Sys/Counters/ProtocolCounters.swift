@@ -16,10 +16,11 @@ final class ProtocolCounters: CounterSource {
         var v = blank
         if let raw {
             guard raw.count == MemoryLayout<T>.size else { return [] }
-            withUnsafeMutableBytes(of: &v) { raw.copyBytes(to: $0) }
+            withUnsafeMutableBytes(of: &v) { _ = raw.copyBytes(to: $0) }
         } else {
             var len = MemoryLayout<T>.size
-            guard sysctlbyname(name, &v, &len, nil, 0) == 0, len == MemoryLayout<T>.size else { return [] }
+            let rc = withUnsafeMutableBytes(of: &v) { sysctlbyname(name, $0.baseAddress, &len, nil, 0) }
+            guard rc == 0, len == MemoryLayout<T>.size else { return [] }
         }
         return fields(v)
     }

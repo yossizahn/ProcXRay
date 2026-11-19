@@ -138,7 +138,7 @@ final class SystemOverview {
         if catalog.isEmpty && !loading {
             loading = true
             let engine = CounterEngine.shared
-            engine.queue.async {
+            engine.queue.async { [weak self] in
                 let g = engine.catalog()
                 Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -169,7 +169,7 @@ final class SystemOverview {
         let want = Dashboards.groups(for: tab, in: catalog)
         reading = true
         let engine = CounterEngine.shared
-        engine.queue.async {
+        engine.queue.async { [weak self] in
             let t = DispatchTime.now().uptimeNanoseconds
             let r = engine.read(want)
             let extras = OverviewExtras.read(for: tab)
@@ -230,7 +230,7 @@ final class SystemOverview {
 
     /// The metric whose busiest app explains a tile: CPU for CPU, power and heat, and the obvious one elsewhere.
     static func leaderMetric(for id: String) -> AmbientMetric {
-        switch id.prefix { $0 != "." } {
+        switch id.prefix(while: { $0 != "." }) {
         case "mem": .memory
         case "st": .disk
         case "net": .network
