@@ -60,6 +60,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <!-- Shown in the consent prompt the first time the Automation tab's object explorer talks to an app. -->
+  <key>NSAppleEventsUsageDescription</key><string>Proc X-Ray reads the objects an app offers to AppleScript (its windows, documents and their properties) when you explore them in the Automation tab.</string>
   <!-- The binary inspector: offered in Open With and for Dock drops, never the default app (Alternate). -->
   <key>CFBundleDocumentTypes</key>
   <array>
@@ -113,7 +115,18 @@ fi
 # Nested code is signed before the bundle that seals it.
 codesign --force --options runtime --timestamp=none --identifier "$BUNDLE_ID.exec" --sign "$SIGN_ID" "$APP/Contents/MacOS/pxr-exec"
 # --identifier: the helper derives its mach service and plist name from this (HelperConfig.bundleID).
-codesign --force --options runtime --timestamp=none --identifier "$BUNDLE_ID" --sign "$SIGN_ID" "$APP"
+# The hardened runtime blocks sending Apple Events without this entitlement (the Automation tab's explorer).
+ENTITLEMENTS="$(dirname "$APP")/ProcXRay.entitlements"
+cat > "$ENTITLEMENTS" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.automation.apple-events</key><true/>
+</dict>
+</plist>
+PLIST
+codesign --force --options runtime --timestamp=none --identifier "$BUNDLE_ID" --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$APP"
 codesign -dv "$APP" 2>&1 | grep -E 'Identifier|TeamIdentifier|Authority=Apple Development' || true
 echo "built $APP"
 

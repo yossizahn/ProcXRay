@@ -69,7 +69,7 @@ Labels follow "friendly phrase (Term)", e.g. "Opens the app when run (openAppWhe
 Phase 1 is built: `AutomationTab.swift`, `ScriptingDictionary.swift`, `AppIntentsInfo.swift`. `ProcXRay --automation <app>… [-v]` prints what the tab reads, with timings: 3–18 ms for a dictionary, 20–170 ms for the index and bundle files. Parameter types in the bundle JSON are numbered primitives; the names, inferred from the parameters that use them, are 0 String, 1 Bool, 2 Int, 7 Double, 8 Date, 10 Placemark, 11 URL, 12 AttributedString (and `intents` 12, IntentFile).
 
 1. Static only, no permissions: sdef parsing and the dictionary outline, the tools database with the bundle-file fallback, and SiriKit intents.
-2. Live object explorer over Apple Events, with the Automation permission flow.
+2. Live object explorer over Apple Events, with the Automation permission flow. Built: `ScriptingExplorer.swift` (events, specifiers, values), `ScriptingExplorerWindow.swift` (the outline), opened by Explore Live Objects… in the tab. `ProcXRay --explore <pid> [depth]` walks it without the UI. Measured in pxr-dev on Finder, TextEdit and Reminders: `count` takes the container with the class in `kocl` (Finder refuses an every-specifier with -1700), so the reader tries that first and falls back. Finder reports its own class as `null` in `properties`, so a reported class the dictionary doesn't have is ignored. Reminders answers -1743 even with Automation allowed until the sender also has Reminders access (kTCCServiceReminders). Points and rectangles in replies are in host byte order.
 3. Menu keyboard shortcuts from Accessibility, and the user's shortcuts that use the app.
 
 ## Open questions

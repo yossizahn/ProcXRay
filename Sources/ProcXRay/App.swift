@@ -6,6 +6,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppActivation.install()
         AmbientMonitor.shared.update()
         if !AmbientPrefs.launchesHidden { NSApp.activate(ignoringOtherApps: true) }
+        // PROCXRAY_EXPLORE=<pid>: open the AppleScript object explorer for that app at launch, for testing it
+        // in the VM, where nothing can click (AGENTS.md).
+        if let v = ProcessInfo.processInfo.environment["PROCXRAY_EXPLORE"], let pid = pid_t(v),
+           let path = Native.path(pid), let r = path.range(of: ".app/", options: .backwards) {
+            let app = String(path[..<r.lowerBound]) + ".app"
+            if case .dictionary(let d) = ScriptingDictionary.read(bundle: app) {
+                let name = ((app as NSString).lastPathComponent as NSString).deletingPathExtension
+                MainActor.assumeIsolated {
+                    ScriptingExplorerWindow.show(pid: pid, name: name, dictionary: d)
+                    // PROCXRAY_EXPLORE_PNG=<file>: then expand a little and render the window there (the VM is headless).
+                    if let png = ProcessInfo.processInfo.environment["PROCXRAY_EXPLORE_PNG"] { ScriptingExplorerWindow.snapshot(pid: pid, to: png) }
+                }
+            }
+        }
     }
     /// A Dock click (or opening the app again) with no window open. SwiftUI opens one itself, except when the
     /// main scene's launch is suppressed ("Start in the menu bar"): then it does nothing, so open it here.
@@ -126,6 +140,10 @@ struct ProcXRayApp: App {
         }
         if let i = CommandLine.arguments.firstIndex(of: "--trust-layout"), i + 1 < CommandLine.arguments.count {
             Bench.trustLayout(pid_t(CommandLine.arguments[i + 1]) ?? 0)
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--explore"), i + 1 < CommandLine.arguments.count {
+            Bench.explore(pid_t(CommandLine.arguments[i + 1]) ?? 0, depth: i + 2 < CommandLine.arguments.count ? Int(CommandLine.arguments[i + 2]) ?? 2 : 2)
             exit(0)
         }
         if let i = CommandLine.arguments.firstIndex(of: "--automation"), i + 1 < CommandLine.arguments.count {

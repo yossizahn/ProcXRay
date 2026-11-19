@@ -1215,3 +1215,42 @@ extension Bench {
         }
     }
 }
+
+extension Bench {
+    /// `--explore <pid> [depth]`: the live object explorer without the UI. Walks the app's objects from
+    /// `application` down `depth` levels, the first 3 elements of each kind, printing properties, element
+    /// counts and the references the app returns, with each level's time.
+    static func explore(_ pid: pid_t, depth: Int) {
+        guard let path = Native.path(pid), let r = path.range(of: ".app/", options: .backwards) else { print("pid \(pid): not an app"); return }
+        let app = String(path[..<r.lowerBound]) + ".app"
+        guard case .dictionary(let d) = ScriptingDictionary.read(bundle: app) else { print("\(app): no scripting dictionary"); return }
+        let name = ((app as NSString).lastPathComponent as NSString).deletingPathExtension
+        let m = ScriptingExplorer.Model(d, appName: name)
+        print("permission: \(ScriptingExplorer.permission(pid, ask: false))")
+        func walk(_ spec: NSAppleEventDescriptor, _ level: Int) {
+            let pad = String(repeating: "  ", count: level)
+            let t0 = Date()
+            let c = ScriptingExplorer.contents(pid, spec, model: m)
+            print("\(pad)\(ScriptingExplorer.reference(spec, m))  [\(c.className ?? "?")]  \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
+            if let f = c.failure { print("\(pad)  ! \(f.text)"); return }
+            if let n = c.propertiesNote { print("\(pad)  ! \(n)") }
+            for p in c.properties.prefix(12) { print("\(pad)  .\(p.name) = \(p.text.prefix(100))\(p.reference != nil ? "  →" : "")") }
+            if c.properties.count > 12 { print("\(pad)  … \(c.properties.count - 12) more properties") }
+            for e in c.elements {
+                switch e.count {
+                case .success(let n):
+                    print("\(pad)  \(e.plural): \(n)")
+                    guard n > 0, level < depth else { continue }
+                    let kids = ScriptingExplorer.children(pid, spec, e.code, from: 1, upTo: min(n, 3))
+                    for k in kids {
+                        if let f = k.failure { print("\(pad)    [\(k.index)] \(f.text)"); continue }
+                        print("\(pad)    [\(k.index)] \(k.name.map { "“\($0)” " } ?? "")\(ScriptingExplorer.reference(k.spec, m))")
+                    }
+                    if let first = kids.first(where: { $0.failure == nil }) { walk(first.spec, level + 2) }
+                case .failure(let f): print("\(pad)  \(e.plural): \(f.text)")
+                }
+            }
+        }
+        walk(ScriptingExplorer.application, 0)
+    }
+}

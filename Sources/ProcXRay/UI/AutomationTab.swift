@@ -7,6 +7,7 @@ import SwiftUI
 /// docs/automation-tab-proposal.md, phase 1.
 struct AutomationTab: View {
     let proc: ProcInfo
+    var exited = false
 
     struct Loaded: Sendable, Equatable {
         var bundle: String
@@ -49,7 +50,7 @@ struct AutomationTab: View {
                 ScrollView {
                     if let l {
                         LazyVStack(alignment: .leading, spacing: 10) {
-                            DictionaryCard(l: l, query: query, showHidden: showHidden)
+                            DictionaryCard(l: l, proc: proc, exited: exited, query: query, showHidden: showHidden)
                             IntentsCard(r: l.intents, bundle: bundle, query: query, showHidden: showHidden)
                             if !l.intents.siriKit.isEmpty || !l.intents.intentDefinitions.isEmpty {
                                 SiriKitCard(r: l.intents, bundle: bundle, query: query)
@@ -101,6 +102,8 @@ private struct Badge: View {
 
 private struct DictionaryCard: View {
     let l: AutomationTab.Loaded
+    let proc: ProcInfo
+    let exited: Bool
     let query: String
     let showHidden: Bool
 
@@ -122,6 +125,15 @@ private struct DictionaryCard: View {
                 Text("Apps without a dictionary still answer the standard events: open, print, quit, activate.")
                     .font(.callout).foregroundStyle(.secondary)
             case .dictionary(let s):
+                HStack(spacing: 8) {
+                    Button("Explore Live Objects…") {
+                        let name = ((l.bundle as NSString).lastPathComponent as NSString).deletingPathExtension
+                        ScriptingExplorerWindow.show(pid: proc.pid, name: name, dictionary: s)
+                    }
+                    .disabled(exited)
+                    Text(exited ? "The process has exited." : "Asks the running app for its windows, documents and other objects, and their properties, with Apple Events. macOS asks once for permission (Automation).")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
                 ForEach(s.suites.filter { showHidden || !$0.hidden }) { SuiteView(suite: $0, query: query, showHidden: showHidden) }
             }
         }
