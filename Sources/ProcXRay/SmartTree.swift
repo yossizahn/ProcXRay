@@ -4,6 +4,9 @@ import Foundation
 enum ProcCategory: Int, CaseIterable, Sendable {
     // Left behind first: it is a warning, starts open and is usually empty.
     case leftBehind, apps, backgroundApps, extensions, thirdPartyServices, systemInterface, systemServices, other
+    /// What runs in a login other than this app's: another user's GUI login, a switched-away one, SSH logins.
+    /// Last, so the other categories' row ids (from the raw value) stay as they were.
+    case otherLogins
 
     var title: String {
         switch self {
@@ -15,6 +18,7 @@ enum ProcCategory: Int, CaseIterable, Sendable {
         case .systemServices: "System services"
         case .other: "Other"
         case .leftBehind: "Left behind"
+        case .otherLogins: "Other logins"
         }
     }
 
@@ -28,6 +32,7 @@ enum ProcCategory: Int, CaseIterable, Sendable {
         case .systemServices: "gearshape.2"
         case .other: "questionmark.square.dashed"
         case .leftBehind: "exclamationmark.triangle.fill"
+        case .otherLogins: "person.2"
         }
     }
 
@@ -42,6 +47,7 @@ enum ProcCategory: Int, CaseIterable, Sendable {
         case .systemServices: "System service"
         case .other: "Other"
         case .leftBehind: "Left behind"
+        case .otherLogins: "Other login"
         }
     }
 
@@ -300,6 +306,12 @@ enum SmartTree {
             if !isExtension(p), let o = p.domainOwner, o != p.pid, procs[o] != nil { owner[p.pid] = o; continue }
             if p.ppid > 1, p.ppid != p.pid, procs[p.ppid] != nil { owner[p.pid] = p.ppid }        // 5
         }
+        // Where another login starts (an SSH login's sshd-session under sshd, a GUI login's agents under a
+        // daemon), the process heads a unit of its own, so that login's processes go under Other logins.
+        for (pid, o) in owner {
+            guard let s = procs[pid]?.session, s.isInteractive, !s.isOwn, procs[o]?.asid != s.asid else { continue }
+            owner[pid] = nil
+        }
         // Unit root of every process. A cycle (A owned by B, B by A) is broken at its lowest pid.
         var rootOf: [pid_t: pid_t] = [:]
         func root(_ start: pid_t) -> pid_t {
@@ -400,6 +412,7 @@ enum SmartTree {
         // Pass 2: categories.
         var byCategory: [ProcCategory: [(sub: String?, node: ProcNode)]] = [:]
         var ghosts: [Int: (title: String, tags: String, nodes: [ProcNode])] = [:]
+        var otherLogins: [Int32: (session: LoginSession, units: [(c: ProcCategory, node: ProcNode)])] = [:]
         for (r, ms) in members {
             let rp = procs[r]!
             let n = unitNode(r, ms)
@@ -408,7 +421,27 @@ enum SmartTree {
                 continue
             }
             let c = category(ofRoot: rp)
+            if let s = rp.session, s.isInteractive, !s.isOwn {
+                otherLogins[s.asid, default: (s, [])].units.append((c, n))
+                continue
+            }
             byCategory[c, default: []].append((subgroup(ofRoot: rp, in: c), n))
+        }
+        // One group per login, its units in the usual categories when they fall in more than one.
+        byCategory[.otherLogins] = otherLogins.values.sorted { $0.session.order < $1.session.order }.map { s, units in
+            let byCat = Dictionary(grouping: units, by: \.c)
+            let kids: [ProcNode] = byCat.count < 2 ? units.map(\.node) : ProcCategory.allCases.compactMap { c in
+                guard let es = byCat[c] else { return nil }
+                var g = ProcNode(id: groupID(.otherLogins, "\(s.asid)|\(c.rawValue)"), proc: nil, title: c.title, children: es.map(\.node))
+                g.kind = .group
+                g.category = c
+                g.fixedOrder = c.rawValue
+                return g
+            }
+            var g = ProcNode(id: groupID(.otherLogins, "\(s.asid)"), proc: nil, title: s.label, children: kids)
+            g.kind = .group
+            g.category = .otherLogins
+            return (nil, g)
         }
         if !ghosts.isEmpty {
             byCategory[.leftBehind] = ghosts.map { gid, g in

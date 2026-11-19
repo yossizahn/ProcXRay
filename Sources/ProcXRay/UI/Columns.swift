@@ -356,6 +356,18 @@ private let catalogue: [Column] = [
     // Execution
     Column(id: "user", title: "User", help: "User the process runs as.", source: "kinfo_proc uid; getpwuid",
            section: .execution, width: 70, rule: .same) { p, _ in .text(p.user) },
+    Column(id: "session", title: "Login session",
+           help: "The login the process belongs to: a GUI login (on screen, or switched away from), an SSH or terminal login, the boot session daemons run in, or a session launchd made for the job alone. Every process inherits its parent's.",
+           source: "task_info TASK_AUDIT_TOKEN; auditon A_GETSINFO_ADDR; State:/Users/ConsoleUser",
+           section: .execution, term: "audit session", needs: "helper, for other users' processes", width: 150, rule: .same) { p, _ in
+        guard let s = p.session else { return .unknown }
+        return .text(s.label, s.isInteractive ? .normal : .secondary)
+    },
+    Column(id: "sessionID", title: "Session ID", help: "Audit session id: processes with the same one are in the same session.",
+           source: "task_info TASK_AUDIT_TOKEN", section: .execution, term: "asid", needs: "helper, for other users' processes",
+           width: 70, numeric: true, rule: .uniform) { p, _ in
+        p.asid.map { .number(Double($0), String($0)) } ?? .unknown
+    },
     Column(id: "state", title: "State",
            help: "Not responding (the app is hung, as in Activity Monitor), stopped (by a signal such as SIGSTOP), zombie (exited, waiting for its parent) or starting. Empty for a normal live process.", source: "kinfo_proc p_stat; WindowServer (not responding)",
            section: .execution, groupNote: "a count per state", width: 76,

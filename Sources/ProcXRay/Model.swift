@@ -31,6 +31,10 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     }
 
     var responsible: pid_t?
+    /// Audit session id (asid), from the audit token: the user's own processes, others' through the helper.
+    var asid: Int32?
+    /// What that session is (LoginSessions.describe): which login the process belongs to.
+    var session: LoginSession?
     var coalition: UInt64?
     var jetsamCoalition: UInt64?
     var sandboxed: Bool?
@@ -190,10 +194,11 @@ enum Grouping: String, CaseIterable, Identifiable, Codable {
     case byDomain = "By launchd domain"
     case bySandbox = "By sandbox"
     case byArch = "By architecture"
+    case bySession = "By session"
     var id: String { rawValue }
     var label: String { self == .responsible ? "Responsible / parent tree" : rawValue }
     static let trees: [Grouping] = [.smart, .responsible, .flat]
-    static let pivots: [Grouping] = [.bySigner, .byUser, .byDomain, .bySandbox, .byArch]
+    static let pivots: [Grouping] = [.bySigner, .byUser, .bySession, .byDomain, .bySandbox, .byArch]
     /// The pivot's field name, for the submenu ("Signer").
     var pivotTitle: String {
         switch self {
@@ -202,6 +207,7 @@ enum Grouping: String, CaseIterable, Identifiable, Codable {
         case .byDomain: "launchd domain"
         case .bySandbox: "Sandbox"
         case .byArch: "Architecture"
+        case .bySession: "Login session"
         default: label
         }
     }
@@ -857,6 +863,7 @@ final class Store {
                 if let path = p.path { p.extensionPoint = ExtensionInfo.point(forExecutable: path) }
             }
             p.responsible = fixed?.responsible ?? Native.responsible(k.pid)
+            p.asid = fixed?.asid ?? LoginSessions.asid(k.pid)
             if let c = fixed?.coalition { p.coalition = c; p.jetsamCoalition = fixed?.jetsamCoalition }
             else if let c = Native.coalition(k.pid) { p.coalition = c.0; p.jetsamCoalition = c.1 }
             _ = p.fill(from: .read(k.pid))
@@ -895,6 +902,7 @@ final class Store {
                 // (task info and rusage can fail independently, and the helper's own entry may be empty.)
                 p.viaHelper = p.fill(from: m)
                 if p.responsible == nil { p.responsible = m.responsible }
+                if p.asid == nil { p.asid = m.asid }
             }
             let before = prev[p.key]
             // sandbox check is cheap but noisy for zombies. A process can enter a sandbox but never leave it, so
@@ -910,8 +918,12 @@ final class Store {
             samples[p.key] = sample
             built[i] = p
         }
+        let sessions = LoginSessions.describe(Set(built.lazy.compactMap(\.asid)))
         var out = [pid_t: ProcInfo](minimumCapacity: built.count)
-        for p in built { out[p.pid] = p }
+        for var p in built {
+            p.session = p.asid.flatMap { sessions[$0] }
+            out[p.pid] = p
+        }
         built = []
         if !domainHosts.isEmpty { applyDomainOwners(&out, domainHosts) }
         for pid in Responsiveness.unresponsive(out.values.lazy.filter { Responsiveness.isCandidate(lsType: $0.lsType) }.map(\.pid)) {
@@ -1070,7 +1082,7 @@ final class Store {
                                       subtitle: "app is gone; these outlived it", isGhost: true, children: kids))
             }
             roots += extra
-        case .bySigner, .byUser, .byDomain, .bySandbox, .byArch:
+        case .bySigner, .byUser, .bySession, .byDomain, .bySandbox, .byArch:
             roots = TreeExtras.pivot(grouping, all)
         }
         if grouping != .flat { TreeExtras.collapseIdentical(&roots) }
@@ -1303,12 +1315,14 @@ struct Sample: Sendable {
         var extensionPoint: String?
         var responsible: pid_t?
         var coalition, jetsamCoalition: UInt64?
+        /// Changes only through audit_session_join, which sshd and login call before they exec.
+        var asid: Int32?
     }
 
     init(_ p: ProcInfo, at: UInt64) {
         self.at = at
         fixed = Fixed(cdhash: p.cdhash, comm: p.comm, path: p.path, extensionPoint: p.extensionPoint, responsible: p.responsible,
-                      coalition: p.coalition, jetsamCoalition: p.jetsamCoalition)
+                      coalition: p.coalition, jetsamCoalition: p.jetsamCoalition, asid: p.asid)
         sandboxed = p.sandboxed
         cpu = p.cpuNanos; waiting = p.counters?.waitingNanos
         diskRead = p.diskRead; diskWrite = p.diskWrite; energy = p.energyNJ; wakeups = p.wakeups

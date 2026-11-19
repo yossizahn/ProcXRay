@@ -78,6 +78,8 @@ enum HelperDaemon {
                 if mayInspect(k.pid) { m.readExtras(extras); m.jetsam = jetsam?[k.pid] }
                 m.responsible = Native.responsible(k.pid)
                 m.sandboxed = Native.sandboxed(k.pid, start: k.start)
+                // Which login a process belongs to is no secret (`who` lists the logins): for every caller.
+                m.asid = LoginSessions.asid(k.pid)
                 out.append(m)
             }
             reply((try? JSONEncoder().encode(out)) ?? Data())

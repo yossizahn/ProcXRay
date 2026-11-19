@@ -145,7 +145,7 @@ enum Bench {
         }
     }
 
-    /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|stacks|powermetrics|counters> [pid] [--full]`:
+    /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|stacks|powermetrics|counters|sessions> [pid] [--full]`:
     /// one helper call from the shell, for testing the helper without the UI. Only this exact binary is accepted by the helper.
     /// The helper's trace path without XPC: start, read every 250 ms as the app does, decode, pair.
     static func trace(pid: Int32, seconds: Double, ktrace: Bool, activity: Bool = false, out: String?) {
@@ -269,6 +269,26 @@ enum Bench {
             }
             // Without a fresh authorization: refused.
             print("unauthorized: " + ((try? c.launch(r, authorization: Data(count: 32)).get()).map { "launched pid \($0.0.pid)!" } ?? "refused"))
+            return
+        }
+        if what == "sessions" {
+            // sessions: every process's login session (asid) from the helper, counted per session, with how many
+            // of them the app reads itself.
+            guard let m = c.allMetrics() else { print("no reply"); return }
+            let local = m.keys.filter { LoginSessions.asid($0) != nil }.count
+            let byID = Dictionary(grouping: m.values.compactMap(\.asid)) { $0 }.mapValues(\.count)
+            let d = LoginSessions.describe(Set(byID.keys))
+            print("\(m.count) processes, \(m.values.filter { $0.asid != nil }.count) with a session from the helper, \(local) read here; \(byID.count) sessions")
+            var perLabel: [String: (n: Int, sessions: Int, order: Double)] = [:]
+            for (a, n) in byID {
+                guard let s = d[a] else { continue }
+                let k = s.label + (s.isOwn ? " [this app]" : "")
+                let e = perLabel[k] ?? (0, 0, s.order)
+                perLabel[k] = (e.n + n, e.sessions + 1, min(e.order, s.order))
+            }
+            for (k, v) in perLabel.sorted(by: { $0.value.order < $1.value.order }) {
+                print("  \(k): \(v.n) processes" + (v.sessions > 1 ? " in \(v.sessions) sessions" : ""))
+            }
             return
         }
         if what == "jetsam" {

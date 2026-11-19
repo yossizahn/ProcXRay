@@ -61,6 +61,7 @@ enum TreeExtras {
         case .byDomain: p.launchdDomain.map { "launchd \($0) domain" } ?? "No launchd job of its own"
         case .bySandbox: p.sandboxed.map { $0 ? "Sandboxed" : "Not sandboxed" } ?? "Unknown"
         case .byArch: p.isTranslated ? "Intel (Rosetta)" : "Native"
+        case .bySession: p.session?.label ?? "Unknown session"
         default: nil
         }
     }
