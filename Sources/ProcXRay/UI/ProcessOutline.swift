@@ -688,7 +688,7 @@ struct ProcessOutline: NSViewRepresentable {
             menu.addItem(.separator())
             // No signals for kernel_task (pid 0): kill(0, …) would hit ProcXRay's own process group.
             if p.pid > 0 {
-                if p.lsAppName != nil { add("Quit") { parent.onSignal(p, .quit) } }
+                if p.lsAppName != nil { add("Quit (⌘Q)…") { parent.onSignal(p, .quit) } }
                 let signals = NSMenu()
                 ProcSignal.fill(signals, isApp: p.lsAppName != nil) { parent.onSignal(p, $0) }
                 let mi = NSMenuItem(title: "Send Signal", action: nil, keyEquivalent: "")

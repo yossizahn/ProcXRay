@@ -475,7 +475,7 @@ struct ProcessCommands: Commands {
             // kernel_task (pid 0): kill(0, …) would signal ProcXRay's own process group.
             let canSignal = (p?.pid ?? 0) > 0
             let isApp = p?.lsAppName != nil
-            Button("Quit…") { signal(.quit) }.disabled(!canSignal || !isApp)
+            Button("Quit (⌘Q)…") { signal(.quit) }.disabled(!canSignal || !isApp)
             Menu("Send Signal") {
                 if isApp { Button(ProcSignal.quit.menuTitle) { signal(.quit) }; Divider() }
                 ForEach(ProcSignal.common) { s in Button(s.menuTitle) { signal(s) } }

@@ -20,12 +20,12 @@ enum ProcSignal: Hashable, Identifiable {
     }
     /// Very terse: what it is, then what it does to a process that doesn't handle it.
     var detail: String {
-        guard case .unix(let n) = self else { return "as ⌘Q; the app may ask to save (Apple Event)" }
+        guard case .unix(let n) = self else { return "may ask to save first" }
         return Self.table[n]?.detail ?? ""
     }
     /// A menu row: "15  SIGTERM — ask to exit". Figure spaces keep one-digit numbers lined up.
     var menuTitle: String {
-        guard case .unix(let n) = self else { return "Quit — \(detail)" }
+        guard case .unix(let n) = self else { return "Quit (⌘Q) — \(detail)" }
         return (n < 10 ? "\u{2007}" : "") + "\(n)  \(name) — \(detail)"
     }
     /// For dialogs: "SIGTERM (15)", "Quit".

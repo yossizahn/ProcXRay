@@ -589,7 +589,7 @@ struct ProcRow: View {
             Button("Copy PID") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("\(proc.pid)", forType: .string) }
             if running {
                 Divider()
-                if proc.isApp { Button("Quit…") { signal(.quit, "Quit") } }
+                if proc.isApp { Button("Quit (⌘Q)…") { signal(.quit, "Quit") } }
                 Button(proc.isApp ? "Terminate (SIGTERM)…" : "Quit (SIGTERM)…") { signal(.unix(SIGTERM), proc.isApp ? "Terminate" : "Quit") }
                 Button("Force Quit (SIGKILL)…") { signal(.unix(SIGKILL), "Force Quit") }
             }
