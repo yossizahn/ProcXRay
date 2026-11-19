@@ -311,6 +311,7 @@ struct SyscallTraceView: View {
             } else if mode == "Activity" {
                 SyscallActivityView(groups: activities, threadNames: tracer.context.threadNames,
                                     filtered: !filter.isEmpty || errorsOnly, selection: $activitySelection)
+                if let r = selectedActivityStackRecord { Divider(); stackPane(r) }
             } else if mode == "Summary" {
                 summaryTable
             } else {
@@ -527,6 +528,15 @@ struct SyscallTraceView: View {
     }
 
     /// The one selected call, when it has a stack.
+    /// One call selected in Activity (a row under an activity or a thread), with a stack: shown under the outline
+    /// as in Calls.
+    private var selectedActivityStackRecord: SyscallRecord? {
+        guard activitySelection.count == 1, case .call(let gid, _, let id) = activitySelection.first,
+              let g = activities.first(where: { $0.id == gid }), let r = g.calls.first(where: { $0.id == id }),
+              !r.stack.isEmpty else { return nil }
+        return r
+    }
+
     private var selectedStackRecord: SyscallRecord? {
         guard selection.count == 1, let id = selection.first, let r = shown.first(where: { $0.id == id }), !r.stack.isEmpty else { return nil }
         return r

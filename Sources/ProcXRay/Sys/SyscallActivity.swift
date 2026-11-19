@@ -15,6 +15,7 @@ struct SyscallActivity: Identifiable, Sendable {
         case loadImage = "Load libraries", initializers = "Run initializers", openLibrary = "Open library (dlopen)"
         case closeLibrary = "Close library (dlclose)", symbol = "Look up symbols (dlsym)", address = "Find an address's library (dladdr)"
         case kernelCall = "Kernel call"
+        case dyldSetup = "Launch setup (dyld)", mainStarts = "main() starts"
         case waits = "Waits and event polls"
     }
 
@@ -133,6 +134,8 @@ struct SyscallActivity: Identifiable, Sendable {
                 if replyTime > 0 { parts.append("replies took " + SyscallTraceView.duration(replyTime)) }
             case .kernelCall:
                 if replyTime > 0 { parts.append("took " + SyscallTraceView.duration(replyTime)) }
+            case .mainStarts:
+                parts.append(first.resultText)
             default: break
             }
             if fd != nil {
@@ -165,7 +168,8 @@ struct SyscallActivity: Identifiable, Sendable {
     }
 
     /// dyld's work, from its trace events rather than syscalls (SyscallRecord.isLibraryCall).
-    static let libraryOperations: Set<Operation> = [.loadImage, .initializers, .openLibrary, .closeLibrary, .symbol, .address]
+    static let libraryOperations: Set<Operation> = [.loadImage, .initializers, .openLibrary, .closeLibrary, .symbol, .address,
+                                                     .dyldSetup]
 
     /// A descriptor's calls more than this far apart are separate activities: a log file kept open for the whole
     /// trace shows as its bursts of writes, not one activity at its open.
@@ -355,6 +359,8 @@ struct SyscallActivity: Identifiable, Sendable {
             }
         case .loadImage, .initializers, .address:
             return ""
+        case .dyldSetup, .mainStarts:
+            return r.paths.first ?? ""
         case .kernelCall:
             return r.kernelRoutine.map(MIGRoutines.name) ?? "Kernel routine unavailable"
         case .read, .write, .send, .receive, .connect, .listen, .accept:
@@ -420,6 +426,8 @@ struct SyscallActivity: Identifiable, Sendable {
         case "dlclose" where r.isLibraryCall: return (.closeLibrary, false)
         case "dlsym" where r.isLibraryCall: return (.symbol, false)
         case "dladdr" where r.isLibraryCall: return (.address, false)
+        case "dyld setup" where r.isLibraryCall: return (.dyldSetup, false)
+        case "main()" where r.isLibraryCall: return (.mainStarts, false)
         default: return nil
         }
     }

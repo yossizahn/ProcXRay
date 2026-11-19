@@ -269,6 +269,33 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertEqual(SyscallTracer.threadNames([5: "main thread"], [5: "loop"], main: 5), [5: "main thread, loop"])
     }
 
+    func testLaunchMarkers() {
+        // As traced in the VM: dyld starts (twice: it restarts from the shared cache), the launch begins with the
+        // main executable's header, its image load names it, the launch ends, main's first call follows.
+        var events = stringEvents("/tmp/hello", id: 0x70ac_0010, owner: 0x1f05_0000, ts: 1, thread: 7)
+        events += [
+            KdebugEvent(ts: 100, debugid: 0x1f07_0034, arg: [0, 0, 0, 0], thread: 7),
+            KdebugEvent(ts: 200, debugid: 0x1f07_0034, arg: [0, 0, 0, 0], thread: 7),
+            KdebugEvent(ts: 300, debugid: 0x1f07_0004 | 1, arg: [2, 0x1_00d0_c000, 0, 0], thread: 7),
+            KdebugEvent(ts: 400, debugid: 0x1f05_0000, arg: [1, 2, 0x1_00d0_c000, 0], thread: 7),
+            KdebugEvent(ts: 400, debugid: 0x1f05_0004, arg: [0, 0x70ac_0010, 0, 0], thread: 7),
+            KdebugEvent(ts: 1_500, debugid: 0x1f07_0004 | 2, arg: [2, 0, 0, 0], thread: 7),
+        ]
+        var dec = SyscallDecoder()
+        let recs = dec.feed(events)
+        XCTAssertEqual(recs.map(\.name), ["load image", "dyld setup", "main()"])
+        XCTAssertEqual(recs[1].start, 100)          // from dyld's first start
+        XCTAssertEqual(recs[1].duration, 1_400)
+        XCTAssertEqual(recs[1].paths, ["/tmp/hello"])
+        XCTAssertEqual(recs[2].start, 1_500)
+        XCTAssertTrue(recs[1].isLaunchMarker && recs[2].isLaunchMarker && !recs[0].isLaunchMarker)
+        XCTAssertEqual(SyscallSummaryRow.build(recs).map(\.name), ["load image"])
+        let groups = SyscallActivity.build(recs, filter: "", errorsOnly: false)
+        XCTAssertEqual(groups.map(\.operation), [.mainStarts, .loadImage, .dyldSetup])
+        XCTAssertEqual(groups[2].target, "/tmp/hello")
+        XCTAssertEqual(groups[0].detail, "the program's own code starts")
+    }
+
     func testPortKinds() {
         // lsmp's per-process records: a task port, an IOKit connection, a port the process receives on itself,
         // and a send right to another process's port.

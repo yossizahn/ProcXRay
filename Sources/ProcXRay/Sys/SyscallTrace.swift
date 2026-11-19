@@ -29,7 +29,10 @@ import Foundation
 //   dyld (0x1f), from dyld's Tracing.h, each a start/end pair with args[0] a sequence number shared by both:
 //            dlopen (0x08/0): [seq, path string id, mode] → [seq, handle]; dlclose (0x08/2): [seq, handle];
 //            dlsym (0x08/3): [seq, handle, symbol string id] → [seq, address]; dladdr (0x08/4): [seq, address];
-//            static initializer (0x07/0): [seq, image header, function]. Image loads (0x05/0 then 0x05/1, no pair):
+//            static initializer (0x07/0): [seq, image header, function]; launch (0x07/1, LAUNCH_EXECUTABLE):
+//            [seq, main executable's header], ending when dyld calls main (a test program's first call came 73 µs
+//            later); bootstrap (0x07/13, no pair) when dyld starts, twice when it restarts itself from the shared
+//            cache. Only a trace from a program's first instruction (Launch and Trace) has these. Image loads (0x05/0 then 0x05/1, no pair):
 //            [uuid, uuid, load address] then [_, path string id]. Checked with a test program in the VM (27.2).
 //   MIG (0xff): ipc_kobject_server logs each message a kernel object handles, start and end, on the sender's
 //            thread inside its mach_msg2_trap, with the routine's kobject filter index in the code bits (no args).
@@ -75,6 +78,8 @@ struct SyscallRecord: Identifiable, Sendable, Hashable {
     /// `number` of a dyld call (dlopen, dlsym…, from dyld's trace events): no syscall has it.
     static let libraryCall = -1
     var isLibraryCall: Bool { number == Self.libraryCall }
+    /// dyld's setup of a launched program and the moment main() starts: points in the launch, not calls.
+    var isLaunchMarker: Bool { isLibraryCall && (name == "dyld setup" || name == "main()") }
 
     // Display text, built once (off the main thread) so the table only reads strings.
     /// The first frame outside libsystem_kernel (the syscall stubs), symbolicated; empty without a stack.
@@ -312,6 +317,8 @@ struct SyscallDecoder: Sendable {
     private var images: [UInt64: String] = [:]
     private var handles: [UInt64: String] = [:]
     private var imageLoad: [UInt64: (ts: UInt64, header: UInt64)] = [:]
+    /// When dyld first started (DBG_DYLD_TIMING_BOOTSTRAP_START): the start of the launch's setup.
+    private var bootstrap: UInt64?
 
     init(stacks: Bool = false) { self.stacks = stacks }
 
@@ -494,7 +501,10 @@ struct SyscallDecoder: Sendable {
             r.resultText = "at 0x" + String(load.header, radix: 16)
             out.append(r)
             return
-        case (0x08, 0), (0x08, 2), (0x08, 3), (0x08, 4), (0x07, 0): break
+        case (0x07, 13):
+            if bootstrap == nil { bootstrap = e.ts }
+            return
+        case (0x08, 0), (0x08, 2), (0x08, 3), (0x08, 4), (0x07, 0), (0x07, 1): break
         default: return
         }
         guard let seq = a.first else { return }
@@ -504,6 +514,7 @@ struct SyscallDecoder: Sendable {
             case (0x08, 2): "dlclose"
             case (0x08, 3): "dlsym"
             case (0x08, 4): "dladdr"
+            case (0x07, 1): "dyld setup"
             default: "initializer"
             }
             var r = SyscallRecord(id: nextID, start: e.ts, end: nil, thread: e.thread, mach: false,
@@ -525,6 +536,9 @@ struct SyscallDecoder: Sendable {
                 r.argValues = [handleText(h), SyscallFormat.quote(a.count > 2 ? strings[a[2]] ?? "?" : "?")]
             case (0x08, 4):
                 r.argValues = [a.count > 1 ? "0x" + String(a[1], radix: 16) : "…"]
+            case (0x07, 1):
+                // From dyld's own start when seen: the whole of dyld's work before main.
+                if let b = bootstrap, b < e.ts { r.start = b }
             default:
                 let header = a.count > 1 ? a[1] : 0
                 if let p = images[header] { r.paths = [p] }
@@ -551,6 +565,23 @@ struct SyscallDecoder: Sendable {
             r.failed = v != 0
         case "dladdr":
             r.resultText = v == 0 ? "0 (not in an image)" : String(v)
+        case "dyld setup":
+            // The main executable's header was the start's argument; its path came with its image load since.
+            let header = r.args?.first ?? 0
+            let path = images[header]
+            if let path { r.paths = [path] }
+            r.argValues = [path.map(SyscallFormat.quote) ?? "image at 0x" + String(header, radix: 16)]
+            r.resultText = "done: main() starts"
+            out.append(r)
+            var m = SyscallRecord(id: nextID, start: e.ts, end: e.ts, thread: e.thread, mach: false,
+                                  number: SyscallRecord.libraryCall, name: "main()")
+            nextID += 1
+            m.args = []
+            m.paths = r.paths
+            m.argValues = []
+            m.resultText = "the program's own code starts"
+            out.append(m)
+            return
         default:
             r.resultText = "done"
         }
@@ -1261,7 +1292,7 @@ struct SyscallSummaryRow: Identifiable, Sendable {
 
     static func build(_ records: [SyscallRecord]) -> [SyscallSummaryRow] {
         var rows: [String: SyscallSummaryRow] = [:]
-        for r in records {
+        for r in records where !r.isLaunchMarker {
             var s = rows[r.name] ?? SyscallSummaryRow(name: r.name)
             s.calls += 1
             if r.failed { s.errors += 1 }
