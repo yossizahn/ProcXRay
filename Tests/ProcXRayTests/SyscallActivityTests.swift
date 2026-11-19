@@ -102,6 +102,56 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertEqual(groups.map(\.target), ["port 0x5503 (not in the port listing)", "Reply (send-once)", "Own port", "Kernel: task port"])
     }
 
+    func testMessageDestinationFromTheCall() {
+        let send = UInt64(MACH_SEND_MSG), sendRcv = UInt64(MACH_SEND_MSG | MACH_RCV_MSG)
+        let copySend = UInt64(MACH_MSG_TYPE_COPY_SEND), sendOnce = UInt64(MACH_MSG_TYPE_MOVE_SEND_ONCE)
+        // Not in any listing: woke a thread of pid 42; a request answered without blocking; a reply that woke
+        // its requester; a one-way send that woke nobody.
+        var woke = record(1, "mach_msg2_trap", 0, args: [1, send, copySend, 0x1650b], label: nil)
+        woke.receiver = 42; woke.blocked = true
+        var kernel = record(2, "mach_msg2_trap", 1_000_000_000, args: [1, sendRcv, copySend, 0x16507], label: nil)
+        kernel.blocked = false
+        var reply = record(3, "mach_msg2_trap", 2_000_000_000, args: [1, send, sendOnce, 0x4407], label: nil)
+        reply.receiver = 42
+        var oneway = record(4, "mach_msg2_trap", 3_000_000_000, args: [1, send, copySend, 0x5503], label: nil)
+        oneway.blocked = false
+        // A listed name wins over the call.
+        var listed = record(5, "mach_msg2_trap", 4_000_000_000, args: [1, sendRcv, copySend, 0x1203], label: nil)
+        listed.blocked = false
+        let context = SyscallActivity.Context(pid: 10, ports: [0x1203: 77], processNames: [42: "cfprefsd", 77: "WindowServer"])
+        let groups = SyscallActivity.build([woke, kernel, reply, oneway, listed], filter: "", errorsOnly: false, context: context)
+        XCTAssertEqual(groups.map(\.target), ["WindowServer (77)", "port 0x5503 (not in the port listing)", "Reply to cfprefsd (42)",
+                                              "Kernel object (port gone before any listing)", "cfprefsd (42)"])
+        XCTAssertFalse(context.unnamed(0x1650b, sendOnce: false, call: woke))
+        XCTAssertFalse(context.unnamed(0x16507, sendOnce: false, call: kernel))
+        XCTAssertTrue(context.unnamed(0x5503, sendOnce: false, call: oneway))
+    }
+
+    func testDecoderSchedulerEvents() {
+        // Thread 7 sends: wakes thread 900, blocks, gets its reply. Thread 8: a call answered without blocking.
+        let msgEntry: UInt32 = 0x010c_00bc | 1, msgReturn: UInt32 = 0x010c_00bc | 2
+        let events = [
+            KdebugEvent(ts: 1, eventname: "MSC_mach_msg2_trap", debugid: msgEntry, arg: [1, 3, 0, 0x1650b], thread: 7),
+            KdebugEvent(ts: 2, debugid: KdebugEvent.makeRunnable, arg: [900, 0x4f, 0, 4], thread: 7),
+            KdebugEvent(ts: 3, debugid: 0x0140_003c, arg: [0, 0, 0, 0], thread: 7),
+            KdebugEvent(ts: 4, debugid: KdebugEvent.makeRunnable, arg: [901, 0x4f, 0, 4], thread: 7),
+            KdebugEvent(ts: 5, eventname: "MSC_mach_msg2_trap", debugid: msgReturn, arg: [0, 0, 0, 0], thread: 7),
+            KdebugEvent(ts: 6, eventname: "MSC_mach_msg2_trap", debugid: msgEntry, arg: [1, 3, 0, 0x16507], thread: 8),
+            KdebugEvent(ts: 7, eventname: "MSC_mach_msg2_trap", debugid: msgReturn, arg: [0, 0, 0, 0], thread: 8),
+        ]
+        var dec = SyscallDecoder()
+        let recs = dec.feed(events)
+        XCTAssertEqual(recs.map(\.woke), [900, 0])
+        XCTAssertEqual(recs.map(\.blocked), [true, false])
+        var labeled = recs
+        var wakes = WakeLabeler()
+        _ = wakes.label(&labeled) { tids in Dictionary(uniqueKeysWithValues: tids.map { ($0, 42) }) }
+        XCTAssertEqual(labeled.map(\.receiver), [42, nil])
+        // Without scheduler events in the trace, nothing says the call didn't block.
+        var plain = SyscallDecoder()
+        XCTAssertEqual(plain.feed(Array(events.suffix(2))).map(\.blocked), [nil])
+    }
+
     func testPortKinds() {
         // lsmp's per-process records: a task port, an IOKit connection, a port the process receives on itself,
         // and a send right to another process's port.

@@ -65,6 +65,8 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         var unused: UInt64
     }
     static let recordSize = 64
+    /// Threads seen making a call: the traced process's. Only the pump thread touches it.
+    private var ownThreads: Set<UInt64> = []
     static let lostEvents: UInt32 = 0x0702_0008   // TRACE_LOST_EVENTS in /usr/share/misc/trace.codes
     /// PERF_STK_UData: four frames of a user stack.
     static let stackData: UInt32 = 0x2502_0010
@@ -211,18 +213,32 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Rewrites timestamps and queues the records.
-    private func take(_ buf: UnsafeMutableRawPointer, _ n: Int) {
-        let recs = buf.bindMemory(to: Record.self, capacity: n)
+    /// Rewrites timestamps, drops other processes' scheduler events and queues the records.
+    ///
+    /// The kernel's pid filter doesn't hold back scheduler events (DBG_MACH_SCHED): a 6 s trace of Finder got them
+    /// from 354 threads, 145k events for 1,061 calls. Kept: those of threads that made a call, which are the traced
+    /// process's (syscall events do pass the filter) and the only ones SyscallDecoder uses.
+    private func take(_ buf: UnsafeMutableRawPointer, _ count: Int) {
+        let recs = buf.bindMemory(to: Record.self, capacity: count)
         var lost = 0
-        for i in 0..<n {
-            let ts = recs[i].timestamp
-            recs[i].timestamp = ts > start ? (ts - start) * numer / denom : 0
-            if recs[i].debugid == Self.lostEvents { lost += 1 }
-            if stacks && recs[i].debugid & ~3 == Self.stackData {
-                for a in [recs[i].arg1, recs[i].arg2, recs[i].arg3, recs[i].arg4] { noteFrame(a) }
+        var n = 0
+        for i in 0..<count {
+            let id = recs[i].debugid
+            if id >> 16 == 0x0140 {
+                guard ownThreads.contains(recs[i].arg5) else { continue }
+            } else if id >> 16 == 0x010c || id >> 16 == 0x040c {
+                ownThreads.insert(recs[i].arg5)
             }
+            if n != i { recs[n] = recs[i] }
+            let ts = recs[n].timestamp
+            recs[n].timestamp = ts > start ? (ts - start) * numer / denom : 0
+            if id == Self.lostEvents { lost += 1 }
+            if stacks && id & ~3 == Self.stackData {
+                for a in [recs[n].arg1, recs[n].arg2, recs[n].arg3, recs[n].arg4] { noteFrame(a) }
+            }
+            n += 1
         }
+        guard n > 0 else { return }
         let bytes = n * Self.recordSize
         lock.lock()
         let full = pendingBytes + bytes > maxPending

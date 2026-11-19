@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 19  // 19: machPortKinds, 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
+    static let protocolVersion = 20  // 20: traceThreadOwners, scheduler events in the trace, 19: machPortKinds, 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
 }
 
 /// Read-only surface. No call accepts a path, a command or free-form arguments.
@@ -86,6 +86,9 @@ enum HelperConfig {
     /// What some descriptors of the traced process are now (JSON [Int32] in, JSON [String: String] by fd out):
     /// for labelling fd arguments. Empty when no trace runs on this connection.
     func traceDescribeFds(_ fds: Data, reply: @escaping (Data) -> Void)
+    /// The process of each thread id (JSON [UInt64] in, JSON [String: Int32] by thread id out; threads gone or not
+    /// found are left out): for naming the receivers a message woke. Empty when no trace runs on this connection.
+    func traceThreadOwners(_ tids: Data, reply: @escaping (Data) -> Void)
 
     /// Records every process's voucher (BANK) settlements for `seconds` (at most BankLedger.maxSeconds) and
     /// replies with the per-pair sums: who did work for whom. Uses kdebug, so not while a trace runs. Stops
@@ -125,7 +128,9 @@ enum SyscallTraceConfig {
         case kdebug = 2
     }
     /// BSD syscalls (class 4, subclass 0x0c), Mach traps (1/0x0c) and VFS path lookups (3/0x01).
-    static let classSubclasses: [UInt16] = [0x040c, 0x010c, 0x0301]
+    /// BSD syscalls, Mach traps, VFS lookups, the scheduler (DBG_MACH_SCHED: which thread a message woke, whether
+    /// the caller blocked; SyscallDecoder.sched). The scheduler about doubles the events of a process sending messages.
+    static let classSubclasses: [UInt16] = [0x040c, 0x010c, 0x0301, 0x0140]
     static let filter = classSubclasses.map { "S0x" + String(format: "%04x", $0) }.joined(separator: ",")
     /// A forgotten trace ends on its own.
     static let maxSeconds = 15 * 60

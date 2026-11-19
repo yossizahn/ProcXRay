@@ -245,6 +245,13 @@ enum HelperDaemon {
             reply((try? JSONEncoder().encode(Dictionary(uniqueKeysWithValues: d.map { (String($0.key), $0.value) }))) ?? Data())
         }
 
+        func traceThreadOwners(_ tids: Data, reply: @escaping (Data) -> Void) {
+            traceLock.lock(); let running = trace != nil; traceLock.unlock()
+            guard running, let list = try? JSONDecoder().decode([UInt64].self, from: tids) else { reply(Data()); return }
+            let m = ThreadOwners.pids(Set(list.prefix(4096)))
+            reply((try? JSONEncoder().encode(Dictionary(uniqueKeysWithValues: m.map { (String($0.key), $0.value) }))) ?? Data())
+        }
+
         func traceStop(reply: @escaping () -> Void) {
             endTrace()
             reply()

@@ -129,6 +129,7 @@ final class SyscallTracer {
         await tracer.setPhase(.running)
         var dec = SyscallDecoder(stacks: stacks && format == .kdebug)
         var fds = FdLabeler()
+        var wakes = WakeLabeler()
         var stopSent = false
         var endNote: String?
         let deadlineAfterStop: TimeInterval = 6
@@ -153,11 +154,12 @@ final class SyscallTracer {
             symbols.add(regions)
             var recs = dec.feed(evs)
             fds.label(&recs) { s.describeFds($0) }
+            let names = wakes.label(&recs) { s.threadOwners($0) }
             for i in recs.indices where !recs[i].stack.isEmpty { recs[i].caller = symbols.caller(recs[i].stack) }
             var n = notes.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
             if bad > 0 { n.append("\(bad) unreadable trace lines skipped.") }
             if !recs.isEmpty || !n.isEmpty || !evs.isEmpty {
-                await tracer.append(recs, events: evs.count, notes: n)
+                await tracer.append(recs, events: evs.count, notes: n, names: names)
             }
             if !running { break }
             if let t = stopTime, Date().timeIntervalSince(t) > deadlineAfterStop { endNote = endNote ?? "The trace did not stop in time."; break }
@@ -166,14 +168,15 @@ final class SyscallTracer {
         }
         var last = dec.flush()
         fds.label(&last) { s.describeFds($0) }
+        let names = wakes.label(&last) { s.threadOwners($0) }
         for i in last.indices where !last[i].stack.isEmpty { last[i].caller = symbols.caller(last[i].stack) }
-        if !last.isEmpty { await tracer.append(last, events: 0, notes: []) }
+        if !last.isEmpty { await tracer.append(last, events: 0, notes: [], names: names) }
         await tracer.finish(dec.pending(), note: endNote)
     }
 
     private func setPhase(_ p: Phase) { if phase == .starting { phase = p } }
 
-    private func append(_ recs: [SyscallRecord], events n: Int, notes n2: [String]) {
+    private func append(_ recs: [SyscallRecord], events n: Int, notes n2: [String], names: [Int32: String] = [:]) {
         events += n
         for note in n2 where !notes.contains(note) {
             notes.append(note)
@@ -183,11 +186,13 @@ final class SyscallTracer {
             }
         }
         guard !recs.isEmpty else { return }
+        context.processNames.merge(names) { old, _ in old }
         for r in recs where r.name == "mach_msg2_trap" {
-            // Replies go over send-once rights the send uses up: no listing finds them.
-            guard let a = r.args, let (port, once) = SyscallActivity.Context.messagePort(a), !once, port != 0,
-                  seenPorts.insert(port).inserted else { continue }
-            if context.ports[port] == nil && context.portKinds[port] == nil && !listedPorts.contains(port) { unresolvedPorts = true }
+            // Replies go over send-once rights the send uses up: no listing finds them. Nor is one needed for a send
+            // that woke its receiver or that the kernel answered.
+            guard let a = r.args, let (port, once) = SyscallActivity.Context.messagePort(a), port != 0,
+                  context.unnamed(port, sendOnce: once, call: r), seenPorts.insert(port).inserted else { continue }
+            if !listedPorts.contains(port) { unresolvedPorts = true }
         }
         records.append(contentsOf: recs)
         if records.count > Self.cap {

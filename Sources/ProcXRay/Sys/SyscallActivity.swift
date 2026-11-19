@@ -30,15 +30,34 @@ struct SyscallActivity: Identifiable, Sendable {
             return processNames[pid].map { "\($0) (\(pid))" } ?? "pid \(pid)"
         }
 
-        /// Where a mach_msg2_trap send goes: "cfprefsd (412)", "Kernel: task port", "Own port", "Reply (send-once)"
-        /// for an answer to a request (its send-once right is used up by the send, so no listing finds it), or the
-        /// port's name when it came and went between port listings.
-        func destination(_ port: UInt32, sendOnce: Bool = false) -> String {
-            if let p = ports[port] { return process(p) }
-            if let k = portKinds[port] { return k == "own port" ? "Own port" : "Kernel: " + k }
+        /// Where a mach_msg2_trap send goes: "cfprefsd (412)", "Kernel: task port", "Own port", "Reply to
+        /// cfprefsd (412)" for an answer to a request (its send-once right is used up by the send, so no listing
+        /// finds it), or the port's name when nothing says.
+        ///
+        /// The port listings first, then the call itself: the process of the thread the send woke, else a kernel
+        /// object when a send-and-receive got its reply without blocking (SyscallDecoder.sched). Seen in Finder:
+        /// runs of new port names (thread ports from task_threads), each asked a question or two and released
+        /// within a millisecond, before any listing.
+        func destination(_ port: UInt32, sendOnce: Bool = false, call r: SyscallRecord? = nil) -> String {
+            if !sendOnce, let p = ports[port] { return process(p) }
+            if !sendOnce, let k = portKinds[port] { return k == "own port" ? "Own port" : "Kernel: " + k }
+            if let p = r?.receiver { return (sendOnce ? "Reply to " : "") + process(p) }
             if sendOnce { return "Reply (send-once)" }
-            // Seen in Finder: runs of new port names, each used for a request or two and gone before any listing.
+            if let r, Self.answeredInKernel(r) { return "Kernel object (port gone before any listing)" }
             return "port 0x" + String(port, radix: 16) + " (not in the port listing)"
+        }
+
+        /// A send-and-receive that succeeded without its thread giving up the CPU: a process's answer needs the
+        /// receiver to run, so the kernel answered it.
+        static func answeredInKernel(_ r: SyscallRecord) -> Bool {
+            guard r.blocked == false, r.error == 0, let a = r.args, a.count > 1 else { return false }
+            let both = UInt64(MACH_SEND_MSG | MACH_RCV_MSG)
+            return a[1] & both == both
+        }
+
+        /// The listings and the call itself say nothing about where this send went.
+        func unnamed(_ port: UInt32, sendOnce: Bool, call r: SyscallRecord) -> Bool {
+            !sendOnce && ports[port] == nil && portKinds[port] == nil && r.receiver == nil && !Self.answeredInKernel(r)
         }
 
         /// A send's destination port and whether it is a send-once right (MACH_MSG_TYPE_MOVE_SEND_ONCE: a reply).
@@ -275,7 +294,7 @@ struct SyscallActivity: Identifiable, Sendable {
         let a = r.args ?? []
         switch op {
         case .message:
-            return Context.messagePort(a).map { context.destination($0.port, sendOnce: $0.sendOnce) } ?? "Destination unavailable"
+            return Context.messagePort(a).map { context.destination($0.port, sendOnce: $0.sendOnce, call: r) } ?? "Destination unavailable"
         case .signal:
             guard a.count > 1 else { return "Target unavailable" }
             return SyscallFormat.signalName(Int32(truncatingIfNeeded: a[1])) + " to " + context.process(Int32(truncatingIfNeeded: a[0]))

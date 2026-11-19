@@ -15,6 +15,13 @@ import Foundation
 //            First event (func 1): args[0] is a vnode id, args[1...3] are path bytes; later events (func 0,
 //            and the last with func 2) carry four words of path each. NUL-padded. It arrives on the
 //            thread between the entry and return of the syscall doing the lookup.
+//   Scheduler (1 / 0x40), logged on the thread doing the scheduling, so the pid filter keeps the traced process's:
+//            MACH_MKRUNNABLE (code 0x6) args[0] = the thread made runnable; MACH_BLOCK (0xf), MACH_WAIT (0x10),
+//            MACH_SCHED (0x0) and MACH_STKHANDOFF (0x2) = this thread gave up its CPU. Checked on Finder against
+//            lsmp (27.2): a message send that wakes a thread wakes one of the receiving process (60 of 60), and
+//            a send-and-receive whose reply came without the thread blocking went to a kernel object (38 of 38;
+//            every call to another process blocked). The kernel's per-message IPC events (MACH_IPC_kmsg_info,
+//            which name the receiver) are only compiled into development kernels (checked in the 27.2 KDK).
 
 /// One syscall, paired.
 struct SyscallRecord: Identifiable, Sendable, Hashable {
@@ -45,6 +52,12 @@ struct SyscallRecord: Identifiable, Sendable, Hashable {
     var state: State = .done
     /// The user stack at the call (traces with stacks): innermost first, the syscall stub's pc, then its caller.
     var stack: [UInt64] = []
+    /// The first thread the call made runnable before it blocked (0: none seen): a message's receiver.
+    var woke: UInt64 = 0
+    /// Whether the thread gave up its CPU during the call; nil while the trace has shown no scheduler events.
+    var blocked: Bool?
+    /// The process `woke` belongs to (WakeLabeler).
+    var receiver: Int32?
 
     // Display text, built once (off the main thread) so the table only reads strings.
     /// The first frame outside libsystem_kernel (the syscall stubs), symbolicated; empty without a stack.
@@ -89,6 +102,8 @@ struct KdebugEvent: Sendable {
     static let lostEvents: UInt32 = 0x0702_0008   // TRACE_LOST_EVENTS: the kernel lost events here
     static let stackHeader: UInt32 = 0x2502_0018  // PERF_STK_UHdr: flags, frame count
     static let stackData: UInt32 = 0x2502_0010    // PERF_STK_UData: four frames
+    static let makeRunnable: UInt32 = 0x0140_0018 // MACH_MKRUNNABLE: args[0] = the thread
+    static let gaveUpCPU: Set<UInt32> = [0x0140_003c, 0x0140_0040, 0x0140_0000, 0x0140_0008]   // BLOCK, WAIT, SCHED, STKHANDOFF
 
     /// The helper's KdebugTrace.Record layout (the kernel's kd_buf, timestamp in ns since the trace started).
     /// Names come from trace.codes, as ktrace's do.
@@ -267,6 +282,8 @@ struct SyscallDecoder: Sendable {
     private let stacks: Bool
     private var held: [UInt64: SyscallRecord] = [:]
     private var building: [UInt64: (count: Int, words: [UInt64])] = [:]
+    /// The trace has scheduler events: a call without one didn't block (and not because the events are missing).
+    private var schedSeen = false
 
     init(stacks: Bool = false) { self.stacks = stacks }
 
@@ -286,6 +303,7 @@ struct SyscallDecoder: Sendable {
                 continue
             }
             if e.cls == 3 && e.subclass == 1 && e.code == 0x24 { lookup(e); continue }
+            if e.cls == 1 && e.subclass == 0x40 { sched(e); continue }
             guard e.subclass == 0x0c, e.cls == 4 || e.cls == 1 else { continue }
             let base = e.debugid & ~3
             let mach = e.cls == 1
@@ -312,6 +330,7 @@ struct SyscallDecoder: Sendable {
                     r.state = .entryMissed
                 }
                 r.end = e.ts
+                if r.state == .done, schedSeen { r.blocked = r.blocked ?? false }
                 let a = e.arg
                 if mach {
                     r.error = Int64(Int32(truncatingIfNeeded: a.first ?? 0))
@@ -370,6 +389,23 @@ struct SyscallDecoder: Sendable {
             SyscallFormat.fill(&r)
             return r
         } }.sorted { $0.time < $1.time }
+    }
+
+    /// Scheduler events land on the innermost open call of their thread: who it woke first, whether it blocked.
+    private mutating func sched(_ e: KdebugEvent) {
+        schedSeen = true
+        guard var stack = open[e.thread], !stack.isEmpty else { return }
+        let base = e.debugid & ~3
+        var r = stack[stack.count - 1].rec
+        if KdebugEvent.gaveUpCPU.contains(base) {
+            r.blocked = true
+        } else if base == KdebugEvent.makeRunnable, r.blocked != true, r.woke == 0, let t = e.arg.first, t != e.thread {
+            r.woke = t
+        } else {
+            return
+        }
+        stack[stack.count - 1].rec = r
+        open[e.thread] = stack
     }
 
     private mutating func lookup(_ e: KdebugEvent) {
@@ -1067,5 +1103,52 @@ struct SyscallSummaryRow: Identifiable, Sendable {
             rows[r.name] = s
         }
         return rows.values.sorted { $0.totalNanos > $1.totalNanos }
+    }
+}
+
+/// Which process each thread belongs to, from every process's thread ids (proc_pidinfo PROC_PIDLISTTHREADIDS,
+/// not in the SDK's headers). Root reads every process's (~13 ms for 580 processes); another user only its own.
+enum ThreadOwners {
+    static func pids(_ tids: Set<UInt64>) -> [UInt64: Int32] {
+        guard !tids.isEmpty else { return [:] }
+        let PROC_PIDLISTTHREADIDS: Int32 = 28
+        var out: [UInt64: Int32] = [:]
+        var buf = [UInt64](repeating: 0, count: 4096)
+        for pid in NativeMach.allPids() where pid > 0 {
+            let n = buf.withUnsafeMutableBytes { proc_pidinfo(pid, PROC_PIDLISTTHREADIDS, 0, $0.baseAddress, Int32($0.count)) }
+            guard n > 0 else { continue }
+            for t in buf.prefix(Int(n) / 8) where tids.contains(t) { out[t] = pid }
+            if out.count == tids.count { break }
+        }
+        return out
+    }
+}
+
+/// Names the process each call woke (SyscallRecord.woke → receiver). A thread's id is never reused, so an
+/// answer holds for the trace; threads gone before the lookup (a worker thread that woke, answered and exited
+/// within the read interval) stay unnamed.
+struct WakeLabeler {
+    private var owners: [UInt64: Int32] = [:]
+    private var asked: Set<UInt64> = []
+    /// Process names, for the processes found.
+    private(set) var names: [Int32: String] = [:]
+
+    /// Fills `receiver` in `recs`; returns the names of processes not named before.
+    mutating func label(_ recs: inout [SyscallRecord], lookup: (Set<UInt64>) -> [UInt64: Int32]) -> [Int32: String] {
+        let asked = self.asked
+        let want = Set(recs.map(\.woke).filter { $0 != 0 && !asked.contains($0) })
+        var new: [Int32: String] = [:]
+        if !want.isEmpty {
+            self.asked.formUnion(want)
+            for (t, p) in lookup(want) where p > 0 {   // pid 0: a kernel thread, not a receiver
+                owners[t] = p
+                if names[p] == nil, let path = Native.path(p) {
+                    names[p] = (path as NSString).lastPathComponent
+                    new[p] = names[p]
+                }
+            }
+        }
+        for i in recs.indices where recs[i].woke != 0 { recs[i].receiver = owners[recs[i].woke] }
+        return new
     }
 }

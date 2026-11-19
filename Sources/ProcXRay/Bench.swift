@@ -165,6 +165,7 @@ enum Bench {
         let started = -t0.timeIntervalSinceNow
         var dec = SyscallDecoder()
         var fds = FdLabeler()
+        var wakes = WakeLabeler()
         var recs: [SyscallRecord] = []
         var events = 0, bytes = 0, bad = 0
         var decodeTime = 0.0
@@ -177,6 +178,7 @@ enum Bench {
             let (evs, b) = ktrace ? KdebugEvent.decode(d) : (KdebugEvent.decodeRaw(d), 0)
             var batch = dec.feed(evs)
             fds.label(&batch) { NativeLsof.describe(pid, fds: $0) }
+            _ = wakes.label(&batch) { ThreadOwners.pids($0) }
             recs += batch
             decodeTime += -d0.timeIntervalSinceNow
             events += evs.count; bytes += d.count; bad += b
@@ -185,6 +187,7 @@ enum Bench {
         }
         var tail = dec.flush()
         fds.label(&tail) { NativeLsof.describe(pid, fds: $0) }
+        _ = wakes.label(&tail) { ThreadOwners.pids($0) }
         recs += tail
         let inFlight = dec.pending()
         var ru = rusage(), rc = rusage(); getrusage(RUSAGE_SELF, &ru); getrusage(RUSAGE_CHILDREN, &rc)
@@ -192,7 +195,7 @@ enum Bench {
         print(String(format: "%@: started in %.0f ms; %d events, %d bytes, %d bad, %d gaps; %d records + %d in flight; decode+pair %.3f s; CPU %.3f s here + %.3f s ktrace",
                      ktrace ? "ktrace" : "kdebug", started * 1000, events, bytes, bad, dec.gaps, recs.count, inFlight.count, decodeTime,
                      secs(ru.ru_utime) + secs(ru.ru_stime), secs(rc.ru_utime) + secs(rc.ru_stime)))
-        if activity { printActivity(recs + inFlight, pid: pid, names: MachPortNames.resolveHere(pid: pid)) }
+        if activity { printActivity(recs + inFlight, pid: pid, names: MachPortNames.resolveHere(pid: pid), woken: wakes.names) }
         guard let out else { return }
         var text = ""
         for r in recs + inFlight {
@@ -202,13 +205,23 @@ enum Bench {
     }
 
     /// The Activity view's grouping, oldest first, with Mach message destinations named from `names`.
-    static func printActivity(_ recs: [SyscallRecord], pid: Int32, names: Result<MachPortNames.Names, MachLoader.Failure>) {
+    static func printActivity(_ recs: [SyscallRecord], pid: Int32, names: Result<MachPortNames.Names, MachLoader.Failure>, woken: [Int32: String] = [:]) {
         var context = SyscallActivity.Context(pid: pid)
         switch names {
         case .success(let n): context.ports = n.ports; context.processNames = n.names; context.portKinds = n.kinds
         case .failure(let e): print("ports: " + e.message)
         }
+        context.processNames.merge(woken) { old, _ in old }
         print("\(context.ports.count) port names resolved, \(context.portKinds.count) kernel or own")
+        var how: [String: Int] = [:]
+        for r in recs where r.name == "mach_msg2_trap" {
+            guard let a = r.args, let (port, once) = SyscallActivity.Context.messagePort(a) else { continue }
+            let k = !once && context.ports[port] != nil ? "listing: process" : !once && context.portKinds[port] != nil ? "listing: kernel or own"
+                : r.receiver != nil ? (once ? "woken: reply" : "woken: process") : once ? "reply, receiver unknown"
+                : SyscallActivity.Context.answeredInKernel(r) ? "answered in the kernel" : "unnamed"
+            how[k, default: 0] += 1
+        }
+        print("sends by how named: " + how.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
         for g in SyscallActivity.build(recs, filter: "", errorsOnly: false, context: context).reversed() {
             let at = g.calls[0].start.map { String(format: "%8.3f", Double($0) / 1e9) } ?? "  before"
             print("\(at)  \(g.operation.rawValue)  \(g.target)  ·  \(g.detail)")
@@ -374,6 +387,7 @@ enum Bench {
             print(String(format: "trace: format %@, started in %.0f ms", "\(format)", -t0.timeIntervalSinceNow * 1000))
             var dec = SyscallDecoder(stacks: stacks); var recs = 0, events = 0, stopped = false
             var fds = FdLabeler(), shown = 0
+            var wakes = WakeLabeler()
             let show = args.contains("show")
             var names: [String: Int] = [:]
             let symbols = StackSymbols()
@@ -399,15 +413,18 @@ enum Bench {
                 events += evs.count
                 var batch = dec.feed(evs)
                 fds.label(&batch) { s.describeFds($0) }
+                _ = wakes.label(&batch) { s.threadOwners($0) }
                 if show { for r in batch where shown < 40 && !r.name.contains("semwait") { print("  \(r.name)(\(r.namedArgsText)) = \(r.resultText)"); shown += 1 } }
                 take(batch)
                 if !running { break }
                 if d.count < SyscallTraceConfig.maxRead / 2 { usleep(250_000) }
             }
-            take(dec.flush())
+            var tail = dec.flush()
+            _ = wakes.label(&tail) { s.threadOwners($0) }
+            take(tail)
             if activity {
                 // As SyscallTracer does: names for message destinations through the helper.
-                printActivity(all + dec.pending(), pid: pid, names: MachPortNames.resolve(pid: pid))
+                printActivity(all + dec.pending(), pid: pid, names: MachPortNames.resolve(pid: pid), woken: wakes.names)
                 return
             }
             // Calls whose arguments have no signature yet (shown as raw words), by count.

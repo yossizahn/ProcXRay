@@ -45,6 +45,14 @@ final class HelperTraceSession: @unchecked Sendable {
         return Dictionary(uniqueKeysWithValues: m.compactMap { k, v in Int32(k).map { ($0, v) } })
     }
 
+    /// The process of each thread (HelperProtocol.traceThreadOwners); empty when the helper can't say.
+    func threadOwners(_ tids: Set<UInt64>) -> [UInt64: Int32] {
+        guard !tids.isEmpty, let req = try? JSONEncoder().encode(Array(tids)),
+              let d: Data = call(timeout: 5, { p, done in p.traceThreadOwners(req) { done($0) } }),
+              let m = try? JSONDecoder().decode([String: Int32].self, from: d) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: m.compactMap { k, v in UInt64(k).map { ($0, v) } })
+    }
+
     func stop() {
         _ = call(timeout: 5) { p, done in p.traceStop { done(()) } }
     }
