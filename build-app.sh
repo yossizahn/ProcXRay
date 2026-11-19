@@ -34,6 +34,7 @@ APP="build/$NAME.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ProcXRay"
+cp "$(dirname "$BIN")/pxr-exec" "$APP/Contents/MacOS/pxr-exec"
 # App icon (regenerate with: swift tools/make-icon.swift Resources)
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
@@ -109,6 +110,8 @@ if [[ -z "$SIGN_ID" ]]; then
   echo "warning: no Apple Development identity; signing ad-hoc (privileged helper will not work)" >&2
   SIGN_ID=-
 fi
+# Nested code is signed before the bundle that seals it.
+codesign --force --options runtime --timestamp=none --identifier "$BUNDLE_ID.exec" --sign "$SIGN_ID" "$APP/Contents/MacOS/pxr-exec"
 # --identifier: the helper derives its mach service and plist name from this (HelperConfig.bundleID).
 codesign --force --options runtime --timestamp=none --identifier "$BUNDLE_ID" --sign "$SIGN_ID" "$APP"
 codesign -dv "$APP" 2>&1 | grep -E 'Identifier|TeamIdentifier|Authority=Apple Development' || true

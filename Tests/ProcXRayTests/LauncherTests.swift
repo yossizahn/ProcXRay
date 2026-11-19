@@ -31,4 +31,30 @@ final class LauncherTests: XCTestCase {
         for _ in 0..<50 where !gone { usleep(50_000); gone = !Native.isSame(child.pid, start: child.start) }
         XCTAssertTrue(gone)
     }
+
+    private func waitForExit(_ pid: Int32) -> Launcher.Exit? {
+        for _ in 0..<100 { if let e = Launcher.exit(of: pid) { return e }; usleep(50_000) }
+        return nil
+    }
+
+    func testExitRecordsStatus() throws {
+        let child = try Launcher.spawnSuspended("/usr/bin/false", arguments: [], name: "false").get()
+        Launcher.resume(child.pid)
+        let exit = try XCTUnwrap(waitForExit(child.pid))
+        XCTAssertFalse(exit.codeSigning)
+        XCTAssertEqual((exit.status >> 8) & 0xff, 1)
+        XCTAssertNil(exit.problem)
+    }
+
+    func testAppleAppIsKilledForCodeSigning() throws {
+        // With SIP on, Apple's apps have launch constraints that kill a direct spawn before its first instruction.
+        let child = try Launcher.spawnSuspended("/System/Applications/Chess.app/Contents/MacOS/Chess", arguments: [], name: "Chess").get()
+        Launcher.resume(child.pid)
+        guard let exit = waitForExit(child.pid) else {
+            kill(child.pid, SIGKILL)
+            throw XCTSkip("Chess ran: no launch constraints here (SIP off?)")
+        }
+        XCTAssertTrue(exit.codeSigning)
+        XCTAssertNotNil(exit.problem)
+    }
 }

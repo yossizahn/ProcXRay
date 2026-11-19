@@ -44,10 +44,12 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 21  // 21: traceThreads (names), dyld, trace-string and MIG events, 20: traceThreadOwners, scheduler events in the trace, 19: machPortKinds, 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
+    static let protocolVersion = 22  // 22: launch, launched, 21: traceThreads (names), dyld, trace-string and MIG events, 20: traceThreadOwners, scheduler events in the trace, 19: machPortKinds, 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
 }
 
-/// Read-only surface. No call accepts a path, a command or free-form arguments.
+/// Read-only surface, but for `launch`: no other call accepts a path, a command or free-form arguments. `launch`
+/// runs what the caller asks, as root or any user, so it takes an administrator's authorization granted for that
+/// launch (AdminAuthorization), not just an admin caller.
 @objc protocol HelperProtocol {
     func version(reply: @escaping (Int, Int32) -> Void)                 // (protocolVersion, helper pid)
     /// `extras`: ExtraReads raw value; only the per-process ones the helper can do (ExtraReads.viaHelper).
@@ -104,6 +106,16 @@ enum HelperConfig {
     /// System counters only root reads: the allowlisted sysctls (HelperCounters.sysctlAllowlist, fixed names) and
     /// the kernel's zones. Takes no input. JSON HelperCounters.
     func systemCounters(reply: @escaping (Data) -> Void)
+
+    /// Starts a program (JSON Launcher.Request) with posix_spawn, as root or the user, group and groups the request
+    /// names. `authorization`: an AdminAuthorization external form the helper checks first. Reply: (JSON
+    /// Launcher.Child, the read ends of its stdout and stderr pipes when the request asked for them, nil) or (nil,
+    /// nil, nil, why not). The helper reaps it, and only the caller's user may signal it afterwards (`launched`).
+    func launch(_ request: Data, authorization: Data, reply: @escaping (Data?, FileHandle?, FileHandle?, String?) -> Void)
+    /// A program `launch` started for this user: sends `signal` (SIGCONT, SIGSTOP, SIGTERM, SIGINT, SIGKILL; 0
+    /// sends none), then replies with (JSON Launcher.Exit once it has ended, else nil; nil, or why the signal
+    /// wasn't sent).
+    func launched(pid: Int32, signal: Int32, reply: @escaping (Data?, String?) -> Void)
 }
 
 /// The helper's network reading (HelperProtocol.netRates).

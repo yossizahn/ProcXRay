@@ -37,9 +37,20 @@ final class SyscallTracer {
 
     var isActive: Bool { phase == .starting || phase == .running || phase == .stopping }
 
+    /// A process started suspended for the trace: how to let it run once the trace is on, and how to end it if the
+    /// trace can't start. A direct spawn signals it; one the helper started as root goes through the helper.
+    struct Suspended: Sendable {
+        let resume: @Sendable () -> Void
+        let kill: @Sendable () -> Void
+        /// A process of this user's (a direct spawn, a launchd job).
+        static func local(_ pid: Int32) -> Suspended {
+            Suspended(resume: { Launcher.resume(pid) }, kill: { _ = Darwin.kill(pid, SIGKILL) })
+        }
+    }
+
     /// `resume`: the process was started suspended (Launcher) and runs once the trace is on, or is killed if the
     /// trace can't start, so none of its work goes untraced.
-    func start(pid: Int32, start: Date, stacks: Bool, resume: Bool = false) {
+    func start(pid: Int32, start: Date, stacks: Bool, resume: Suspended? = nil) {
         guard !isActive else { return }
         records = []; pending = []; notes = []; events = 0; dropped = 0; revision += 1
         context = SyscallActivity.Context(pid: pid)
@@ -121,7 +132,7 @@ final class SyscallTracer {
         phase = .idle
     }
 
-    private nonisolated static func run(pid: Int32, start: Date, stacks: Bool, resume: Bool, symbols: StackSymbols,
+    private nonisolated static func run(pid: Int32, start: Date, stacks: Bool, resume: Suspended?, symbols: StackSymbols,
                                         flag: Shell.Cancel, tracer: SyscallTracer) async {
         let s = HelperTraceSession()
         defer { s.close() }
@@ -129,11 +140,11 @@ final class SyscallTracer {
         switch s.start(pid: pid, stacks: stacks) {
         case .success(let f): format = f
         case .failure(let e):
-            if resume, Native.isSame(pid, start: start) { kill(pid, SIGKILL) }
-            await tracer.finish([], note: e.message + (resume ? " The launched process was ended before it ran." : ""))
+            if let resume, Native.isSame(pid, start: start) { resume.kill() }
+            await tracer.finish([], note: e.message + (resume != nil ? " The launched process was ended before it ran." : ""))
             return
         }
-        if resume { Launcher.resume(pid) }
+        resume?.resume()
         await tracer.setPhase(.running)
         // A launched process is traced from its first instruction: its lowest thread id is its main thread.
         var mainThread: UInt64?
@@ -164,7 +175,7 @@ final class SyscallTracer {
             symbols.add(regions)
             var recs = dec.feed(evs)
             symbols.addLoadedImages(recs)
-            if resume, let low = recs.lazy.map(\.thread).min() { mainThread = min(mainThread ?? low, low) }
+            if resume != nil, let low = recs.lazy.map(\.thread).min() { mainThread = min(mainThread ?? low, low) }
             fds.label(&recs) { s.describeFds($0) }
             let names = threads.label(&recs) { s.threads($0) }
             for i in recs.indices where !recs[i].stack.isEmpty { recs[i].caller = symbols.caller(recs[i].stack) }
@@ -262,7 +273,7 @@ struct SyscallTraceView: View {
         self.init(target: TraceTarget(pid: proc.pid, start: proc.start, name: proc.name), exited: exited)
     }
 
-    /// `tracer`: one the caller already started (Launch and Trace), else a new idle one.
+    /// `tracer`: one the caller already started (the Launch window), else a new idle one.
     init(target: TraceTarget, exited: Bool, tracer: SyscallTracer? = nil) {
         self.target = target
         self.exited = exited

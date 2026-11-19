@@ -240,6 +240,37 @@ enum Bench {
         let tools: [String: HelperTool] = ["lsof": .lsof, "vmmap": .vmmap, "sample": .sample,
                                            "procinfo": .launchctlProcinfo, "btm": .btmDump, "lsofall": .lsofAll,
                                            "taskinfo": .taskinfo, "powermetrics": .powermetrics, "stacks": .stacks]
+        if what == "launch" {
+            // launch <user|-> <program> [arguments…]: HelperProtocol.launch, as the Launch window's "As root or
+            // another user" does: asks for authorization, then prints the child and what it writes.
+            guard args.count > 2 else { print("launch <user or - for root> <program> [arguments…]"); return }
+            let account = args[1] == "-" ? Launcher.Account.lookup("0") : Launcher.Account.lookup(args[1])
+            guard let account else { print("launch: no user \(args[1])"); return }
+            var r = Launcher.Request(path: args[2], argv: Array(args.dropFirst(2)), environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"], name: args[2])
+            r.uid = account.uid; r.gid = account.gid; r.groups = account.groups
+            r.stdout = .pipe; r.stderr = .pipe; r.workingDirectory = "/"
+            switch AdminAuthorization.request(prompt: "Proc X-Ray --helper-call launch") {
+            case .failure(let e): print("authorization: \(e.message)"); return
+            case .success(let grant):
+                let result = c.launch(r, authorization: grant.externalForm)
+                grant.release()
+                switch result {
+                case .failure(let e): print("launch: \(e.message)")
+                case .success(let (child, out, err)):
+                    print("launch: pid \(child.pid)")
+                    print("stdout: " + String(decoding: out?.readDataToEndOfFile() ?? Data(), as: UTF8.self), terminator: "")
+                    print("stderr: " + String(decoding: err?.readDataToEndOfFile() ?? Data(), as: UTF8.self), terminator: "")
+                    for _ in 0..<20 {
+                        if let e = c.launched(pid: child.pid)?.exit { print("exit: \(e.summary)"); break }
+                        usleep(100_000)
+                    }
+                    print("signal someone else's pid 1: \(c.launched(pid: 1, signal: SIGKILL)?.error ?? "no reply")")
+                }
+            }
+            // Without a fresh authorization: refused.
+            print("unauthorized: " + ((try? c.launch(r, authorization: Data(count: 32)).get()).map { "launched pid \($0.0.pid)!" } ?? "refused"))
+            return
+        }
         if what == "jetsam" {
             // jetsam [pid…]: the helper's jetsam reads (allMetrics with .jetsam), counted, and the given pids.
             let t0 = Date()
@@ -379,7 +410,7 @@ enum Bench {
         if what == "trace" || what == "launch" {
             // trace <pid> <seconds> [stacks] [show] [activity]: through the helper over XPC, as SyscallTracer does.
             // `activity` prints the Activity view's grouping, message destinations named through the helper.
-            // launch <seconds> <app or program> [arguments…]: as Launch and Trace does (started suspended, run once the
+            // launch <seconds> <app or program> [arguments…]: as the Launch window does with Trace on (started suspended, run once the
             // trace is on), with the activity; `launch <seconds> stacks <program> …` prints the stacks' summary instead.
             let launching = what == "launch"
             let launchStacks = launching && args.count > 2 && args[2] == "stacks"

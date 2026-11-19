@@ -200,6 +200,44 @@ enum HelperDaemon {
         private var tracedPid: Int32 = 0
         private var traceRunning: Bool { trace.map { $0.read(max: 0).1 } ?? false }
 
+        func launch(_ request: Data, authorization: Data, reply: @escaping (Data?, FileHandle?, FileHandle?, String?) -> Void) {
+            guard AdminAuthorization.verify(authorization) else {
+                reply(nil, nil, nil, "helper: launching as root needs an administrator's authorization"); return
+            }
+            guard let r = try? JSONDecoder().decode(Launcher.Request.self, from: request), r.path.hasPrefix("/") else {
+                reply(nil, nil, nil, "helper: rejected launch request"); return
+            }
+            NSLog("ProcXRay helper: launching %@ as uid %d for uid %d", r.path, Int32(bitPattern: r.uid ?? 0), Int32(bitPattern: callerUID))
+            switch Launcher.spawn(r) {
+            case .failure(let e): reply(nil, nil, nil, e.message)
+            case .success(let s):
+                Self.launchedLock.lock()
+                Self.launchedChildren[s.child.pid] = (s.child.start, callerUID)
+                Self.launchedLock.unlock()
+                // The handles close the helper's copies once XPC has sent them (it sends duplicates).
+                reply(try? JSONEncoder().encode(s.child),
+                      s.stdout.map { FileHandle(fileDescriptor: $0, closeOnDealloc: true) },
+                      s.stderr.map { FileHandle(fileDescriptor: $0, closeOnDealloc: true) }, nil)
+            }
+        }
+
+        private static let launchedLock = NSLock()
+        /// Children `launch` started: pid → (start, the user who asked).
+        nonisolated(unsafe) private static var launchedChildren: [Int32: (Date, uid_t)] = [:]
+
+        func launched(pid: Int32, signal: Int32, reply: @escaping (Data?, String?) -> Void) {
+            Self.launchedLock.lock()
+            let entry = Self.launchedChildren[pid]
+            Self.launchedLock.unlock()
+            guard let (start, uid) = entry, uid == callerUID else { reply(nil, "helper: not a program launched for this user"); return }
+            let exit = Launcher.exit(of: pid).flatMap { try? JSONEncoder().encode($0) }
+            guard signal != 0 else { reply(exit, nil); return }
+            guard [SIGCONT, SIGSTOP, SIGTERM, SIGINT, SIGKILL].contains(signal) else { reply(exit, "helper: signal \(signal) not allowed"); return }
+            // Not yet reaped, so the pid can't belong to anyone else yet; the start time checks it anyway.
+            guard exit == nil, Native.isSame(pid, start: start) else { reply(exit, "It has exited."); return }
+            reply(nil, kill(pid, signal) == 0 ? nil : String(cString: strerror(errno)))
+        }
+
         func traceStart(pid: Int32, stacks: Bool, reply: @escaping (String?, Int) -> Void) {
             guard let (path, args) = SyscallTraceConfig.argv(pid: pid) else { reply("helper: rejected pid \(pid)", 0); return }
             guard mayInspect(pid) else { reply("Only an admin user can trace another user's processes.", 0); return }

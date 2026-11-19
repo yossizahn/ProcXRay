@@ -197,6 +197,31 @@ final class HelperClient: @unchecked Sendable {
         return .failure(.init(message: out.1 ?? "unreadable reply from the helper"))
     }
 
+    /// HelperProtocol.launch: a program started by the helper, as root or another user.
+    func launch(_ r: Launcher.Request, authorization: Data) -> Result<(Launcher.Child, FileHandle?, FileHandle?), LaunchError> {
+        guard let body = try? JSONEncoder().encode(r) else { return .failure(LaunchError(message: "Couldn't encode the launch.")) }
+        typealias Reply = (Data?, FileHandle?, FileHandle?, String?)
+        guard let (data, out, err, why) = call({ (p: HelperProtocol, done: @escaping (Reply) -> Void) in
+            p.launch(body, authorization: authorization) { done(($0, $1, $2, $3)) }
+        }, timeout: 20) else { return .failure(LaunchError(message: "The helper didn't answer.")) }
+        if let why { return .failure(LaunchError(message: why)) }
+        guard let data, let child = try? JSONDecoder().decode(Launcher.Child.self, from: data) else {
+            return .failure(LaunchError(message: "The helper's reply couldn't be read."))
+        }
+        return .success((child, out, err))
+    }
+
+    /// HelperProtocol.launched: signals a program the helper launched (0: none) and says whether it has ended.
+    /// Nil when the helper can't be asked.
+    @discardableResult
+    func launched(pid: Int32, signal: Int32 = 0) -> (exit: Launcher.Exit?, error: String?)? {
+        typealias Reply = (Data?, String?)
+        guard let (data, why) = call({ (p: HelperProtocol, done: @escaping (Reply) -> Void) in
+            p.launched(pid: pid, signal: signal) { done(($0, $1)) }
+        }, timeout: 5) else { return nil }
+        return (data.flatMap { try? JSONDecoder().decode(Launcher.Exit.self, from: $0) }, why)
+    }
+
     // MARK: plumbing
 
     private func call<T>(_ body: (HelperProtocol, @escaping (T) -> Void) -> Void, timeout: Double = 15) -> T? {
