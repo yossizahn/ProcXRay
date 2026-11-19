@@ -503,7 +503,7 @@ struct InspectorTabCommands: Commands {
         CommandGroup(after: .sidebar) {
             ForEach(InspectorTab.allCases) { t in
                 Button(t.rawValue) { tab?.wrappedValue = t }
-                    .keyboardShortcut(t.shortcut)
+                    .keyboardShortcut(t.shortcut.map { KeyboardShortcut($0) })
                     .disabled(tab == nil)
             }
             Divider()

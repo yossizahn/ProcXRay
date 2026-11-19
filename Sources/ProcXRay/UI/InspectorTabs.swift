@@ -17,6 +17,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
     case logs = "Logs"
     case sample = "Sample"
     case syscalls = "Syscalls"
+    case windows = "Windows"
     var id: String { rawValue }
 
     /// A stored tab name, including the six names an earlier version stored.
@@ -27,10 +28,10 @@ enum InspectorTab: String, CaseIterable, Identifiable {
         self = t
     }
 
-    /// ⌘1 … ⌘9, then ⌘0 for the tenth.
-    var shortcut: KeyEquivalent {
+    /// ⌘1 … ⌘9, then ⌘0 for the tenth; none after that.
+    var shortcut: KeyEquivalent? {
         let i = InspectorTab.allCases.firstIndex(of: self)!
-        return KeyEquivalent(Character(String((i + 1) % 10)))
+        return i < 10 ? KeyEquivalent(Character(String((i + 1) % 10))) : nil
     }
 }
 
