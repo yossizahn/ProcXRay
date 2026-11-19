@@ -50,6 +50,7 @@ struct InspectorView: View {
                     // A new process gets a new tracer (and the old one's trace stops).
                     SyscallTraceView(proc: proc, exited: exited).id(proc.key)
                 case .windows: WindowsTab(proc: proc, exited: exited)
+                case .automation: AutomationTab(proc: proc)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

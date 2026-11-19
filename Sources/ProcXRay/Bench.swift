@@ -1171,3 +1171,47 @@ extension Bench {
         print(String(format: "all processes: serviced +%.3f s, billed +%.3f s, events %.3f s", Double(dS) / 1e9, Double(dB) / 1e9, Double(cpu) / 1e9))
     }
 }
+
+extension Bench {
+    /// `--automation <app>… [-v]`: what the Automation tab reads for each app bundle, with timings: the
+    /// scripting dictionary's counts and Shortcuts actions by source. `-v` lists every command, class and action.
+    static func automation(_ apps: [String], verbose: Bool) {
+        for app in apps where !app.hasPrefix("-") {
+            let t0 = Date()
+            let id = Bundle(path: app)?.bundleIdentifier
+            let decl = ScriptingDictionary.declared(bundle: app)
+            let dict = ScriptingDictionary.read(bundle: app)
+            let t1 = Date()
+            let intents = AppIntentsInfo.read(bundle: app, bundleID: id)
+            let t2 = Date()
+            print("== \(app)  (\(id ?? "no bundle id"))")
+            print("  NSAppleScriptEnabled \(decl.enabled.map(String.init) ?? "-")  OSAScriptingDefinition \(decl.sdefName ?? "-")")
+            switch dict {
+            case .none(let why): print("  sdef: \(why)")
+            case .dictionary(let d):
+                print("  sdef: \(d.suites.count) suites, \(d.commandCount) commands, \(d.classCount) classes  [\(Int(t1.timeIntervalSince(t0) * 1000)) ms]")
+                for s in d.suites {
+                    print("    \(s.name) '\(s.code)'\(s.hidden ? " hidden" : ""): \(s.commands.count) commands, \(s.classes.count) classes, \(s.enumerations.count) enums, \(s.records.count) records")
+                    if verbose {
+                        for c in s.commands { print("      cmd \(c.name)(\(c.direct?.type ?? "")\(c.parameters.map { ", \($0.name): \($0.type)" }.joined())) -> \(c.result?.type ?? "")") }
+                        for c in s.classes { print("      class \(c.name)\(c.isExtension ? " (ext)" : "") : \(c.inherits)  elements [\(c.elements.map(\.type).joined(separator: ", "))]  \(c.properties.count) props") }
+                    }
+                }
+            }
+            let hidden = intents.actions.filter(\.hidden).count
+            print("  intents: \(intents.actions.count) actions (\(hidden) hidden, \(intents.indexedActions) from the index), \(intents.entities.count) types, \(intents.appShortcuts.count) App Shortcuts  [\(Int(t2.timeIntervalSince(t1) * 1000)) ms]")
+            if let n = intents.indexNote { print("  index: \(n)") }
+            for f in intents.metadataFiles { print("  metadata: \(f)") }
+            for e in intents.siriKit { print("  SiriKit \((e.path as NSString).lastPathComponent): \(e.supported.joined(separator: ", "))") }
+            for f in intents.intentDefinitions { print("  intentdefinition: \(f)") }
+            if verbose {
+                for a in intents.actions {
+                    print("    \(a.hidden ? "h" : " ") \(a.kind == "siriIntent" ? "S" : " ") \(a.name)  [\(a.id)] vf=\(a.visibilityFlags.map(String.init) ?? "-") open=\(a.openAppWhenRun.map(String.init) ?? "-") src=\(a.source)")
+                    for p in a.parameters { print("          \(p.key) \(p.name): \(p.type)  \(p.description)") }
+                }
+                for e in intents.entities { print("    \(e.kind) \(e.name) [\(e.id)]: \(e.members.prefix(8).joined(separator: ", "))") }
+                for s in intents.appShortcuts { print("    shortcut \(s.title) [\(s.action)]: \(s.phrases.joined(separator: " | "))") }
+            }
+        }
+    }
+}

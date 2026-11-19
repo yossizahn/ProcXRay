@@ -18,6 +18,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
     case sample = "Sample"
     case syscalls = "Syscalls"
     case windows = "Windows"
+    case automation = "Automation"
     var id: String { rawValue }
 
     /// A stored tab name, including the six names an earlier version stored.

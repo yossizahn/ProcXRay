@@ -128,6 +128,10 @@ struct ProcXRayApp: App {
             Bench.trustLayout(pid_t(CommandLine.arguments[i + 1]) ?? 0)
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--automation"), i + 1 < CommandLine.arguments.count {
+            Bench.automation(Array(CommandLine.arguments[(i + 1)...]), verbose: CommandLine.arguments.contains("-v"))
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--sandbox") {
             Bench.sandbox(Array(CommandLine.arguments[(i + 1)...]).compactMap { pid_t($0) })
             exit(0)

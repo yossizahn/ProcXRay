@@ -27,6 +27,7 @@ To turn SIP off in a fresh clone: `tart run --recovery <vm>`, open Terminal from
 - Deploy and launch a build: `./build-app.sh && tools/vm-deploy.sh` (`--release` for the release bundle, a VM name as the last argument for another VM).
 - One-off test binaries (C or Swift) build on the host and run in the VM: `scp` them over, or `cat bin | ssh … 'cat > /tmp/bin && chmod +x /tmp/bin'`. Both are arm64 macOS 27.2, so host builds run as is.
 - Syscall trace without the UI: `sudo ProcXRay --trace <pid> <seconds> [--ktrace] [--activity] [out.tsv]` runs the kdebug reader (or ktrace) in-process with the app's decoder and writes the records for diffing the two (`--activity` prints the Activity view's grouping, Mach message destinations named); `ProcXRay --helper-call trace <pid> <seconds> [stacks] [activity]` goes through the installed helper over XPC (`stacks`: kperf user stacks, printed symbolicated with the top callers; `activity`: the Activity grouping, as the app builds it). Only the signed bundle can talk to the helper, not the raw `swift build` binary.
+- `ProcXRay --automation <app.app>… [-v]` prints what the Automation tab reads for each bundle (scripting dictionary, Shortcuts actions from the index and the bundle, SiriKit intents), without the UI.
 - `PROCXRAY_APPLE_TOOLS=1` in the environment of the process doing the reading forces Apple's tools instead of the native readers (`NativeTools.swift`), for comparing the two in the VM.
 
 ## Profiling refresh ticks

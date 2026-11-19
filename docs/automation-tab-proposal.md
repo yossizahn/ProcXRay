@@ -66,12 +66,14 @@ Labels follow "friendly phrase (Term)", e.g. "Opens the app when run (openAppWhe
 
 ## Phases
 
+Phase 1 is built: `AutomationTab.swift`, `ScriptingDictionary.swift`, `AppIntentsInfo.swift`. `ProcXRay --automation <app>… [-v]` prints what the tab reads, with timings: 3–18 ms for a dictionary, 20–170 ms for the index and bundle files. Parameter types in the bundle JSON are numbered primitives; the names, inferred from the parameters that use them, are 0 String, 1 Bool, 2 Int, 7 Double, 8 Date, 10 Placemark, 11 URL, 12 AttributedString (and `intents` 12, IntentFile).
+
 1. Static only, no permissions: sdef parsing and the dictionary outline, the tools database with the bundle-file fallback, and SiriKit intents.
 2. Live object explorer over Apple Events, with the Automation permission flow.
 3. Menu keyboard shortcuts from Accessibility, and the user's shortcuts that use the app.
 
 ## Open questions
 
-- What the `visibilityFlags` bits mean (values seen: 0, 2, 3, 5, 7, 13, 15).
+- What the `visibilityFlags` bits mean beyond 0. Phase 1 found 0 on every action whose bundle metadata says `isDiscoverable` = false (366 actions checked, in the apps in /Applications), and on SiriKit intents an app has replaced with App Intents (Mona). So 0 is shown as hidden. 2, 3, 5, 7, 13 and 15 aren't decoded.
 - `ContainerMetadata.containerType` values, and whether frameworks' intents are attributed to the app through `attributionContainerId`.
 - How `Shortcuts.sqlite` stores a shortcut's actions, and whether reading it needs Full Disk Access on 27.2.
