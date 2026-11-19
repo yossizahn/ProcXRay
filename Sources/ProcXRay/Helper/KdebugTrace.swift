@@ -152,6 +152,7 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         }
         let t = KdebugTrace(pid: pid, stacks: stacks && stackNote == nil, maxPending: maxPending, start: mach_absolute_time(), maxSeconds: maxSeconds)
         if let stackNote { t.notes = stackNote }
+        if t.stacks { t.mapLoadedImages() }
         if let e = op(KERN_KDENABLE, KDEBUG_ENABLE_TRACE) { Kperf.reset(); return fail("KDENABLE", e) }
         Thread.detachNewThread { t.pump() }
         return .success(t)
@@ -264,6 +265,28 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
             pendingBytes += bytes
         }
         lock.unlock()
+    }
+
+    /// The executable code mapped from files outside the shared cache when the trace starts, so frames in it
+    /// resolve even if the process is gone by the time their events are read (noteFrame looks up lazily): `ls`
+    /// launched under trace exits within milliseconds, before the first read, and every frame in /bin/ls came
+    /// out unnamed. A launched program is still suspended here, with its main executable (and dyld) mapped.
+    private func mapLoadedImages() {
+        var addr: UInt64 = 0
+        var info = proc_regionwithpathinfo()
+        let size = Int32(MemoryLayout.size(ofValue: info))
+        for _ in 0..<100_000 {
+            guard proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, addr, &info, size) == size else { break }
+            let start = info.prp_prinfo.pri_address, len = info.prp_prinfo.pri_size
+            guard len > 0, start + len > addr else { break }
+            addr = start + len
+            guard info.prp_prinfo.pri_protection & UInt32(VM_PROT_EXECUTE) != 0, !cache.contains(start) else { continue }
+            let path = withUnsafeBytes(of: info.prp_vip.vip_path) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            guard !path.isEmpty else { continue }
+            regions.append(StackRegion(start: start, size: len, path: path))
+        }
+        regions.sort { $0.start < $1.start }
+        unsent = regions
     }
 
     /// Looks up the image behind a frame outside the shared cache (which the app resolves in its own process)

@@ -380,20 +380,22 @@ enum Bench {
             // trace <pid> <seconds> [stacks] [show] [activity]: through the helper over XPC, as SyscallTracer does.
             // `activity` prints the Activity view's grouping, message destinations named through the helper.
             // launch <seconds> <app or program> [arguments…]: as Launch and Trace does (started suspended, run once the
-            // trace is on), always with the activity.
+            // trace is on), with the activity; `launch <seconds> stacks <program> …` prints the stacks' summary instead.
             let launching = what == "launch"
+            let launchStacks = launching && args.count > 2 && args[2] == "stacks"
+            let prog = launchStacks ? 3 : 2
             var pid = pid
             if launching {
-                guard args.count > 2 else { print("launch <seconds> <app or program> [arguments…]"); return }
-                let url = URL(fileURLWithPath: args[2])
-                guard let exe = Launcher.executable(for: url) else { print("launch: not an app or executable: \(args[2])"); return }
-                switch Launcher.spawnSuspended(exe, arguments: Array(args.dropFirst(3)), name: Launcher.displayName(for: url)) {
+                guard args.count > prog else { print("launch <seconds> [stacks] <app or program> [arguments…]"); return }
+                let url = URL(fileURLWithPath: args[prog])
+                guard let exe = Launcher.executable(for: url) else { print("launch: not an app or executable: \(args[prog])"); return }
+                switch Launcher.spawnSuspended(exe, arguments: Array(args.dropFirst(prog + 1)), name: Launcher.displayName(for: url)) {
                 case .success(let child): pid = child.pid; print("launch: \(child.name) is pid \(child.pid), suspended")
                 case .failure(let e): print("launch: \(e.message)"); return
                 }
             }
             let secs = (launching ? args.dropFirst().first : args.dropFirst(2).first).flatMap { Double($0) } ?? 3
-            let stacks = !launching && args.contains("stacks")
+            let stacks = launching ? launchStacks : args.contains("stacks")
             let s = HelperTraceSession()
             let t0 = Date()
             let format: SyscallTraceConfig.Format
@@ -412,7 +414,7 @@ enum Bench {
             var names: [String: Int] = [:]
             let symbols = StackSymbols()
             var withStack = 0, callers: [String: Int] = [:], examples: [String: SyscallRecord] = [:]
-            let activity = launching || args.contains("activity")
+            let activity = launching ? !launchStacks : args.contains("activity")
             var all: [SyscallRecord] = []
             func take(_ rs: [SyscallRecord]) {
                 if activity { all += rs }
@@ -445,7 +447,8 @@ enum Bench {
             if activity {
                 // As SyscallTracer does: names for message destinations through the helper.
                 printActivity(all + dec.pending(), pid: pid, names: MachPortNames.resolve(pid: pid), woken: wakes.names,
-                              threads: SyscallTracer.threadNames(wakes.threadNames, dec.threadNames))
+                              threads: SyscallTracer.threadNames(wakes.threadNames, dec.threadNames,
+                                                                 main: launching ? all.lazy.map(\.thread).min() : nil))
                 return
             }
             // Calls whose arguments have no signature yet (shown as raw words), by count.

@@ -36,6 +36,25 @@ final class StackSymbols: @unchecked Sendable {
     private lazy var cacheImages = SharedCacheImages()
     private let sharedCache = SharedCache.range
 
+    /// Regions for the images dyld reported loading (SyscallDecoder's "load image" records): the image's __TEXT,
+    /// from its load address and its file's segment size. Names frames without asking the process, so also after
+    /// it exited (a short-lived program launched with Launch and Trace, whose frames the helper couldn't look up in
+    /// time). Images in the shared cache are named from it already.
+    func addLoadedImages(_ recs: [SyscallRecord]) {
+        var new: [StackRegion] = []
+        for r in recs where r.isLibraryCall && r.name == "load image" {
+            guard let start = r.args?.first, let path = r.paths.first, !sharedCache.contains(start) else { continue }
+            lock.lock(); let known = loadedImages.contains(path); loadedImages.insert(path); lock.unlock()
+            guard !known else { continue }
+            let file = MachOParser.load(path: path)
+            guard file.slices.indices.contains(file.defaultSlice),
+                  let text = file.slices[file.defaultSlice].image?.segments.first(where: { $0.name == "__TEXT" }) else { continue }
+            new.append(StackRegion(start: start, size: text.vmsize, path: path))
+        }
+        add(new)
+    }
+    private var loadedImages: Set<String> = []
+
     func add(_ new: [StackRegion]) {
         guard !new.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }

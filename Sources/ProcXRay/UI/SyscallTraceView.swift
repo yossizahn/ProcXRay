@@ -135,6 +135,8 @@ final class SyscallTracer {
         }
         if resume { Launcher.resume(pid) }
         await tracer.setPhase(.running)
+        // A launched process is traced from its first instruction: its lowest thread id is its main thread.
+        var mainThread: UInt64?
         var dec = SyscallDecoder(stacks: stacks && format == .kdebug)
         var fds = FdLabeler()
         var threads = ThreadLabeler()
@@ -161,6 +163,8 @@ final class SyscallTracer {
             let (evs, bad) = format == .kdebug ? (KdebugEvent.decodeRaw(data), 0) : KdebugEvent.decode(data)
             symbols.add(regions)
             var recs = dec.feed(evs)
+            symbols.addLoadedImages(recs)
+            if resume, let low = recs.lazy.map(\.thread).min() { mainThread = min(mainThread ?? low, low) }
             fds.label(&recs) { s.describeFds($0) }
             let names = threads.label(&recs) { s.threads($0) }
             for i in recs.indices where !recs[i].stack.isEmpty { recs[i].caller = symbols.caller(recs[i].stack) }
@@ -168,7 +172,7 @@ final class SyscallTracer {
             if bad > 0 { n.append("\(bad) unreadable trace lines skipped.") }
             if !recs.isEmpty || !n.isEmpty || !evs.isEmpty {
                 await tracer.append(recs, events: evs.count, notes: n, names: names,
-                                    threads: Self.threadNames(threads.threadNames, dec.threadNames))
+                                    threads: Self.threadNames(threads.threadNames, dec.threadNames, main: mainThread))
             }
             if !running { break }
             if let t = stopTime, Date().timeIntervalSince(t) > deadlineAfterStop { endNote = endNote ?? "The trace did not stop in time."; break }
@@ -180,7 +184,8 @@ final class SyscallTracer {
         let names = threads.label(&last) { s.threads($0) }
         for i in last.indices where !last[i].stack.isEmpty { last[i].caller = symbols.caller(last[i].stack) }
         if !last.isEmpty {
-            await tracer.append(last, events: 0, notes: [], names: names, threads: Self.threadNames(threads.threadNames, dec.threadNames))
+            await tracer.append(last, events: 0, notes: [], names: names,
+                                threads: Self.threadNames(threads.threadNames, dec.threadNames, main: mainThread))
         }
         await tracer.finish(dec.pending(), note: endNote)
     }
@@ -188,10 +193,15 @@ final class SyscallTracer {
     private func setPhase(_ p: Phase) { if phase == .starting { phase = p } }
 
     /// The helper's names (with "main thread") under the trace's own: a name set during the trace is newer.
-    nonisolated static func threadNames(_ looked: [UInt64: String], _ traced: [UInt64: String]) -> [UInt64: String] {
+    /// `main`: the main thread when the trace itself knows it (a launched process: its first thread), for a process
+    /// that exited before the helper could be asked.
+    nonisolated static func threadNames(_ looked: [UInt64: String], _ traced: [UInt64: String], main: UInt64? = nil) -> [UInt64: String] {
         var out = looked
         for (t, n) in traced {
             out[t] = looked[t].map { $0.hasPrefix("main thread") ? "main thread, " + n : n } ?? n
+        }
+        if let main, !(out[main]?.hasPrefix("main thread") ?? false) {
+            out[main] = "main thread" + (out[main].map { ", " + $0 } ?? "")
         }
         return out
     }

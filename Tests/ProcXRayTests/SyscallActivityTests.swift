@@ -260,6 +260,15 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertNil(ManPage.page(for: "initializer"))
     }
 
+    func testLaunchedMainThreadName() {
+        // The helper found nothing (the process exited): the trace's own knowledge names the main thread.
+        XCTAssertEqual(SyscallTracer.threadNames([:], [7: "worker"], main: 5), [5: "main thread", 7: "worker"])
+        // Named during the trace, or already "main thread" from the helper: kept, not doubled.
+        XCTAssertEqual(SyscallTracer.threadNames([:], [5: "loop"], main: 5), [5: "main thread, loop"])
+        XCTAssertEqual(SyscallTracer.threadNames([5: "main thread"], [:], main: 5), [5: "main thread"])
+        XCTAssertEqual(SyscallTracer.threadNames([5: "main thread"], [5: "loop"], main: 5), [5: "main thread, loop"])
+    }
+
     func testPortKinds() {
         // lsmp's per-process records: a task port, an IOKit connection, a port the process receives on itself,
         // and a send right to another process's port.
