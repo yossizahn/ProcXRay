@@ -67,7 +67,7 @@ final class SyscallActivityTests: XCTestCase {
         let context = SyscallActivity.Context(pid: 10, ports: [0x903: 42], processNames: [42: "cfprefsd"])
         let groups = SyscallActivity.build([m1, m2, m3, stat1, stat2, kill], filter: "", errorsOnly: false, context: context)
         XCTAssertEqual(groups.map(\.operation), [.signal, .lookup, .message, .message])
-        XCTAssertEqual(groups.map(\.target), ["SIGTERM to pid 77", "/missing", "port 0xa03 (not in the port listing)", "cfprefsd (42)"])
+        XCTAssertEqual(groups.map(\.target), ["SIGTERM to pid 77", "/missing", "Unknown destination (port not in any listing)", "cfprefsd (42)"])
         XCTAssertEqual(groups[1].calls.map(\.id), [4, 5])
         XCTAssertEqual(groups[3].calls.map(\.id), [1, 2])
         XCTAssertEqual(groups[3].bytesOut, 104)
@@ -99,7 +99,7 @@ final class SyscallActivityTests: XCTestCase {
         let gone = record(4, "mach_msg2_trap", 3_000_000_000, args: [1, send, copySend | 40 << 32, 0x5503], label: nil)
         let context = SyscallActivity.Context(pid: 10, portKinds: [0x203: "task port", 0x1103: "own port"])
         let groups = SyscallActivity.build([task, own, reply, gone], filter: "", errorsOnly: false, context: context)
-        XCTAssertEqual(groups.map(\.target), ["port 0x5503 (not in the port listing)", "Reply (send-once)", "Own port", "Kernel: task port"])
+        XCTAssertEqual(groups.map(\.target), ["Unknown destination (port not in any listing)", "Reply (send-once)", "Own port", "Kernel: task port"])
     }
 
     func testMessageDestinationFromTheCall() {
@@ -120,7 +120,7 @@ final class SyscallActivityTests: XCTestCase {
         listed.blocked = false
         let context = SyscallActivity.Context(pid: 10, ports: [0x1203: 77], processNames: [42: "cfprefsd", 77: "WindowServer"])
         let groups = SyscallActivity.build([woke, kernel, reply, oneway, listed], filter: "", errorsOnly: false, context: context)
-        XCTAssertEqual(groups.map(\.target), ["WindowServer (77)", "port 0x5503 (not in the port listing)", "Reply to cfprefsd (42)",
+        XCTAssertEqual(groups.map(\.target), ["WindowServer (77)", "Unknown destination (port not in any listing)", "Reply to cfprefsd (42)",
                                               "Kernel object (port gone before any listing)", "cfprefsd (42)"])
         XCTAssertFalse(context.unnamed(0x1650b, sendOnce: false, call: woke))
         XCTAssertFalse(context.unnamed(0x16507, sendOnce: false, call: kernel))

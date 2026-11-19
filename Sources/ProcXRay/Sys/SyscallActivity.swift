@@ -32,7 +32,7 @@ struct SyscallActivity: Identifiable, Sendable {
 
         /// Where a mach_msg2_trap send goes: "cfprefsd (412)", "Kernel: task port", "Own port", "Reply to
         /// cfprefsd (412)" for an answer to a request (its send-once right is used up by the send, so no listing
-        /// finds it), or the port's name when nothing says.
+        /// finds it), or one label for all sends nothing names.
         ///
         /// The port listings first, then the call itself: the process of the thread the send woke, else a kernel
         /// object when a send-and-receive got its reply without blocking (SyscallDecoder.sched). Seen in Finder:
@@ -44,8 +44,12 @@ struct SyscallActivity: Identifiable, Sendable {
             if let p = r?.receiver { return (sendOnce ? "Reply to " : "") + process(p) }
             if sendOnce { return "Reply (send-once)" }
             if let r, Self.answeredInKernel(r) { return "Kernel object (port gone before any listing)" }
-            return "port 0x" + String(port, radix: 16) + " (not in the port listing)"
+            // One label for all of them: each is usually a new name used once, so naming the port made a one-call
+            // row per send (~80 in a trace of a Shortcuts run). The call's own arguments still show the port.
+            return Self.unknownDestination
         }
+
+        static let unknownDestination = "Unknown destination (port not in any listing)"
 
         /// A send-and-receive that succeeded without its thread giving up the CPU: a process's answer needs the
         /// receiver to run, so the kernel answered it.
