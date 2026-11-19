@@ -36,11 +36,14 @@ struct FastTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
     var initialSort: (String, ascending: Bool)
     var menu: (([Row]) -> [FastMenuItem])? = nil
     var onOpen: ((Row) -> Void)? = nil
+    /// Space with a row selected (the first selected row), as Finder's Quick Look; nil leaves Space to the table.
+    var onSpace: ((Row) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let table = NSTableView()
+        let table = KeyTableView()
+        table.onSpace = { [weak co = context.coordinator] in co?.space() ?? false }
         table.headerView = NSTableHeaderView()
         table.usesAlternatingRowBackgroundColors = true
         table.allowsMultipleSelection = true
@@ -149,6 +152,13 @@ struct FastTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
             return field
         }
 
+        /// Whether Space was handled.
+        func space() -> Bool {
+            guard let table, let onSpace = parent.onSpace, let i = table.selectedRowIndexes.first, i < shown.count else { return false }
+            onSpace(shown[i])
+            return true
+        }
+
         @objc func doubleClicked() {
             guard let table, table.clickedRow >= 0, table.clickedRow < shown.count else { return }
             parent.onOpen?(shown[table.clickedRow])
@@ -182,5 +192,15 @@ struct FastTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
             guard sender.tag < menuActions.count else { return }
             menuActions[sender.tag]()
         }
+    }
+}
+
+/// An NSTableView that hands Space to its owner.
+final class KeyTableView: NSTableView {
+    var onSpace: (() -> Bool)?
+    override func keyDown(with event: NSEvent) {
+        if event.charactersIgnoringModifiers == " ", event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty,
+           onSpace?() == true { return }
+        super.keyDown(with: event)
     }
 }

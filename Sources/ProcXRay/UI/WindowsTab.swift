@@ -72,7 +72,12 @@ struct WindowsTab: View {
             Spacer()
         } else {
             FastTable(rows: rows, columns: Self.columns, initialSort: ("layer", true),
-                      menu: { menu($0, r) }, onOpen: { w in act { WindowActions.raise(pid: proc.pid, window: w.id) } })
+                      menu: { menu($0, r) }, onOpen: { w in act { WindowActions.raise(pid: proc.pid, window: w.id) } },
+                      onSpace: { w in
+                          if ScreenshotWindow.isShowing(w.id) { ScreenshotWindow.close() }
+                          else if r.screenRecording { screenshot(w, .show) }
+                          else { actionNote = "Screenshots need Screen Recording permission for Proc X-Ray." }
+                      })
         }
     }
 
@@ -103,7 +108,7 @@ struct WindowsTab: View {
         items.append(FastMenuItem(title: "Show on Screen", enabled: w.onScreen) { ScreenHighlight.flash(w.bounds, seconds: 2.5) })
         items.append(.separator)
         let shot = r.screenRecording ? "" : " (needs Screen Recording)"
-        items.append(FastMenuItem(title: "Show Screenshot" + shot, enabled: r.screenRecording) { screenshot(w, .show) })
+        items.append(FastMenuItem(title: "Show Screenshot (Space)" + shot, enabled: r.screenRecording) { screenshot(w, .show) })
         items.append(FastMenuItem(title: "Copy Screenshot" + shot, enabled: r.screenRecording) { screenshot(w, .copy) })
         items.append(FastMenuItem(title: "Save Screenshot…" + shot, enabled: r.screenRecording) { screenshot(w, .save) })
         items.append(.separator)
@@ -123,7 +128,7 @@ struct WindowsTab: View {
                 let img = try await WindowActions.screenshot(window: w.id)
                 actionNote = nil
                 switch mode {
-                case .show: ScreenshotWindow.show(img, title: name)
+                case .show: ScreenshotWindow.show(img, title: name, windowID: w.id)
                 case .copy: try ScreenshotWindow.copy(img)
                 case .save: try ScreenshotWindow.save(img, name: name)
                 }
@@ -160,7 +165,7 @@ struct WindowsTab: View {
                        help: "The window level: which windows it stays above (kCGWindowLayer)",
                        text: { WindowList.layerName($0.layer) }, tooltip: { "kCGWindowLayer \($0.layer)" },
                        less: { ($0.layer, $0.id) < ($1.layer, $1.id) }),
-            FastColumn(id: "role", title: "Role", width: 110,
+            FastColumn(id: "role", title: "Role", width: 190,
                        help: "What kind of window the app says it is (Accessibility subrole)",
                        text: { $0.subrole.map(Self.roleName) ?? "—" }, color: { $0.subrole == nil ? secondary : nil },
                        tooltip: { $0.subrole }, less: { ($0.subrole ?? "") < ($1.subrole ?? "") }),
@@ -261,18 +266,32 @@ private struct TapsCard: View {
     }
 }
 
-/// A window screenshot in a window of its own, at its real size (scaled down to fit the screen), with Copy and Save.
+/// A window's screenshot in a small floating panel, like Quick Look: Space on a row shows it, Space again
+/// closes it, Space on another row replaces it. There is only ever one. Thumbnail-sized at first; resize it to see more. The panel
+/// doesn't take keyboard focus, so the table keeps it.
 @MainActor
-final class ScreenshotWindow: NSWindowController, NSWindowDelegate {
-    private static var open: [ScreenshotWindow] = []
+final class ScreenshotWindow: NSObject, NSWindowDelegate {
+    private static var current: ScreenshotWindow?
+    /// The size the panel opens at; the image is fitted inside it.
+    private static let thumbnail = NSSize(width: 360, height: 240)
+
+    let windowID: CGWindowID
     private let image: CGImage
     private let name: String
+    private let panel: NSPanel
 
-    static func show(_ image: CGImage, title: String) {
-        let c = ScreenshotWindow(image, title: title)
-        open.append(c)
-        c.showWindow(nil)
-        c.window?.makeKeyAndOrderFront(nil)
+    /// Whether the preview of `id` is the one on screen.
+    static func isShowing(_ id: CGWindowID) -> Bool { current?.windowID == id && current?.panel.isVisible == true }
+
+    static func close() { current?.panel.close() }
+
+    static func show(_ image: CGImage, title: String, windowID: CGWindowID) {
+        // Replacing a preview keeps its place on screen.
+        let previous = current?.panel.frame
+        current?.panel.close()
+        let c = ScreenshotWindow(image, title: title, windowID: windowID, near: previous)
+        current = c
+        c.panel.orderFront(nil)
     }
 
     struct EncodeError: LocalizedError { var errorDescription: String? { "Couldn't encode the screenshot as PNG." } }
@@ -293,59 +312,85 @@ final class ScreenshotWindow: NSWindowController, NSWindowDelegate {
         try png.write(to: url)
     }
 
-    private init(_ image: CGImage, title: String) {
+    private init(_ image: CGImage, title: String, windowID: CGWindowID, near previous: NSRect?) {
         self.image = image
         self.name = title
-        let screen = NSScreen.main ?? NSScreen.screens[0]
-        let scale = screen.backingScaleFactor
-        let natural = NSSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)
-        let limit = NSSize(width: screen.visibleFrame.width * 0.8, height: screen.visibleFrame.height * 0.8 - 40)
-        let fit = min(1, limit.width / natural.width, limit.height / natural.height)
-        let shown = NSSize(width: max(200, natural.width * fit), height: max(80, natural.height * fit))
+        self.windowID = windowID
+        let bar: CGFloat = 32
+        let aspect = CGFloat(image.width) / max(1, CGFloat(image.height))
+        // Fit the image in the thumbnail box, never larger than real size.
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let box = Self.thumbnail
+        var w = min(box.width, CGFloat(image.width) / scale), h = w / aspect
+        if h > box.height { h = box.height; w = h * aspect }
+        let size = NSSize(width: max(220, w), height: max(60, h) + bar)
 
         let iv = NSImageView()
-        iv.image = NSImage(cgImage: image, size: natural)
+        iv.image = NSImage(cgImage: image, size: NSSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale))
         iv.imageScaling = .scaleProportionallyUpOrDown
         iv.translatesAutoresizingMaskIntoConstraints = false
+        // The image's own size mustn't size the panel (a full-screen window's would open screen-sized).
+        for o in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
+            iv.setContentCompressionResistancePriority(.init(1), for: o)
+            iv.setContentHuggingPriority(.init(1), for: o)
+        }
 
         let copy = NSButton(title: "Copy", target: nil, action: #selector(copyImage))
         let save = NSButton(title: "Save…", target: nil, action: #selector(saveImage))
-        let size = NSTextField(labelWithString: "\(image.width) × \(image.height) pixels")
-        size.textColor = .secondaryLabelColor
-        size.font = .systemFont(ofSize: 11)
-        let bar = NSStackView(views: [size, NSView(), copy, save])
-        bar.translatesAutoresizingMaskIntoConstraints = false
-        bar.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+        for b in [copy, save] { b.controlSize = .small; b.bezelStyle = .push }
+        let label = NSTextField(labelWithString: "\(image.width) × \(image.height)")
+        label.textColor = .secondaryLabelColor
+        label.font = .systemFont(ofSize: 11)
+        let stack = NSStackView(views: [label, NSView(), copy, save])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
 
         let content = NSView()
         content.addSubview(iv)
-        content.addSubview(bar)
+        content.addSubview(stack)
         NSLayoutConstraint.activate([
             iv.topAnchor.constraint(equalTo: content.topAnchor),
             iv.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             iv.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            iv.bottomAnchor.constraint(equalTo: bar.topAnchor),
-            bar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            bar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            iv.bottomAnchor.constraint(equalTo: stack.topAnchor),
+            stack.heightAnchor.constraint(equalToConstant: bar),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
 
-        let w = NSWindow(contentRect: NSRect(origin: .zero, size: NSSize(width: shown.width, height: shown.height + 40)),
-                         styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-        w.title = "Screenshot — " + title
-        w.isReleasedWhenClosed = false
-        w.contentView = content
-        w.center()
-        super.init(window: w)
-        w.delegate = self
+        panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+                        styleMask: [.titled, .closable, .resizable, .utilityWindow, .nonactivatingPanel],
+                        backing: .buffered, defer: false)
+        panel.title = title
+        panel.isReleasedWhenClosed = false
+        panel.becomesKeyOnlyIfNeeded = true
+        // Stays above every app's windows, also while another app is in front: one preview, always in sight.
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.contentView = content
+        super.init()
+        panel.delegate = self
         copy.target = self
         save.target = self
+        if let previous {
+            // Same top-left corner as the one it replaces.
+            panel.setFrameTopLeftPoint(NSPoint(x: previous.minX, y: previous.maxY))
+        } else if let key = NSApp.keyWindow {
+            // Over the right-hand side of the window it was opened from.
+            let f = key.frame
+            panel.setFrameTopLeftPoint(NSPoint(x: f.maxX - panel.frame.width - 24, y: f.maxY - 120))
+        } else {
+            panel.center()
+        }
     }
-
-    required init?(coder: NSCoder) { fatalError() }
 
     @objc private func copyImage() { try? Self.copy(image) }
     @objc private func saveImage() { try? Self.save(image, name: name) }
 
-    func windowWillClose(_ notification: Notification) { Self.open.removeAll { $0 === self } }
+    func windowWillClose(_ notification: Notification) {
+        if Self.current === self { Self.current = nil }
+    }
 }
