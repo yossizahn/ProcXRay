@@ -56,6 +56,14 @@ struct SyscallActivity: Identifiable, Sendable {
 
         static let unknownDestination = "Unknown destination (port not in any listing)"
 
+        /// Where a mach_msg2_trap send went, for a call on its own (the Calls table): the kernel routine that handled
+        /// it ("task_info (kernel)"), else as `destination` names it. nil for other calls and receives.
+        func messageTarget(_ r: SyscallRecord) -> String? {
+            guard r.name == "mach_msg2_trap", let a = r.args, let m = Self.messagePort(a) else { return nil }
+            if let k = r.kernelRoutine { return MIGRoutines.name(k) + " (kernel)" }
+            return destination(m.port, sendOnce: m.sendOnce, call: r)
+        }
+
         /// A send-and-receive that succeeded without its thread giving up the CPU: a process's answer needs the
         /// receiver to run, so the kernel answered it.
         static func answeredInKernel(_ r: SyscallRecord) -> Bool {

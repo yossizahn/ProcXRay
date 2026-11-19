@@ -4,40 +4,51 @@ import SwiftUI
 /// Opens a syscall's section-2 man page in the best viewer at hand: Dash, else `man` through x-man-page:// (Terminal,
 /// iTerm or whatever claims it) when the page is installed, else Apple's pages on the web.
 enum ManPage {
-    /// The section-2 page for a traced name, if macOS has one: "open_nocancel" → "open", "stat64_extended" → "stat64".
-    static func page(for name: String) -> String? {
+    struct Page: Hashable, Sendable {
+        let name: String
+        let section: Int
+        var title: String { "\(name)(\(section))" }
+    }
+
+    /// The man page for a traced name, if macOS has one: section 2 for syscalls ("open_nocancel" → open(2),
+    /// "stat64_extended" → stat64(2)), section 3 for dyld's calls (dlopen(3)).
+    static func page(for name: String) -> Page? {
+        if section3.contains(name) { return Page(name: name, section: 3) }
         var n = name
         if n.hasSuffix("_nocancel") { n.removeLast(9) }
         if n.hasSuffix("_extended") { n.removeLast(9) }
         for c in [n, n.hasPrefix("__") ? String(n.dropFirst(2)) : n, n.hasSuffix("64") ? String(n.dropLast(2)) : n]
-        where section2.contains(c) { return c }
+        where section2.contains(c) { return Page(name: c, section: 2) }
         return nil
     }
 
-    static func help(_ page: String) -> String { "Open the \(page)(2) man page" }
+    /// The library calls the trace shows (dyld's, SyscallRecord.isLibraryCall) that have a page.
+    static let section3: Set<String> = ["dlopen", "dlsym", "dlclose", "dladdr"]
 
-    static func open(_ page: String) {
+    static func help(_ page: Page) -> String { "Open the \(page.title) man page" }
+
+    static func open(_ page: Page) {
         Task.detached(priority: .userInitiated) {
             let url = viewerURL(page)
             await MainActor.run { _ = NSWorkspace.shared.open(url) }
         }
     }
 
-    /// In order: Dash, `man` (only when the page is installed: section 2 comes with Xcode or the Command Line Tools,
-    /// not with macOS), the web.
-    private static func viewerURL(_ page: String) -> URL {
+    /// In order: Dash, `man` (only when the page is installed: sections 2 and 3 come with Xcode or the Command Line
+    /// Tools, not with macOS), the web.
+    private static func viewerURL(_ page: Page) -> URL {
         // "open(2)" puts the section-2 page first in Dash's results; a bare "open" lists open(1) alongside.
-        if let dash = URL(string: "dash-plugin://keys=manpages&query=\(page)(2)"),
+        if let dash = URL(string: "dash-plugin://keys=manpages&query=\(page.name)(\(page.section))"),
            NSWorkspace.shared.urlForApplication(toOpen: dash) != nil { return dash }
-        if let term = URL(string: "x-man-page://2/\(page)"),
+        if let term = URL(string: "x-man-page://\(page.section)/\(page.name)"),
            NSWorkspace.shared.urlForApplication(toOpen: term) != nil, installed(page) { return term }
-        return URL(string: "https://keith.github.io/xcode-man-pages/\(page).2.html")!
+        return URL(string: "https://keith.github.io/xcode-man-pages/\(page.name).\(page.section).html")!
     }
 
-    private static func installed(_ page: String) -> Bool {
+    private static func installed(_ page: Page) -> Bool {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/man")
-        p.arguments = ["-w", "2", page]
+        p.arguments = ["-w", String(page.section), page.name]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return false }

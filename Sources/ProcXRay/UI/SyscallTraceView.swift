@@ -29,6 +29,8 @@ final class SyscallTracer {
     private var stopFlag: Shell.Cancel?
     /// Whether the current trace asked for stacks, and the names for their frames.
     private(set) var withStacks = false
+    /// Some call has a caller: every one in a trace with stacks, static initializers (their function) in any.
+    private(set) var hasCallers = false
     private(set) var symbols = StackSymbols()
 
     static let cap = 200_000
@@ -45,6 +47,7 @@ final class SyscallTracer {
         generation += 1
         let gen = generation
         withStacks = stacks
+        hasCallers = stacks
         symbols = StackSymbols()
         let symbols = symbols
         phase = .starting
@@ -213,6 +216,7 @@ final class SyscallTracer {
                   context.unnamed(port, sendOnce: once, call: r), seenPorts.insert(port).inserted else { continue }
             if !listedPorts.contains(port) { unresolvedPorts = true }
         }
+        if !hasCallers, recs.contains(where: { !$0.caller.isEmpty }) { hasCallers = true }
         records.append(contentsOf: recs)
         if records.count > Self.cap {
             // Drop in slabs of 10%, not one by one: removeFirst is O(n).
@@ -267,6 +271,8 @@ struct SyscallTraceView: View {
     @State private var selection: Set<SyscallRecord.ID> = []
     @State private var summarySelection: Set<SyscallSummaryRow.ID> = []
     @State private var activitySelection: Set<ActivityRowID> = []
+
+    private var showCaller: Bool { tracer.withStacks || tracer.hasCallers }
 
     private var disabledReason: String? {
         if exited { return InspectorView.exitedNote }
@@ -396,11 +402,16 @@ struct SyscallTraceView: View {
                 Text(r.start.map(Self.seconds) ?? "before").monospacedDigit()
             }
             .width(min: 70, ideal: 84, max: 110)
-            TableColumn("Thread", value: \.thread) { r in Text(String(r.thread)).monospacedDigit().foregroundStyle(.secondary) }
-                .width(min: 50, ideal: 70, max: 100)
+            TableColumn("Thread", value: \.thread) { r in
+                let t = Self.thread(r.thread, tracer.context.threadNames)
+                Text(t).monospacedDigit().foregroundStyle(.secondary).truncationHelp(t)
+            }
+                .width(min: 50, ideal: 110, max: 260)
             TableColumn("Syscall", value: \.name) { r in
                 HStack(spacing: 4) {
-                    Text(r.name).foregroundStyle(r.mach ? Color.purple : Color.primary).truncationHelp(r.name)
+                    // Purple: Mach traps; teal: dyld's library calls, from its trace events rather than the kernel.
+                    Text(r.name).foregroundStyle(r.mach ? Color.purple : r.isLibraryCall ? Color.teal : Color.primary)
+                        .truncationHelp(r.isLibraryCall ? r.name + " (a dyld call, from dyld's trace events)" : r.name)
                     Spacer(minLength: 0)
                     ManPageButton(name: r.name)
                 }
@@ -412,17 +423,18 @@ struct SyscallTraceView: View {
             }
                 .width(min: 100, ideal: 240)
             TableColumn("Result") { r in
-                Text(r.resultText)
+                let t = Self.result(r, tracer.context)
+                Text(t)
                     .foregroundStyle(r.failed ? Color.red : (r.state == .inProgress ? Color.orange : Color.primary))
-                    .truncationHelp(r.resultText)
+                    .truncationHelp(t)
             }
-            .width(min: 60, ideal: 140)
+            .width(min: 60, ideal: 200)
             TableColumn("Duration", value: \.durationKey) { r in
                 Text(r.duration.map(Self.duration) ?? "—").monospacedDigit()
             }
             .width(min: 60, ideal: 76, max: 110)
             TableColumn("Caller") { r in Text(r.caller).foregroundStyle(.secondary).truncationHelp(r.caller) }
-                .width(min: tracer.withStacks ? 80 : 0, ideal: tracer.withStacks ? 220 : 0, max: tracer.withStacks ? .infinity : 0)
+                .width(min: showCaller ? 80 : 0, ideal: showCaller ? 220 : 0, max: showCaller ? .infinity : 0)
             TableColumn("Path") { r in
                 HStack(spacing: 4) {
                     Text(r.pathText).truncationHelp(r.pathText)
@@ -437,7 +449,7 @@ struct SyscallTraceView: View {
             Button("Copy") { copy(ids) }
             let pages = Set(shown.filter { ids.contains($0.id) }.compactMap { ManPage.page(for: $0.name) })
             if pages.count == 1, let page = pages.first {
-                Button("\(page)(2) Man Page") { ManPage.open(page) }
+                Button("\(page.title) Man Page") { ManPage.open(page) }
             }
         }
         .onCopyCommand { [ids = selection] in
@@ -468,7 +480,7 @@ struct SyscallTraceView: View {
         .contextMenu(forSelectionType: SyscallSummaryRow.ID.self) { ids in
             Button("Copy") { Pasteboard.copy(summaryText(ids)) }
             if ids.count == 1, let name = ids.first, let page = ManPage.page(for: name) {
-                Button("\(page)(2) Man Page") { ManPage.open(page) }
+                Button("\(page.title) Man Page") { ManPage.open(page) }
             }
         }
         .onCopyCommand { [ids = summarySelection] in
@@ -493,8 +505,9 @@ struct SyscallTraceView: View {
             let rows = all.filter { r in
                 (!errorsOnly || r.failed) &&
                 (filter.isEmpty || r.name.localizedCaseInsensitiveContains(filter) || r.pathText.localizedCaseInsensitiveContains(filter)
-                 || r.resultText.localizedCaseInsensitiveContains(filter) || r.argsText.localizedCaseInsensitiveContains(filter)
-                 || r.caller.localizedCaseInsensitiveContains(filter))
+                 || Self.result(r, context).localizedCaseInsensitiveContains(filter) || r.argsText.localizedCaseInsensitiveContains(filter)
+                 || r.caller.localizedCaseInsensitiveContains(filter)
+                 || (context.threadNames[r.thread]?.localizedCaseInsensitiveContains(filter) ?? false))
             }
             if summaryMode { return ([], SyscallSummaryRow.build(rows).sorted(using: summarySort)) }
             return (rows.sorted(using: sort), [])
@@ -538,17 +551,29 @@ struct SyscallTraceView: View {
 
     private func text(for ids: Set<SyscallRecord.ID>?) -> String {
         shown.filter { ids?.contains($0.id) ?? true }.map { r in
-            Self.line(r, argNames: argNames) + tracer.symbols.frames(r.stack).map { "\n    " + $0.text }.joined()
+            Self.line(r, argNames: argNames, context: tracer.context) + tracer.symbols.frames(r.stack).map { "\n    " + $0.text }.joined()
         }.joined(separator: "\n")
     }
 
     /// strace-style: `+1.234567 [tid] name(args) = result <duration> path`, and the caller when stacks were on.
-    nonisolated static func line(_ r: SyscallRecord, argNames: Bool = true) -> String {
+    nonisolated static func line(_ r: SyscallRecord, argNames: Bool = true, context: SyscallActivity.Context? = nil) -> String {
         let t = r.start.map(seconds) ?? "before"
         let d = r.duration.map { " <\(duration($0))>" } ?? ""
         let p = r.paths.isEmpty ? "" : "  \(r.pathText)"
         let c = r.caller.isEmpty ? "" : "  ← \(r.caller)"
-        return "\(t) [\(r.thread)] \(r.name)(\(argNames ? r.namedArgsText : r.argsText)) = \(r.resultText)\(d)\(p)\(c)"
+        let th = context.map { thread(r.thread, $0.threadNames) } ?? String(r.thread)
+        let res = context.map { result(r, $0) } ?? r.resultText
+        return "\(t) [\(th)] \(r.name)(\(argNames ? r.namedArgsText : r.argsText)) = \(res)\(d)\(p)\(c)"
+    }
+
+    /// "92032 com.apple.NSEventThread", or the id alone for an unnamed thread.
+    nonisolated static func thread(_ tid: UInt64, _ names: [UInt64: String]) -> String {
+        names[tid].map { String(tid) + " " + $0 } ?? String(tid)
+    }
+
+    /// The result, with where a Mach message went: "KERN_SUCCESS → task_info (kernel)", "… → cfprefsd (164)".
+    nonisolated static func result(_ r: SyscallRecord, _ context: SyscallActivity.Context) -> String {
+        context.messageTarget(r).map { r.resultText + "  → " + $0 } ?? r.resultText
     }
 
     /// Tab-separated with a header row, in the table's order.

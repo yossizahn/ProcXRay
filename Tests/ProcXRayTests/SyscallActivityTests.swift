@@ -238,6 +238,28 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertEqual(groups.map(\.target), ["task_info"])
     }
 
+    func testCallsTableLabels() {
+        let send = UInt64(MACH_SEND_MSG), sendRcv = UInt64(MACH_SEND_MSG | MACH_RCV_MSG)
+        var kernel = record(1, "mach_msg2_trap", 0, args: [1, sendRcv, 0x13, 0x203], label: nil)
+        kernel.kernelRoutine = MIGRoutines.names.firstIndex(of: "task_info")
+        kernel.resultText = "KERN_SUCCESS"
+        var woke = record(2, "mach_msg2_trap", 5, thread: 9, args: [1, send, 0x13, 0x1650b], label: nil)
+        woke.receiver = 42
+        woke.resultText = "KERN_SUCCESS"
+        let read = record(3, "read", 10)
+        let context = SyscallActivity.Context(pid: 10, processNames: [42: "cfprefsd"], threadNames: [9: "main thread"])
+        XCTAssertEqual(context.messageTarget(kernel), "task_info (kernel)")
+        XCTAssertEqual(context.messageTarget(woke), "cfprefsd (42)")
+        XCTAssertNil(context.messageTarget(read))
+        let line = SyscallTraceView.line(woke, context: context)
+        XCTAssertTrue(line.contains("[9 main thread]"), line)
+        XCTAssertTrue(line.contains("= KERN_SUCCESS  → cfprefsd (42)"), line)
+
+        XCTAssertEqual(ManPage.page(for: "open_nocancel"), ManPage.Page(name: "open", section: 2))
+        XCTAssertEqual(ManPage.page(for: "dlsym")?.title, "dlsym(3)")
+        XCTAssertNil(ManPage.page(for: "initializer"))
+    }
+
     func testPortKinds() {
         // lsmp's per-process records: a task port, an IOKit connection, a port the process receives on itself,
         // and a send right to another process's port.
