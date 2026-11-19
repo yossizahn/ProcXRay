@@ -1254,3 +1254,34 @@ extension Bench {
         walk(ScriptingExplorer.application, 0)
     }
 }
+
+extension Bench {
+    /// `--ae-probe <pid>`: does an app answer object queries without a dictionary? Asks for Automation
+    /// permission (the system prompt, waiting for the answer), then sends Cocoa Standard Suite queries by their
+    /// raw codes and prints each reply or error, one tab-separated line per query.
+    static func aeProbe(_ pid: pid_t) {
+        let p = ScriptingExplorer.permission(pid, ask: true)
+        print("permission\t\(p)")
+        guard p == .allowed else { return }
+        let m = ScriptingExplorer.Model(ScriptingDictionary(suites: []), appName: Native.path(pid).map { ($0 as NSString).lastPathComponent } ?? "\(pid)")
+        let app = ScriptingExplorer.application
+        func show(_ label: String, _ r: Result<NSAppleEventDescriptor, ScriptingExplorer.Failure>) {
+            switch r {
+            case .success(let d): print("\(label)\tok\t\(ScriptingExplorer.describe(d, m).prefix(300))")
+            case .failure(let f): print("\(label)\terr \(f.code)\t\(f.text)")
+            }
+        }
+        show("properties", ScriptingExplorer.get(pid, ScriptingExplorer.property(fcc("pALL"), of: app)))
+        show("name", ScriptingExplorer.get(pid, ScriptingExplorer.property(fcc("pnam"), of: app)))
+        show("version", ScriptingExplorer.get(pid, ScriptingExplorer.property(fcc("vers"), of: app)))
+        switch ScriptingExplorer.count(pid, app, fcc("cwin")) {
+        case .success(let n): print("count windows\tok\t\(n)")
+        case .failure(let f): print("count windows\terr \(f.code)\t\(f.text)")
+        }
+        show("window 1 name", ScriptingExplorer.get(pid, ScriptingExplorer.property(fcc("pnam"), of: ScriptingExplorer.element(fcc("cwin"), index: 1, of: app))))
+        switch ScriptingExplorer.count(pid, app, fcc("docu")) {
+        case .success(let n): print("count documents\tok\t\(n)")
+        case .failure(let f): print("count documents\terr \(f.code)\t\(f.text)")
+        }
+    }
+}

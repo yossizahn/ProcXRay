@@ -142,6 +142,10 @@ struct ProcXRayApp: App {
             Bench.trustLayout(pid_t(CommandLine.arguments[i + 1]) ?? 0)
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--ae-probe"), i + 1 < CommandLine.arguments.count {
+            Bench.aeProbe(pid_t(CommandLine.arguments[i + 1]) ?? 0)
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--explore"), i + 1 < CommandLine.arguments.count {
             Bench.explore(pid_t(CommandLine.arguments[i + 1]) ?? 0, depth: i + 2 < CommandLine.arguments.count ? Int(CommandLine.arguments[i + 2]) ?? 2 : 2)
             exit(0)

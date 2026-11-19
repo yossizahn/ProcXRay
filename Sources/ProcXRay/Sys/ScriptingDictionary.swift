@@ -1,3 +1,4 @@
+import AppKit
 import Carbon
 import Foundation
 
@@ -104,6 +105,14 @@ struct ScriptingDictionary: Sendable, Equatable {
     }
 
     static func read(bundle path: String) -> Reading {
+        // An app that's scriptable but ships no dictionary file (NSAppleScriptEnabled alone: Cocoa's standard
+        // suites plus what it adds at runtime) can only tell its dictionary itself, and
+        // OSACopyScriptingDefinitionFromURL launches it to ask (measured: 15 apps launched by one survey).
+        // Ask only an app that's already running.
+        let d = declared(bundle: path)
+        if d.enabled == true, d.sdefFile == nil, !isRunning(path) {
+            return .none("Scriptable, with the dictionary it gives when running (Cocoa's standard suites and its own). It isn't running, and reading it would launch it.")
+        }
         var out: Unmanaged<CFData>?
         let err = OSACopyScriptingDefinitionFromURL(URL(fileURLWithPath: path) as CFURL, 0, &out)
         guard err == noErr, let data = out?.takeRetainedValue() as Data? else {
@@ -114,6 +123,11 @@ struct ScriptingDictionary: Sendable, Equatable {
         } catch {
             return .none("The dictionary didn't parse: \(error.localizedDescription)")
         }
+    }
+
+    private static func isRunning(_ path: String) -> Bool {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        return NSWorkspace.shared.runningApplications.contains { $0.bundleURL?.standardizedFileURL == url }
     }
 
     static func parse(_ data: Data) throws -> ScriptingDictionary {

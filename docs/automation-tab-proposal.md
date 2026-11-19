@@ -72,6 +72,10 @@ Phase 1 is built: `AutomationTab.swift`, `ScriptingDictionary.swift`, `AppIntent
 2. Live object explorer over Apple Events, with the Automation permission flow. Built: `ScriptingExplorer.swift` (events, specifiers, values), `ScriptingExplorerWindow.swift` (the outline), opened by Explore Live Objects… in the tab. `ProcXRay --explore <pid> [depth]` walks it without the UI. Measured in pxr-dev on Finder, TextEdit and Reminders: `count` takes the container with the class in `kocl` (Finder refuses an every-specifier with -1700), so the reader tries that first and falls back. Finder reports its own class as `null` in `properties`, so a reported class the dictionary doesn't have is ignored. Reminders answers -1743 even with Automation allowed until the sender also has Reminders access (kTCCServiceReminders). Points and rectangles in replies are in host byte order.
 3. Menu keyboard shortcuts from Accessibility, and the user's shortcuts that use the app.
 
+## Apps without a dictionary
+
+Measured 2026-11-19 on the host, 472 app bundles. 17 set `NSAppleScriptEnabled` with no dictionary file; for those `OSACopyScriptingDefinitionFromURL` launches the app and returns Cocoa's Standard and Text Suites plus any suite it adds at runtime (VLC, TextEdit, Script Editor, Automator). So the tab reads their dictionary only while they run. 381 declare nothing. Probed with Cocoa Standard Suite queries by raw code (`ProcXRay --ae-probe <pid>`: properties, name, version, count windows, window 1's name, count documents), Calculator (AppKit), Weather (SwiftUI), Fork (third-party AppKit) and Slack (Electron) answer every one with -1708, errAEEventNotHandled; TextEdit, as a control, answers all six. An app that doesn't declare scripting has no live objects to explore, so the explorer stays limited to apps with a dictionary.
+
 ## Open questions
 
 - What the `visibilityFlags` bits mean beyond 0. Phase 1 found 0 on every action whose bundle metadata says `isDiscoverable` = false (366 actions checked, in the apps in /Applications), and on SiriKit intents an app has replaced with App Intents (Mona). So 0 is shown as hidden. 2, 3, 5, 7, 13 and 15 aren't decoded.
