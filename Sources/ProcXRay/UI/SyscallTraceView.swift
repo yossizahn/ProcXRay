@@ -129,7 +129,7 @@ final class SyscallTracer {
         await tracer.setPhase(.running)
         var dec = SyscallDecoder(stacks: stacks && format == .kdebug)
         var fds = FdLabeler()
-        var wakes = WakeLabeler()
+        var threads = ThreadLabeler()
         var stopSent = false
         var endNote: String?
         let deadlineAfterStop: TimeInterval = 6
@@ -154,12 +154,13 @@ final class SyscallTracer {
             symbols.add(regions)
             var recs = dec.feed(evs)
             fds.label(&recs) { s.describeFds($0) }
-            let names = wakes.label(&recs) { s.threadOwners($0) }
+            let names = threads.label(&recs) { s.threads($0) }
             for i in recs.indices where !recs[i].stack.isEmpty { recs[i].caller = symbols.caller(recs[i].stack) }
             var n = notes.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
             if bad > 0 { n.append("\(bad) unreadable trace lines skipped.") }
             if !recs.isEmpty || !n.isEmpty || !evs.isEmpty {
-                await tracer.append(recs, events: evs.count, notes: n, names: names)
+                await tracer.append(recs, events: evs.count, notes: n, names: names,
+                                    threads: Self.threadNames(threads.threadNames, dec.threadNames))
             }
             if !running { break }
             if let t = stopTime, Date().timeIntervalSince(t) > deadlineAfterStop { endNote = endNote ?? "The trace did not stop in time."; break }
@@ -168,15 +169,28 @@ final class SyscallTracer {
         }
         var last = dec.flush()
         fds.label(&last) { s.describeFds($0) }
-        let names = wakes.label(&last) { s.threadOwners($0) }
+        let names = threads.label(&last) { s.threads($0) }
         for i in last.indices where !last[i].stack.isEmpty { last[i].caller = symbols.caller(last[i].stack) }
-        if !last.isEmpty { await tracer.append(last, events: 0, notes: [], names: names) }
+        if !last.isEmpty {
+            await tracer.append(last, events: 0, notes: [], names: names, threads: Self.threadNames(threads.threadNames, dec.threadNames))
+        }
         await tracer.finish(dec.pending(), note: endNote)
     }
 
     private func setPhase(_ p: Phase) { if phase == .starting { phase = p } }
 
-    private func append(_ recs: [SyscallRecord], events n: Int, notes n2: [String], names: [Int32: String] = [:]) {
+    /// The helper's names (with "main thread") under the trace's own: a name set during the trace is newer.
+    nonisolated static func threadNames(_ looked: [UInt64: String], _ traced: [UInt64: String]) -> [UInt64: String] {
+        var out = looked
+        for (t, n) in traced {
+            out[t] = looked[t].map { $0.hasPrefix("main thread") ? "main thread, " + n : n } ?? n
+        }
+        return out
+    }
+
+    private func append(_ recs: [SyscallRecord], events n: Int, notes n2: [String], names: [Int32: String] = [:],
+                        threads: [UInt64: String] = [:]) {
+        if context.threadNames != threads, !threads.isEmpty { context.threadNames = threads; revision += 1 }
         events += n
         for note in n2 where !notes.contains(note) {
             notes.append(note)
@@ -256,7 +270,8 @@ struct SyscallTraceView: View {
             if tracer.phase == .idle {
                 placeholder
             } else if mode == "Activity" {
-                SyscallActivityView(groups: activities, filtered: !filter.isEmpty || errorsOnly, selection: $activitySelection)
+                SyscallActivityView(groups: activities, threadNames: tracer.context.threadNames,
+                                    filtered: !filter.isEmpty || errorsOnly, selection: $activitySelection)
             } else if mode == "Summary" {
                 summaryTable
             } else {
@@ -525,7 +540,7 @@ struct SyscallTraceView: View {
     /// Everything the current mode shows (after the filter).
     private func exportText() -> String {
         switch mode {
-        case "Activity": SyscallActivityView.text(activities)
+        case "Activity": SyscallActivityView.text(activities, names: tracer.context.threadNames)
         case "Summary": summaryText(nil)
         default: text(for: nil)
         }

@@ -22,6 +22,18 @@ import Foundation
 //            a send-and-receive whose reply came without the thread blocking went to a kernel object (38 of 38;
 //            every call to another process blocked). The kernel's per-message IPC events (MACH_IPC_kmsg_info,
 //            which name the receiver) are only compiled into development kernels (checked in the 27.2 KDK).
+//   Strings (7 / 0x01): TRACE_STRING_GLOBAL (code 0) gives a string an id for later events: first event (func 1)
+//            args = [the owning event's debugid, the id, then text], more text in later events, the last has func 2;
+//            the same id sent again empty releases it. TRACE_STRING_THREADNAME (code 4) and _PREV (code 5, its old
+//            name, sent at a rename or exit) carry the event thread's name in all four args.
+//   dyld (0x1f), from dyld's Tracing.h, each a start/end pair with args[0] a sequence number shared by both:
+//            dlopen (0x08/0): [seq, path string id, mode] → [seq, handle]; dlclose (0x08/2): [seq, handle];
+//            dlsym (0x08/3): [seq, handle, symbol string id] → [seq, address]; dladdr (0x08/4): [seq, address];
+//            static initializer (0x07/0): [seq, image header, function]. Image loads (0x05/0 then 0x05/1, no pair):
+//            [uuid, uuid, load address] then [_, path string id]. Checked with a test program in the VM (27.2).
+//   MIG (0xff): ipc_kobject_server logs each message a kernel object handles, start and end, on the sender's
+//            thread inside its mach_msg2_trap, with the routine's kobject filter index in the code bits (no args).
+//            The index counts every kernel MIG routine in order; MIGRoutines reads the names in that order.
 
 /// One syscall, paired.
 struct SyscallRecord: Identifiable, Sendable, Hashable {
@@ -56,8 +68,13 @@ struct SyscallRecord: Identifiable, Sendable, Hashable {
     var woke: UInt64 = 0
     /// Whether the thread gave up its CPU during the call; nil while the trace has shown no scheduler events.
     var blocked: Bool?
-    /// The process `woke` belongs to (WakeLabeler).
+    /// The process `woke` belongs to (ThreadLabeler).
     var receiver: Int32?
+    /// A message a kernel object handled: the kernel routine's index (MIGRoutines), from the MIG trace events.
+    var kernelRoutine: Int?
+    /// `number` of a dyld call (dlopen, dlsym…, from dyld's trace events): no syscall has it.
+    static let libraryCall = -1
+    var isLibraryCall: Bool { number == Self.libraryCall }
 
     // Display text, built once (off the main thread) so the table only reads strings.
     /// The first frame outside libsystem_kernel (the syscall stubs), symbolicated; empty without a stack.
@@ -284,6 +301,17 @@ struct SyscallDecoder: Sendable {
     private var building: [UInt64: (count: Int, words: [UInt64])] = [:]
     /// The trace has scheduler events: a call without one didn't block (and not because the events are missing).
     private var schedSeen = false
+    /// TRACE_STRING_GLOBAL ids → text (dyld's paths and symbol names), and strings still arriving, per thread.
+    private var strings: [UInt64: String] = [:]
+    private var stringParts: [UInt64: (id: UInt64, bytes: Data)] = [:]
+    /// Thread names from the trace (TRACE_STRING_THREADNAME), and names still arriving.
+    private(set) var threadNames: [UInt64: String] = [:]
+    private var nameParts: [UInt64: Data] = [:]
+    /// dyld calls between their start and end, by sequence number; image headers and dlopen handles → paths.
+    private var dyldOpen: [UInt64: SyscallRecord] = [:]
+    private var images: [UInt64: String] = [:]
+    private var handles: [UInt64: String] = [:]
+    private var imageLoad: [UInt64: (ts: UInt64, header: UInt64)] = [:]
 
     init(stacks: Bool = false) { self.stacks = stacks }
 
@@ -294,7 +322,7 @@ struct SyscallDecoder: Sendable {
             if e.debugid == KdebugEvent.lostEvents {
                 // A call open across the gap may have returned in it: pairing its entry with a later return of the
                 // same call would be wrong, so start over. Returns of calls entered before show as entryMissed.
-                open = [:]; lookups = [:]; gaps += 1
+                open = [:]; lookups = [:]; gaps += 1; dyldOpen = [:]; stringParts = [:]; nameParts = [:]; imageLoad = [:]
                 out += held.values; held = [:]; building = [:]
                 continue
             }
@@ -304,6 +332,16 @@ struct SyscallDecoder: Sendable {
             }
             if e.cls == 3 && e.subclass == 1 && e.code == 0x24 { lookup(e); continue }
             if e.cls == 1 && e.subclass == 0x40 { sched(e); continue }
+            if e.cls == 7 && e.subclass == 1 { traceString(e); continue }
+            if e.cls == 0x1f { dyld(e, &out); continue }
+            if e.cls == 0xff {
+                // MIG start: the routine handling the message of the innermost open call (a mach_msg2_trap).
+                if e.fn & 1 != 0, var stack = open[e.thread], !stack.isEmpty, stack[stack.count - 1].rec.name.hasPrefix("mach_msg") {
+                    stack[stack.count - 1].rec.kernelRoutine = Int((e.debugid & 0xff_ffff) >> 2)
+                    open[e.thread] = stack
+                }
+                continue
+            }
             guard e.subclass == 0x0c, e.cls == 4 || e.cls == 1 else { continue }
             let base = e.debugid & ~3
             let mach = e.cls == 1
@@ -389,6 +427,134 @@ struct SyscallDecoder: Sendable {
             SyscallFormat.fill(&r)
             return r
         } }.sorted { $0.time < $1.time }
+    }
+
+    private static func bytes(_ words: ArraySlice<UInt64>) -> Data {
+        var d = Data()
+        for w in words { withUnsafeBytes(of: w.littleEndian) { d.append(contentsOf: $0) } }
+        return d
+    }
+
+    private static func text(_ d: Data) -> String {
+        String(decoding: d.prefix { $0 != 0 }, as: UTF8.self)
+    }
+
+    private mutating func traceString(_ e: KdebugEvent) {
+        switch e.code {
+        case 0:   // TRACE_STRING_GLOBAL
+            if e.fn & 1 != 0 {
+                guard e.arg.count > 1 else { return }
+                stringParts[e.thread] = (e.arg[1], Self.bytes(e.arg.dropFirst(2)))
+            } else if var p = stringParts[e.thread] {
+                p.bytes += Self.bytes(e.arg[...])
+                stringParts[e.thread] = p
+            }
+            guard e.fn & 2 != 0, let p = stringParts.removeValue(forKey: e.thread) else { return }
+            let s = Self.text(p.bytes)
+            // The release of an id comes as the same id sent empty, after the events that used it: keep the text.
+            if !s.isEmpty { strings[p.id] = s }
+        case 4, 5:   // TRACE_STRING_THREADNAME, _PREV
+            var d = e.fn & 1 != 0 ? Data() : nameParts[e.thread] ?? Data()
+            d += Self.bytes(e.arg[...])
+            guard e.fn & 2 != 0 || e.fn == 0 && d.count >= 64 else { nameParts[e.thread] = d; return }
+            nameParts[e.thread] = nil
+            let s = Self.text(d)
+            // _PREV is the name a thread had before a rename: it names the thread only if nothing newer did.
+            if !s.isEmpty, e.code == 4 || threadNames[e.thread] == nil { threadNames[e.thread] = s }
+        default: break
+        }
+    }
+
+    /// RTLD_DEFAULT and the other pseudo-handles of dlsym, by value.
+    private static let pseudoHandles: [UInt64: String] = [
+        UInt64(bitPattern: -1): "RTLD_NEXT", UInt64(bitPattern: -2): "RTLD_DEFAULT",
+        UInt64(bitPattern: -3): "RTLD_SELF", UInt64(bitPattern: -5): "RTLD_MAIN_ONLY",
+    ]
+
+    private func handleText(_ h: UInt64) -> String {
+        Self.pseudoHandles[h] ?? handles[h].map(SyscallFormat.quote) ?? "handle 0x" + String(h, radix: 16)
+    }
+
+    private mutating func dyld(_ e: KdebugEvent, _ out: inout [SyscallRecord]) {
+        let a = e.arg
+        switch (e.subclass, e.code) {
+        case (0x05, 0):   // DYLD_uuid_map_a: the path follows in _b
+            if a.count > 2 { imageLoad[e.thread] = (e.ts, a[2]) }
+            return
+        case (0x05, 1):
+            guard let load = imageLoad.removeValue(forKey: e.thread), a.count > 1 else { return }
+            let path = strings[a[1]] ?? "image at 0x" + String(load.header, radix: 16)
+            images[load.header] = path
+            var r = SyscallRecord(id: nextID, start: load.ts, end: e.ts, thread: e.thread, mach: false,
+                                  number: SyscallRecord.libraryCall, name: "load image")
+            nextID += 1
+            r.args = [load.header]
+            r.paths = [path]
+            r.argValues = [SyscallFormat.quote(path)]
+            r.resultText = "at 0x" + String(load.header, radix: 16)
+            out.append(r)
+            return
+        case (0x08, 0), (0x08, 2), (0x08, 3), (0x08, 4), (0x07, 0): break
+        default: return
+        }
+        guard let seq = a.first else { return }
+        if e.fn & 1 != 0 {
+            let name = switch (e.subclass, e.code) {
+            case (0x08, 0): "dlopen"
+            case (0x08, 2): "dlclose"
+            case (0x08, 3): "dlsym"
+            case (0x08, 4): "dladdr"
+            default: "initializer"
+            }
+            var r = SyscallRecord(id: nextID, start: e.ts, end: nil, thread: e.thread, mach: false,
+                                  number: SyscallRecord.libraryCall, name: name)
+            nextID += 1
+            r.args = Array(a.dropFirst())
+            switch (e.subclass, e.code) {
+            case (0x08, 0):
+                let path = a.count > 1 ? strings[a[1]] ?? "" : ""
+                if !path.isEmpty { r.paths = [path] }
+                r.argValues = [path.isEmpty ? "NULL" : SyscallFormat.quote(path), a.count > 2 ? "0x" + String(a[2], radix: 16) : "…"]
+            case (0x08, 2):
+                let h = a.count > 1 ? a[1] : 0
+                if let p = handles[h] { r.paths = [p] }
+                r.argValues = [handleText(h)]
+            case (0x08, 3):
+                let h = a.count > 1 ? a[1] : 0
+                if let p = handles[h] { r.paths = [p] }
+                r.argValues = [handleText(h), SyscallFormat.quote(a.count > 2 ? strings[a[2]] ?? "?" : "?")]
+            case (0x08, 4):
+                r.argValues = [a.count > 1 ? "0x" + String(a[1], radix: 16) : "…"]
+            default:
+                let header = a.count > 1 ? a[1] : 0
+                if let p = images[header] { r.paths = [p] }
+                r.argValues = [images[header].map(SyscallFormat.quote) ?? "image at 0x" + String(header, radix: 16),
+                               a.count > 2 ? "0x" + String(a[2], radix: 16) : "…"]
+                if a.count > 2, a[2] != 0 { r.stack = [a[2]] }
+            }
+            dyldOpen[seq] = r
+            return
+        }
+        guard e.fn & 2 != 0, var r = dyldOpen.removeValue(forKey: seq) else { return }
+        r.end = e.ts
+        let v = a.count > 1 ? a[1] : 0
+        switch r.name {
+        case "dlopen":
+            r.failed = v == 0
+            r.resultText = v == 0 ? "NULL (failed)" : "handle 0x" + String(v, radix: 16)
+            if v != 0, let p = r.paths.first { handles[v] = p }
+        case "dlsym":
+            r.failed = v == 0
+            r.resultText = v == 0 ? "NULL (not found)" : "0x" + String(v, radix: 16)
+        case "dlclose":
+            r.resultText = v == 0 ? "0" : "-1"
+            r.failed = v != 0
+        case "dladdr":
+            r.resultText = v == 0 ? "0 (not in an image)" : String(v)
+        default:
+            r.resultText = "done"
+        }
+        out.append(r)
     }
 
     /// Scheduler events land on the innermost open call of their thread: who it woke first, whether it blocked.
@@ -1106,49 +1272,130 @@ struct SyscallSummaryRow: Identifiable, Sendable {
     }
 }
 
-/// Which process each thread belongs to, from every process's thread ids (proc_pidinfo PROC_PIDLISTTHREADIDS,
-/// not in the SDK's headers). Root reads every process's (~13 ms for 580 processes); another user only its own.
+/// One thread's process and name (ThreadOwners).
+struct ThreadInfo: Codable, Hashable, Sendable {
+    var pid: Int32
+    /// pthread_setname_np's name; empty when it has none.
+    var name: String
+    /// The process's first thread (lowest id): its main thread.
+    var main: Bool
+}
+
+/// Which process each thread belongs to, and its name, from every process's thread ids (proc_pidinfo
+/// PROC_PIDLISTTHREADIDS, not in the SDK's headers) and PROC_PIDTHREADID64INFO. Root reads every process's
+/// (~13 ms for 580 processes); another user only its own.
 enum ThreadOwners {
-    static func pids(_ tids: Set<UInt64>) -> [UInt64: Int32] {
+    static func lookup(_ tids: Set<UInt64>) -> [UInt64: ThreadInfo] {
         guard !tids.isEmpty else { return [:] }
         let PROC_PIDLISTTHREADIDS: Int32 = 28
-        var out: [UInt64: Int32] = [:]
+        var out: [UInt64: ThreadInfo] = [:]
         var buf = [UInt64](repeating: 0, count: 4096)
         for pid in NativeMach.allPids() where pid > 0 {
             let n = buf.withUnsafeMutableBytes { proc_pidinfo(pid, PROC_PIDLISTTHREADIDS, 0, $0.baseAddress, Int32($0.count)) }
             guard n > 0 else { continue }
-            for t in buf.prefix(Int(n) / 8) where tids.contains(t) { out[t] = pid }
+            let ids = buf.prefix(Int(n) / 8)
+            let first = ids.min()
+            for t in ids where tids.contains(t) {
+                var info = proc_threadinfo()
+                let size = Int32(MemoryLayout<proc_threadinfo>.size)
+                let name = proc_pidinfo(pid, PROC_PIDTHREADID64INFO, t, &info, size) == size
+                    ? withUnsafeBytes(of: info.pth_name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) } : ""
+                out[t] = ThreadInfo(pid: pid, name: name, main: t == first)
+            }
             if out.count == tids.count { break }
         }
         return out
     }
 }
 
-/// Names the process each call woke (SyscallRecord.woke → receiver). A thread's id is never reused, so an
-/// answer holds for the trace; threads gone before the lookup (a worker thread that woke, answered and exited
-/// within the read interval) stay unnamed.
-struct WakeLabeler {
+/// Names the traced process's threads and the process each call woke (SyscallRecord.woke → receiver). A thread's
+/// id is never reused, so an answer holds for the trace; threads gone before the lookup (a worker thread that woke,
+/// answered and exited within the read interval) stay unnamed.
+struct ThreadLabeler {
     private var owners: [UInt64: Int32] = [:]
     private var asked: Set<UInt64> = []
     /// Process names, for the processes found.
     private(set) var names: [Int32: String] = [:]
+    /// The traced process's threads: "main thread", "com.apple.NSEventThread"; unnamed ones are left out.
+    private(set) var threadNames: [UInt64: String] = [:]
 
     /// Fills `receiver` in `recs`; returns the names of processes not named before.
-    mutating func label(_ recs: inout [SyscallRecord], lookup: (Set<UInt64>) -> [UInt64: Int32]) -> [Int32: String] {
+    mutating func label(_ recs: inout [SyscallRecord], lookup: (Set<UInt64>) -> [UInt64: ThreadInfo]) -> [Int32: String] {
         let asked = self.asked
-        let want = Set(recs.map(\.woke).filter { $0 != 0 && !asked.contains($0) })
+        let woken = Set(recs.map(\.woke).filter { $0 != 0 && !asked.contains($0) })
+        let own = Set(recs.map(\.thread).filter { !asked.contains($0) })
+        let want = woken.union(own)
         var new: [Int32: String] = [:]
         if !want.isEmpty {
             self.asked.formUnion(want)
-            for (t, p) in lookup(want) where p > 0 {   // pid 0: a kernel thread, not a receiver
-                owners[t] = p
-                if names[p] == nil, let path = Native.path(p) {
-                    names[p] = (path as NSString).lastPathComponent
-                    new[p] = names[p]
+            for (t, info) in lookup(want) {
+                if own.contains(t) {
+                    let label = info.main ? (info.name.isEmpty ? "main thread" : "main thread, " + info.name) : info.name
+                    if !label.isEmpty { threadNames[t] = label }
+                }
+                guard woken.contains(t), info.pid > 0 else { continue }   // pid 0: a kernel thread, not a receiver
+                owners[t] = info.pid
+                if names[info.pid] == nil, let path = Native.path(info.pid) {
+                    names[info.pid] = (path as NSString).lastPathComponent
+                    new[info.pid] = names[info.pid]
                 }
             }
         }
         for i in recs.indices where recs[i].woke != 0 { recs[i].receiver = owners[recs[i].woke] }
         return new
+    }
+}
+
+/// The kernel's MIG routines in kobject filter index order, the numbering of the MIG trace events: libsandbox's
+/// table of routine names, which it compiles sandbox profiles' kernel-mig-routine filters against. Checked on 27.2
+/// against calls whose routine is known: host_info 0, mach_port_names 150, task_threads 192, task_info 195,
+/// thread_info 254, mach_vm_region 320. Found by its first three names, so a table that moved still turns up; empty
+/// when it isn't there (a later OS that changed it), and then routines show as numbers.
+enum MIGRoutines {
+    static let names: [String] = load()
+
+    static func name(_ index: Int) -> String {
+        index >= 0 && index < names.count ? names[index] : "kernel routine #\(index)"
+    }
+
+    private static func load() -> [String] {
+        let path = "/usr/lib/libsandbox.1.dylib"
+        guard dlopen(path, RTLD_LAZY | RTLD_LOCAL) != nil else { return [] }
+        for i in 0..<_dyld_image_count() where String(cString: _dyld_get_image_name(i)) == path {
+            guard let header = _dyld_get_image_header(i) else { continue }
+            var size: UInt = 0
+            let mh = UnsafeRawPointer(header).assumingMemoryBound(to: mach_header_64.self)
+            guard let base = getsectiondata(mh, "__TEXT", "__cstring", &size) else { continue }
+            let text = UnsafeBufferPointer(start: base, count: Int(size))
+            let anchor = Array("host_info\0host_kernel_version\0host_page_size\0".utf8)
+            guard let start = find(anchor, in: text) else { continue }
+            var out: [String] = []
+            var p = start
+            while p < text.count {
+                var q = p
+                while q < text.count, text[q] != 0 { q += 1 }
+                let s = String(decoding: UnsafeBufferPointer(rebasing: text[p..<q]), as: UTF8.self)
+                // Routine names are identifiers with lowercase in them (_mach_make_memory_entry,
+                // UNDAlertCompletedWithResult_rpc); the table after it is constants in capitals, KAS_INFO_….
+                func lower(_ c: UInt8) -> Bool { c >= 0x61 && c <= 0x7a }
+                guard s.utf8.contains(where: lower),
+                      s.utf8.allSatisfy({ lower($0) || ($0 >= 0x41 && $0 <= 0x5a) || ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x5f })
+                else { break }
+                out.append(s.hasSuffix("_from_user") ? String(s.dropLast(10)) : s)
+                p = q + 1
+            }
+            return out.count >= 300 ? out : []
+        }
+        return []
+    }
+
+    private static func find(_ needle: [UInt8], in hay: UnsafeBufferPointer<UInt8>) -> Int? {
+        guard needle.count <= hay.count, let first = needle.first else { return nil }
+        var i = 0
+        while i <= hay.count - needle.count {
+            if hay[i] == first, needle.indices.allSatisfy({ hay[i + $0] == needle[$0] }) { return i }
+            i += 1
+        }
+        return nil
     }
 }

@@ -12,6 +12,9 @@ struct SyscallActivity: Identifiable, Sendable {
         case connect = "Connect", connection = "Connection", listen = "Listen", accept = "Accept connection"
         case send = "Send", receive = "Receive"
         case message = "Message", launch = "Launch", signal = "Signal", inspect = "Inspect process"
+        case loadImage = "Load libraries", initializers = "Run initializers", openLibrary = "Open library (dlopen)"
+        case closeLibrary = "Close library (dlclose)", symbol = "Look up symbols (dlsym)", address = "Find an address's library (dladdr)"
+        case kernelCall = "Kernel call"
         case waits = "Waits and event polls"
     }
 
@@ -24,6 +27,8 @@ struct SyscallActivity: Identifiable, Sendable {
         var processNames: [Int32: String] = [:]
         /// Port names that lead to no other process: "task port", "IOKit connection (…)", "own port".
         var portKinds: [UInt32: String] = [:]
+        /// The traced process's thread names: "main thread", "com.apple.NSEventThread".
+        var threadNames: [UInt64: String] = [:]
 
         func process(_ pid: Int32) -> String {
             if pid == self.pid { return "itself" }
@@ -61,7 +66,8 @@ struct SyscallActivity: Identifiable, Sendable {
 
         /// The listings and the call itself say nothing about where this send went.
         func unnamed(_ port: UInt32, sendOnce: Bool, call r: SyscallRecord) -> Bool {
-            !sendOnce && ports[port] == nil && portKinds[port] == nil && r.receiver == nil && !Self.answeredInKernel(r)
+            !sendOnce && ports[port] == nil && portKinds[port] == nil && r.receiver == nil && r.kernelRoutine == nil
+                && !Self.answeredInKernel(r)
         }
 
         /// A send's destination port and whether it is a send-once right (MACH_MSG_TYPE_MOVE_SEND_ONCE: a reply).
@@ -117,6 +123,8 @@ struct SyscallActivity: Identifiable, Sendable {
             case .message:
                 if bytesOut > 0 { parts.append(size(bytesOut) + " sent") }
                 if replyTime > 0 { parts.append("replies took " + SyscallTraceView.duration(replyTime)) }
+            case .kernelCall:
+                if replyTime > 0 { parts.append("took " + SyscallTraceView.duration(replyTime)) }
             default: break
             }
             if fd != nil {
@@ -130,11 +138,26 @@ struct SyscallActivity: Identifiable, Sendable {
                 parts.append("\(failures.formatted()) failed" + (why.map { ": " + $0 } ?? ""))
             }
             if calls.last?.state == .inProgress { parts.append("in progress") }
+            if Self.libraryOperations.contains(operation) {
+                let total = calls.compactMap(\.duration).reduce(0, +)
+                if total > 0 { parts.append("took " + SyscallTraceView.duration(total)) }
+            }
             if parts.isEmpty { parts.append("Succeeded") }
         }
-        if count > 1 { parts.append("\(count.formatted()) calls") }
+        if count > 1 {
+            let unit = switch operation {
+            case .loadImage: "images"
+            case .initializers: "initializers"
+            case .symbol: "symbols"
+            default: "calls"
+            }
+            parts.append("\(count.formatted()) " + unit)
+        }
         return parts.joined(separator: " · ")
     }
+
+    /// dyld's work, from its trace events rather than syscalls (SyscallRecord.isLibraryCall).
+    static let libraryOperations: Set<Operation> = [.loadImage, .initializers, .openLibrary, .closeLibrary, .symbol, .address]
 
     /// A descriptor's calls more than this far apart are separate activities: a log file kept open for the whole
     /// trace shows as its bursts of writes, not one activity at its open.
@@ -231,7 +254,9 @@ struct SyscallActivity: Identifiable, Sendable {
         }
     }
 
-    private static let repeats: Set<Operation> = [.lookup, .xattr, .metadata, .message, .inspect, .signal, .open]
+    private static let repeats: Set<Operation> = [.lookup, .xattr, .metadata, .message, .inspect, .signal, .open,
+                                                  .loadImage, .initializers, .openLibrary, .closeLibrary, .symbol, .address,
+                                                  .kernelCall]
 
     private mutating func append(_ r: SyscallRecord, kind: Operation?) {
         calls.append(r)
@@ -249,7 +274,7 @@ struct SyscallActivity: Identifiable, Sendable {
         switch kind {
         case .read, .receive: bytesIn += SyscallFormat.wide(r)
         case .write, .send: bytesOut += SyscallFormat.wide(r)
-        case .message:
+        case .message, .kernelCall:
             guard let a = r.args, a.count > 2 else { break }
             // A vector send (MACH64_MSG_VECTOR: XPC) has its vector count there, not its size.
             if a[1] & 0x1_0000_0000 == 0 { bytesOut += a[2] >> 32 }
@@ -308,6 +333,22 @@ struct SyscallActivity: Identifiable, Sendable {
             return r.state == .done && r.error == 0 ? "child pid \(Int32(truncatingIfNeeded: r.ret))" : "child process"
         case .connection:
             return "Socket"
+        case .openLibrary, .closeLibrary:
+            // dlopen(NULL) opens the main program.
+            return r.paths.first ?? (r.argValues.first == "NULL" ? "Main program" : "Library unavailable")
+        case .symbol:
+            if let p = r.paths.first { return p }
+            switch r.argValues.first {
+            case "RTLD_DEFAULT": return "Any loaded library (RTLD_DEFAULT)"
+            case "RTLD_NEXT": return "Libraries after the caller's (RTLD_NEXT)"
+            case "RTLD_SELF": return "The caller's library onward (RTLD_SELF)"
+            case "RTLD_MAIN_ONLY": return "Main program (RTLD_MAIN_ONLY)"
+            default: return "A library opened before the trace"
+            }
+        case .loadImage, .initializers, .address:
+            return ""
+        case .kernelCall:
+            return r.kernelRoutine.map(MIGRoutines.name) ?? "Kernel routine unavailable"
         case .read, .write, .send, .receive, .connect, .listen, .accept:
             return r.firstFDLabel ?? "Unknown descriptor"
         default:
@@ -364,7 +405,13 @@ struct SyscallActivity: Identifiable, Sendable {
             return pid > 0 ? (.inspect, false) : nil
         case "mach_msg2_trap":
             guard let a = r.args, a.count > 3, a[1] & UInt64(MACH_SEND_MSG) != 0 else { return nil }
-            return (.message, false)
+            return (r.kernelRoutine != nil ? .kernelCall : .message, false)
+        case "load image" where r.isLibraryCall: return (.loadImage, false)
+        case "initializer" where r.isLibraryCall: return (.initializers, false)
+        case "dlopen" where r.isLibraryCall: return (.openLibrary, false)
+        case "dlclose" where r.isLibraryCall: return (.closeLibrary, false)
+        case "dlsym" where r.isLibraryCall: return (.symbol, false)
+        case "dladdr" where r.isLibraryCall: return (.address, false)
         default: return nil
         }
     }

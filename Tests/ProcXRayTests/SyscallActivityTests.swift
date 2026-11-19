@@ -144,12 +144,98 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertEqual(recs.map(\.woke), [900, 0])
         XCTAssertEqual(recs.map(\.blocked), [true, false])
         var labeled = recs
-        var wakes = WakeLabeler()
-        _ = wakes.label(&labeled) { tids in Dictionary(uniqueKeysWithValues: tids.map { ($0, 42) }) }
+        var wakes = ThreadLabeler()
+        _ = wakes.label(&labeled) { tids in Dictionary(uniqueKeysWithValues: tids.map { ($0, ThreadInfo(pid: 42, name: $0 == 7 ? "worker" : "", main: $0 == 8)) }) }
+        XCTAssertEqual(wakes.threadNames, [7: "worker", 8: "main thread"])
         XCTAssertEqual(labeled.map(\.receiver), [42, nil])
         // Without scheduler events in the trace, nothing says the call didn't block.
         var plain = SyscallDecoder()
         XCTAssertEqual(plain.feed(Array(events.suffix(2))).map(\.blocked), [nil])
+    }
+
+    /// Little-endian words of a string, NUL-padded to whole words.
+    private func words(_ s: String) -> [UInt64] {
+        var b = Array(s.utf8); repeat { b.append(0) } while b.count % 8 != 0
+        return stride(from: 0, to: b.count, by: 8).map { i in b[i..<i + 8].enumerated().reduce(0) { $0 | UInt64($1.element) << (8 * $1.offset) } }
+    }
+
+    /// TRACE_STRING_GLOBAL events for one string, as libkdebug splits it: owner, id and two words, then four a time.
+    private func stringEvents(_ text: String, id: UInt64, owner: UInt32, ts: UInt64, thread: UInt64) -> [KdebugEvent] {
+        let w = words(text)
+        var out: [KdebugEvent] = []
+        var rest = Array(w.dropFirst(2))
+        out.append(KdebugEvent(ts: ts, debugid: 0x0701_0000 | 1 | (rest.isEmpty ? 2 : 0), arg: [UInt64(owner), id] + Array(w.prefix(2)), thread: thread))
+        while !rest.isEmpty {
+            let chunk = Array(rest.prefix(4)); rest = Array(rest.dropFirst(4))
+            out.append(KdebugEvent(ts: ts, debugid: 0x0701_0000 | (rest.isEmpty ? 2 : 0), arg: chunk + Array(repeating: 0, count: 4 - chunk.count), thread: thread))
+        }
+        return out
+    }
+
+    func testDecoderDyldAndThreadNames() {
+        let lib = "/System/Library/Frameworks/QuartzCore.framework/QuartzCore", sym = "CARenderUpdateSetGreedy"
+        var events = stringEvents(lib, id: 0x70ac_0001, owner: 0x1f08_0000, ts: 1, thread: 7)
+        events += stringEvents(sym, id: 0x70ac_0002, owner: 0x1f08_000c, ts: 2, thread: 7)
+        events += stringEvents("missingSymbol", id: 0x70ac_0003, owner: 0x1f08_000c, ts: 2, thread: 7)
+        events += stringEvents("/usr/lib/libfoo.dylib", id: 0x70ac_0004, owner: 0x1f05_0000, ts: 2, thread: 7)
+        let name = words("probe.named-thread")
+        events += [
+            KdebugEvent(ts: 3, debugid: 0x0701_0010 | 3, arg: name + Array(repeating: 0, count: 4 - name.count), thread: 9),
+            KdebugEvent(ts: 10, debugid: 0x1f08_0000 | 1, arg: [0x1af, 0x70ac_0001, 0x101, 0], thread: 7),
+            KdebugEvent(ts: 20, debugid: 0x1f08_0000 | 2, arg: [0x1af, 0x2_93b8_34a1, 0, 0], thread: 7),
+            KdebugEvent(ts: 30, debugid: 0x1f08_000c | 1, arg: [0x1b0, 0x2_93b8_34a1, 0x70ac_0002, 0], thread: 7),
+            KdebugEvent(ts: 35, debugid: 0x1f08_000c | 2, arg: [0x1b0, 0x1_a185_0c00, 0, 0], thread: 7),
+            KdebugEvent(ts: 40, debugid: 0x1f08_000c | 1, arg: [0x1b1, UInt64(bitPattern: -2), 0x70ac_0003, 0], thread: 7),
+            KdebugEvent(ts: 41, debugid: 0x1f08_000c | 2, arg: [0x1b1, 0, 0, 0], thread: 7),
+            KdebugEvent(ts: 50, debugid: 0x1f05_0000, arg: [1, 2, 0x1_0000_0000, 0], thread: 7),
+            KdebugEvent(ts: 50, debugid: 0x1f05_0004, arg: [0, 0x70ac_0004, 0, 0], thread: 7),
+            KdebugEvent(ts: 60, debugid: 0x1f07_0000 | 1, arg: [0x1b2, 0x1_0000_0000, 0x1_0000_4000, 0], thread: 7),
+            KdebugEvent(ts: 70, debugid: 0x1f07_0000 | 2, arg: [0x1b2, 0, 0, 0], thread: 7),
+        ]
+        var dec = SyscallDecoder()
+        let recs = dec.feed(events)
+        XCTAssertEqual(dec.threadNames, [9: "probe.named-thread"])
+        XCTAssertEqual(recs.map(\.name), ["dlopen", "dlsym", "dlsym", "load image", "initializer"])
+        XCTAssertTrue(recs.allSatisfy(\.isLibraryCall))
+        XCTAssertEqual(recs[0].argValues, ["\"" + lib + "\"", "0x101"])
+        XCTAssertEqual(recs[0].resultText, "handle 0x293b834a1")
+        XCTAssertEqual(recs[1].argValues, ["\"" + lib + "\"", "\"" + sym + "\""])
+        XCTAssertEqual(recs[1].paths, [lib])
+        XCTAssertEqual(recs[1].duration, 5)
+        XCTAssertEqual(recs[2].argValues, ["RTLD_DEFAULT", "\"missingSymbol\""])
+        XCTAssertTrue(recs[2].failed)
+        XCTAssertEqual(recs[3].paths, ["/usr/lib/libfoo.dylib"])
+        XCTAssertEqual(recs[4].paths, ["/usr/lib/libfoo.dylib"])
+        XCTAssertEqual(recs[4].stack, [0x1_0000_4000])
+
+        let groups = SyscallActivity.build(recs, filter: "", errorsOnly: false)
+        XCTAssertEqual(groups.map(\.operation), [.initializers, .loadImage, .symbol, .symbol, .openLibrary])
+        XCTAssertEqual(groups.map(\.target), ["", "", "Any loaded library (RTLD_DEFAULT)", lib, lib])
+        XCTAssertEqual(groups[2].detail, "NULL (not found)")
+    }
+
+    func testKernelRoutines() {
+        // libsandbox's table, in the kernel's index order: present on this OS, starting at host_info.
+        XCTAssertGreaterThanOrEqual(MIGRoutines.names.count, 300)
+        XCTAssertEqual(MIGRoutines.names.first, "host_info")
+        // Names that start with an underscore or a capital are routines too (27.2: 355 in all).
+        XCTAssertTrue(MIGRoutines.names.contains("UNDAlertCompletedWithResult_rpc"))
+        XCTAssertFalse(MIGRoutines.names.contains { !$0.contains(where: \.isLowercase) })
+        let taskInfo = try! XCTUnwrap(MIGRoutines.names.firstIndex(of: "task_info"))   // task_info_from_user, suffix dropped
+        // A task_info call: mach_msg2_trap to the task port with the MIG start and end inside it.
+        let entry: UInt32 = 0x010c_00bc | 1, ret: UInt32 = 0x010c_00bc | 2
+        let send = UInt64(MACH_SEND_MSG | MACH_RCV_MSG)
+        var dec = SyscallDecoder()
+        let recs = dec.feed([
+            KdebugEvent(ts: 1, eventname: "MSC_mach_msg2_trap", debugid: entry, arg: [1, send, 0x13, 0x203], thread: 7),
+            KdebugEvent(ts: 2, debugid: 0xff00_0000 | UInt32(taskInfo) << 2 | 1, arg: [0, 0, 0, 0], thread: 7),
+            KdebugEvent(ts: 3, debugid: 0xff00_0000 | UInt32(taskInfo) << 2 | 2, arg: [0, 0, 0, 0], thread: 7),
+            KdebugEvent(ts: 4, eventname: "MSC_mach_msg2_trap", debugid: ret, arg: [0, 0, 0, 0], thread: 7),
+        ])
+        XCTAssertEqual(recs.map(\.kernelRoutine), [taskInfo])
+        let groups = SyscallActivity.build(recs, filter: "", errorsOnly: false)
+        XCTAssertEqual(groups.map(\.operation), [.kernelCall])
+        XCTAssertEqual(groups.map(\.target), ["task_info"])
     }
 
     func testPortKinds() {

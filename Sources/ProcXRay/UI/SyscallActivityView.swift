@@ -37,6 +37,8 @@ private struct ActivityNode: Identifiable {
 
 struct SyscallActivityView: View {
     let groups: [SyscallActivity]
+    /// The traced process's thread names (SyscallActivity.Context.threadNames).
+    var threadNames: [UInt64: String] = [:]
     let filtered: Bool
     @Binding var selection: Set<ActivityRowID>
 
@@ -50,17 +52,17 @@ struct SyscallActivityView: View {
             List(groups.map { ActivityNode(id: .group($0.id), kind: .group($0)) }, children: \.children, selection: $selection) { node in
                 switch node.kind {
                 case .group(let g): GroupLabel(group: g)
-                case .thread(_, let tid, let calls): Text(Self.threadLabel(tid, calls.count)).font(.callout)
-                case .call(let r): ActivityCall(call: r)
+                case .thread(_, let tid, let calls): Text(Self.threadLabel(tid, calls.count, name: threadNames[tid])).font(.callout)
+                case .call(let r): ActivityCall(call: r, threadName: threadNames[r.thread])
                 }
             }
             .listStyle(.inset)
             .contextMenu(forSelectionType: ActivityRowID.self) { ids in
-                Button("Copy") { Pasteboard.copy(Self.text(groups, only: ids)) }
+                Button("Copy") { Pasteboard.copy(Self.text(groups, only: ids, names: threadNames)) }
                     .disabled(ids.isEmpty)
             }
-            .onCopyCommand { [ids = selection] in
-                [NSItemProvider(object: Self.text(groups, only: ids) as NSString)]
+            .onCopyCommand { [ids = selection, threadNames] in
+                [NSItemProvider(object: Self.text(groups, only: ids, names: threadNames) as NSString)]
             }
         }
     }
@@ -69,8 +71,8 @@ struct SyscallActivityView: View {
         Dictionary(grouping: calls, by: \.thread).sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
 
-    nonisolated static func threadLabel(_ tid: UInt64, _ count: Int) -> String {
-        "Thread " + String(tid) + " · " + count.formatted() + (count == 1 ? " call" : " calls")
+    nonisolated static func threadLabel(_ tid: UInt64, _ count: Int, name: String? = nil) -> String {
+        "Thread " + String(tid) + (name.map { " (\($0))" } ?? "") + " · " + count.formatted() + (count == 1 ? " call" : " calls")
     }
 
     nonisolated static func groupLine(_ g: SyscallActivity) -> String {
@@ -83,7 +85,7 @@ struct SyscallActivityView: View {
 
     /// The activities as indented text, every call under its activity. With `only`, just the selected rows: an
     /// activity or thread brings its calls, a call under an activity that is also selected isn't repeated.
-    nonisolated static func text(_ groups: [SyscallActivity], only: Set<ActivityRowID>? = nil) -> String {
+    nonisolated static func text(_ groups: [SyscallActivity], only: Set<ActivityRowID>? = nil, names: [UInt64: String] = [:]) -> String {
         var lines: [String] = []
         func want(_ id: ActivityRowID) -> Bool { only?.contains(id) ?? true }
         for g in groups {
@@ -92,7 +94,7 @@ struct SyscallActivityView: View {
             if g.operation == .waits {
                 for (tid, calls) in threads(g.calls) {
                     let thread = whole || want(.thread(group: g.id, tid: tid))
-                    if thread { lines.append("    " + threadLabel(tid, calls.count)) }
+                    if thread { lines.append("    " + threadLabel(tid, calls.count, name: names[tid])) }
                     for r in calls where thread || want(.call(group: g.id, tid: tid, id: r.id)) {
                         lines.append("        " + SyscallTraceView.line(r))
                     }
@@ -129,10 +131,11 @@ private struct GroupLabel: View {
 
 private struct ActivityCall: View {
     let call: SyscallRecord
+    var threadName: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("\(call.start.map(SyscallTraceView.seconds) ?? "before")  [\(String(call.thread))]  \(call.name)(\(call.namedArgsText))")
+            Text("\(call.start.map(SyscallTraceView.seconds) ?? "before")  [\(String(call.thread))\(threadName.map { " " + $0 } ?? "")]  \(call.name)(\(call.namedArgsText))")
             HStack {
                 Text(call.resultText).foregroundStyle(call.failed ? Color.red : .secondary)
                 if let duration = call.duration { Text(SyscallTraceView.duration(duration)) }

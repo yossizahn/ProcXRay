@@ -70,6 +70,8 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
     static let lostEvents: UInt32 = 0x0702_0008   // TRACE_LOST_EVENTS in /usr/share/misc/trace.codes
     /// PERF_STK_UData: four frames of a user stack.
     static let stackData: UInt32 = 0x2502_0010
+    /// DBG_DYLD_TIMING_STATIC_INITIALIZER | DBG_FUNC_START.
+    static let initializerStart: UInt32 = 0x1f07_0001
 
     // <sys/kdebug_private.h>; not in the SDK.
     static let KERN_KDENABLE: Int32 = 3, KERN_KDSETBUF: Int32 = 4, KERN_KDSETUP: Int32 = 6,
@@ -215,8 +217,8 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
 
     /// Rewrites timestamps, drops other processes' scheduler events and queues the records.
     ///
-    /// The kernel's pid filter doesn't hold back scheduler events (DBG_MACH_SCHED): a 6 s trace of Finder got them
-    /// from 354 threads, 145k events for 1,061 calls. Kept: those of threads that made a call, which are the traced
+    /// The kernel's pid filter doesn't hold back scheduler events (DBG_MACH_SCHED) or thread names: a 6 s trace of
+    /// Finder got scheduler events from 354 threads, 145k events for 1,061 calls. Kept: those of threads that made a call, which are the traced
     /// process's (syscall events do pass the filter) and the only ones SyscallDecoder uses.
     private func take(_ buf: UnsafeMutableRawPointer, _ count: Int) {
         let recs = buf.bindMemory(to: Record.self, capacity: count)
@@ -224,7 +226,8 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         var n = 0
         for i in 0..<count {
             let id = recs[i].debugid
-            if id >> 16 == 0x0140 {
+            // Thread names (TRACE_STRING_THREADNAME, 0x0701) leak from other processes the same way.
+            if id >> 16 == 0x0140 || id >> 16 == 0x0701 {
                 guard ownThreads.contains(recs[i].arg5) else { continue }
             } else if id >> 16 == 0x010c || id >> 16 == 0x040c {
                 ownThreads.insert(recs[i].arg5)
@@ -236,6 +239,8 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
             if stacks && id & ~3 == Self.stackData {
                 for a in [recs[n].arg1, recs[n].arg2, recs[n].arg3, recs[n].arg4] { noteFrame(a) }
             }
+            // A static initializer's start: [seq, image header, function]. Its image, for naming the function.
+            if id == Self.initializerStart { noteFrame(recs[n].arg3) }
             n += 1
         }
         guard n > 0 else { return }
