@@ -6,7 +6,8 @@
 
 ## The dev helper
 
-- Never install the helper from the Atlas login (or any second login). Atlas opens a copy of the bundle and deletes it afterwards, which leaves the helper's background-item record orphaned under "Unknown Developer": launchd logs "The specified path is not a bundle", unregistering fails with "record not found", and the user's own dev helper is blocked until `sudo sfltool resetbtm` and a restart (which resets every app's background items). Test helper-backed features in the user's login or in the VM.
+- Never install the helper from the Atlas login (or any second login). Atlas opens a copy of the bundle and deletes it afterwards, which leaves the helper's background-item record orphaned: the daemon record `16.local.procxray.dev.helper` stays in the global store but its parent app record `2.local.procxray.dev` is gone, so launchd fails every 10 s with "copy_bundle_path(<uuid>…) error 0x6f", unregistering fails with "record not found", and re-registering reuses the broken record. Test helper-backed features in the user's login or in the VM.
+- To recover, have the user run `sudo tools/btm-drop-orphan.sh` (`--dry-run` first, no root, to confirm the orphan), then `--helper-register` and approve it in System Settings > Login Items & Extensions. It removes only that record, with a backup; don't reach for `sfltool resetbtm`, which needs a restart and resets every app's background items.
 - `ProcXRay --helper-register` / `--helper-unregister`, run from inside the bundle, register or remove the helper without the UI.
 
 ## Test VM (Tart): root, SIP off
