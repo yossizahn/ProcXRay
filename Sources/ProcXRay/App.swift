@@ -352,6 +352,7 @@ struct ProcXRayApp: App {
             InspectorTabCommands()
             ColumnsCommands()
             OpenBinaryCommand()
+            LaunchTraceCommand()
             CommandGroup(after: .toolbar) {
                 Button("Refresh Now") { store.refresh() }.keyboardShortcut("r")
                 Button(store.paused ? "Resume Updates" : "Pause Updates") { store.paused.toggle() }
@@ -372,6 +373,13 @@ struct ProcXRayApp: App {
         Settings {
             SettingsView().environment(store)
         }
+
+        Window("Launch and Trace", id: LaunchTraceView.id) {
+            LaunchTraceView().environment(store)
+        }
+        .defaultSize(width: 1200, height: 760)
+        .restorationBehavior(.disabled)
+        .commandsRemoved()   // opened from File ▸ Launch and Trace…
 
         Window("Columns", id: ColumnManager.id) {
             ColumnManager()

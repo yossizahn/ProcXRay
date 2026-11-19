@@ -35,7 +35,9 @@ final class SyscallTracer {
 
     var isActive: Bool { phase == .starting || phase == .running || phase == .stopping }
 
-    func start(pid: Int32, start: Date, stacks: Bool) {
+    /// `resume`: the process was started suspended (Launcher) and runs once the trace is on, or is killed if the
+    /// trace can't start, so none of its work goes untraced.
+    func start(pid: Int32, start: Date, stacks: Bool, resume: Bool = false) {
         guard !isActive else { return }
         records = []; pending = []; notes = []; events = 0; dropped = 0; revision += 1
         context = SyscallActivity.Context(pid: pid)
@@ -50,7 +52,7 @@ final class SyscallTracer {
         stopFlag = flag
         // Holds the tracer until the trace ends; the view stops it when it goes away (onDisappear).
         Task.detached(priority: .userInitiated) { [self] in
-            await Self.run(pid: pid, start: start, stacks: stacks, symbols: symbols, flag: flag, tracer: self)
+            await Self.run(pid: pid, start: start, stacks: stacks, resume: resume, symbols: symbols, flag: flag, tracer: self)
         }
         Task.detached(priority: .utility) { [self] in await Self.namePorts(pid: pid, start: start, generation: gen, tracer: self) }
     }
@@ -116,16 +118,19 @@ final class SyscallTracer {
         phase = .idle
     }
 
-    private nonisolated static func run(pid: Int32, start: Date, stacks: Bool, symbols: StackSymbols, flag: Shell.Cancel, tracer: SyscallTracer) async {
+    private nonisolated static func run(pid: Int32, start: Date, stacks: Bool, resume: Bool, symbols: StackSymbols,
+                                        flag: Shell.Cancel, tracer: SyscallTracer) async {
         let s = HelperTraceSession()
         defer { s.close() }
         let format: SyscallTraceConfig.Format
         switch s.start(pid: pid, stacks: stacks) {
         case .success(let f): format = f
         case .failure(let e):
-            await tracer.finish([], note: e.message)
+            if resume, Native.isSame(pid, start: start) { kill(pid, SIGKILL) }
+            await tracer.finish([], note: e.message + (resume ? " The launched process was ended before it ran." : ""))
             return
         }
+        if resume { Launcher.resume(pid) }
         await tracer.setPhase(.running)
         var dec = SyscallDecoder(stacks: stacks && format == .kdebug)
         var fds = FdLabeler()
@@ -226,11 +231,29 @@ final class SyscallTracer {
     }
 }
 
+/// The process a trace view traces.
+struct TraceTarget: Hashable, Sendable {
+    let pid: Int32
+    let start: Date
+    let name: String
+}
+
 struct SyscallTraceView: View {
     @Environment(Store.self) var store
-    let proc: ProcInfo
+    let target: TraceTarget
     let exited: Bool
-    @State private var tracer = SyscallTracer()
+    @State private var tracer: SyscallTracer
+
+    init(proc: ProcInfo, exited: Bool) {
+        self.init(target: TraceTarget(pid: proc.pid, start: proc.start, name: proc.name), exited: exited)
+    }
+
+    /// `tracer`: one the caller already started (Launch and Trace), else a new idle one.
+    init(target: TraceTarget, exited: Bool, tracer: SyscallTracer? = nil) {
+        self.target = target
+        self.exited = exited
+        _tracer = State(initialValue: tracer ?? SyscallTracer())
+    }
     @AppStorage("syscallTrace.mode") private var mode = "Activity"
     @AppStorage("syscallTrace.stacks") private var stacks = false
     @AppStorage("syscallTrace.argNames") private var argNames = true
@@ -299,7 +322,7 @@ struct SyscallTraceView: View {
                 Button { tracer.stop() } label: { Label("Stop", systemImage: "stop.fill") }
                     .disabled(tracer.phase == .stopping)
             } else {
-                Button { tracer.start(pid: proc.pid, start: proc.start, stacks: stacks) } label: {
+                Button { tracer.start(pid: target.pid, start: target.start, stacks: stacks) } label: {
                     Label(tracer.phase == .idle ? "Trace" : "Trace again", systemImage: "record.circle")
                 }
                 .disabled(disabledReason != nil)
@@ -343,7 +366,7 @@ struct SyscallTraceView: View {
         let dropped = tracer.dropped > 0 ? " · oldest \(tracer.dropped.formatted()) let go" : ""
         let showing = shown.count != tracer.records.count + tracer.pending.count && mode == "Calls" ? " · \(shown.count.formatted()) shown" : ""
         switch tracer.phase {
-        case .idle: return "kdebug \(SyscallTraceConfig.filter) for pid \(proc.pid)"
+        case .idle: return "kdebug \(SyscallTraceConfig.filter) for pid \(target.pid)"
         case .starting: return "Starting the trace…"
         case .running: return "Tracing · \(calls)\(showing)\(dropped)"
         case .stopping: return "Stopping · \(calls)"
@@ -360,7 +383,7 @@ struct SyscallTraceView: View {
                 .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
             EmptyRunButton(title: "Trace", systemImage: "record.circle", disabledReason: disabledReason,
                            help: "Trace this process's BSD syscalls and Mach traps (kdebug, as root via the helper)") {
-                tracer.start(pid: proc.pid, start: proc.start, stacks: stacks)
+                tracer.start(pid: target.pid, start: target.start, stacks: stacks)
             }
             .padding(.top, 6)
         }
@@ -551,7 +574,7 @@ struct SyscallTraceView: View {
         panel.allowedContentTypes = [mode == "Summary" ? .tabSeparatedText : .plainText]
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        panel.nameFieldStringValue = "\(proc.name) \(mode) \(f.string(from: Date())).\(mode == "Summary" ? "tsv" : "txt")"
+        panel.nameFieldStringValue = "\(target.name) \(mode) \(f.string(from: Date())).\(mode == "Summary" ? "tsv" : "txt")"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try? exportText().write(to: url, atomically: true, encoding: .utf8)
     }

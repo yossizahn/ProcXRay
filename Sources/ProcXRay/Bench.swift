@@ -376,18 +376,34 @@ enum Bench {
             }
             return
         }
-        if what == "trace" {
+        if what == "trace" || what == "launch" {
             // trace <pid> <seconds> [stacks] [show] [activity]: through the helper over XPC, as SyscallTracer does.
             // `activity` prints the Activity view's grouping, message destinations named through the helper.
-            let secs = args.dropFirst(2).first.flatMap { Double($0) } ?? 3
-            let stacks = args.contains("stacks")
+            // launch <seconds> <app or program> [arguments…]: as Launch and Trace does (started suspended, run once the
+            // trace is on), always with the activity.
+            let launching = what == "launch"
+            var pid = pid
+            if launching {
+                guard args.count > 2 else { print("launch <seconds> <app or program> [arguments…]"); return }
+                let url = URL(fileURLWithPath: args[2])
+                guard let exe = Launcher.executable(for: url) else { print("launch: not an app or executable: \(args[2])"); return }
+                switch Launcher.spawnSuspended(exe, arguments: Array(args.dropFirst(3)), name: Launcher.displayName(for: url)) {
+                case .success(let child): pid = child.pid; print("launch: \(child.name) is pid \(child.pid), suspended")
+                case .failure(let e): print("launch: \(e.message)"); return
+                }
+            }
+            let secs = (launching ? args.dropFirst().first : args.dropFirst(2).first).flatMap { Double($0) } ?? 3
+            let stacks = !launching && args.contains("stacks")
             let s = HelperTraceSession()
             let t0 = Date()
             let format: SyscallTraceConfig.Format
             switch s.start(pid: pid, stacks: stacks) {
             case .success(let f): format = f
-            case .failure(let e): print("trace: \(e.message)"); return
+            case .failure(let e):
+                if launching { kill(pid, SIGKILL) }
+                print("trace: \(e.message)"); return
             }
+            if launching { Launcher.resume(pid) }
             print(String(format: "trace: format %@, started in %.0f ms", "\(format)", -t0.timeIntervalSinceNow * 1000))
             var dec = SyscallDecoder(stacks: stacks); var recs = 0, events = 0, stopped = false
             var fds = FdLabeler(), shown = 0
@@ -396,7 +412,7 @@ enum Bench {
             var names: [String: Int] = [:]
             let symbols = StackSymbols()
             var withStack = 0, callers: [String: Int] = [:], examples: [String: SyscallRecord] = [:]
-            let activity = args.contains("activity")
+            let activity = launching || args.contains("activity")
             var all: [SyscallRecord] = []
             func take(_ rs: [SyscallRecord]) {
                 if activity { all += rs }
