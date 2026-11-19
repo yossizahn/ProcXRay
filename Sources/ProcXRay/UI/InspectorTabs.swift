@@ -304,7 +304,7 @@ struct InfoTab: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         // Nice is an optional read: make it while this tab shows it.
-        .readsWhileShown(.nice)
+        .readsWhileShown([.nice, .suspended])
         // Re-read on an exec, on a manual refresh, and when the helper comes or goes.
         .task(id: "\(p.codeKey)|\(store.fullRefreshGen)|\(exited)|\(store.helperState.isRunning)") {
             guard !exited else { return }
@@ -583,6 +583,7 @@ struct UsageTab: View {
                     ("Page faults", rate(r?.faults), c.map { "\(Fmt.count($0.faults)) (\(Fmt.count($0.cowFaults)) copy-on-write)" } ?? "—"),
                     ("Page-ins", rate(r?.pageins), Fmt.count(c?.pageins)),
                 ] + jetsamRows(p))
+                TaskMemoryCard(proc: p, exited: exited)
                 Self.section("Disk", "internaldrive", h?.disk, via: via, format: bytesPerSecFormat, rows: [
                     ("Read", r?.diskRead.map(bytesPerSecFormat) ?? "—", Fmt.bytes(p.diskRead)),
                     ("Written", r?.diskWrite.map(bytesPerSecFormat) ?? "—", Fmt.bytes(p.diskWrite)),
@@ -1264,6 +1265,7 @@ struct TrustTab: View {
                     FactGrid(rows: signatureRows(s))
                 }
                 HardeningCard(proc: proc, exited: exited)
+                TaskDetailCards(proc: proc, exited: exited)
                 SandboxCard(proc: proc, exited: exited, entitlements: dict)
                 TCCCard(proc: proc, responsible: store.responsibleProcess(proc), entitlements: dict)
                 entitlements(dict, platform: s.isPlatform || s.isAppleSigned)

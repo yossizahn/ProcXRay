@@ -315,6 +315,7 @@ private func yesNo(_ b: Bool?) -> CellValue {
 /// processes measured), and the running-thread count is a single instant that reads 0 for most processes.
 private func state(_ p: ProcInfo) -> CellValue {
     if p.notResponding { return .text("not responding", .danger) }
+    if let n = p.suspendCount, n > 0 { return .text(n > 1 ? "suspended ×\(n)" : "suspended", .warning) }
     switch p.stat {
     case 4: return .text("stopped", .warning)
     case 5: return .text("zombie", .warning)
@@ -369,15 +370,15 @@ private let catalogue: [Column] = [
         p.asid.map { .number(Double($0), String($0)) } ?? .unknown
     },
     Column(id: "state", title: "State",
-           help: "Not responding (the app is hung, as in Activity Monitor), stopped (by a signal such as SIGSTOP), zombie (exited, waiting for its parent) or starting. Empty for a normal live process.", source: "kinfo_proc p_stat; WindowServer (not responding)",
-           section: .execution, groupNote: "a count per state", width: 76,
+           help: "Not responding (the app is hung, as in Activity Monitor), suspended (task_suspend: by RunningBoard or a debugger; ×N when suspended more than once), stopped (by a signal such as SIGSTOP), zombie (exited, waiting for its parent) or starting. Empty for a normal live process.", source: "kinfo_proc p_stat; task_info MACH_TASK_BASIC_INFO suspend_count; WindowServer (not responding)",
+           section: .execution, needs: "helper, to see other users' processes suspended", groupNote: "a count per state", width: 76,
            rule: .custom { ms, _ in
                var counts: [String: Int] = [:]
                for m in ms { let v = state(m); if v.hasValue { counts[v.display, default: 0] += 1 } }
                guard !counts.isEmpty else { return .empty }
                let parts = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map { "\($0.value) \($0.key)" }
                return .number(Double(counts.values.reduce(0, +)), parts.joined(separator: ", "), .warning)
-           }) { p, _ in state(p) },
+           }, reads: .suspended) { p, _ in state(p) },
     Column(id: "started", title: "Started", help: "Time since the process started.", source: "kinfo_proc p_starttime",
            section: .execution, unitShowsRoot: true, minWidth: 50, width: 70, numeric: false, rule: .oldest) { p, _ in .date(p.start, Fmt.age(p.start)) },
     Column(id: "startTime", title: "Start time", help: "When the process started.", source: "kinfo_proc p_starttime",

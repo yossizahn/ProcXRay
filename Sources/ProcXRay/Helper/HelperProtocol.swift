@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 23  // 23: PrivMetrics.asid, 22: launch, launched, 21: traceThreads (names), dyld, trace-string and MIG events, 20: traceThreadOwners, scheduler events in the trace, 19: machPortKinds, 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
+    static let protocolVersion = 24  // 24: taskDetail, PrivMetrics.suspendCount, 23: PrivMetrics.asid, 22: launch, launched, 21: traceThreads (names), dyld, trace-string and MIG events, 20: traceThreadOwners, scheduler events in the trace, 19: machPortKinds, 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
 }
 
 /// Read-only surface, but for `launch`: no other call accepts a path, a command or free-form arguments. `launch`
@@ -59,6 +59,9 @@ enum HelperConfig {
     func threads(pid: Int32, reply: @escaping (Data?) -> Void)
     /// JSON SecurityDetail, or nil when it can't be read (gone, or not the caller's and the caller isn't an admin).
     func securityConfig(pid: Int32, reply: @escaping (Data?) -> Void)
+    /// JSON TaskDetail (task_info through a name port), or nil when the process is gone. The audit token for every
+    /// caller; the rest, like the other per-process reads, only for a caller who may inspect the process.
+    func taskDetail(pid: Int32, reply: @escaping (Data?) -> Void)
     func runTool(_ tool: Int, pid: Int32, reply: @escaping (String) -> Void)
     /// `footprint` over a set of processes (JSON [Int32], at most `GroupFootprint.maxPids`), for a group's memory
     /// with shared pages counted once (GroupFootprint). Another user's processes only for an admin caller; the
@@ -219,6 +222,8 @@ struct PrivMetrics: Codable, Sendable {
     var sandboxed: Bool?
     /// Audit session id (LoginSessions.asid).
     var asid: Int32?
+    /// task_suspend count (MACH_TASK_BASIC_INFO), when asked for (ExtraReads.suspended).
+    var suspendCount: Int32?
     /// Scheduling priority (proc_taskinfo), always read; the rest only when asked for (ExtraReads).
     var priority: Int32?
     var nice: Int32?
@@ -325,6 +330,7 @@ extension PrivMetrics {
         if e.contains(.openFiles) { openFiles = ExtraRead.openFiles(pid) }
         if e.contains(.nice) { nice = ExtraRead.nice(pid) }
         if e.contains(.compressed) { compressed = ExtraRead.compressed(pid) }
+        if e.contains(.suspended) { suspendCount = TaskBasic.suspendCount(pid) }
     }
 }
 

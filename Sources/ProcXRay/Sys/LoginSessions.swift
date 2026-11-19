@@ -67,14 +67,15 @@ enum LoginSessions {
         return asid(task: t)
     }
 
-    private static func asid(task t: mach_port_t) -> Int32? {
+    private static func asid(task t: mach_port_t) -> Int32? { token(task: t).map { Int32(bitPattern: $0.val.6) } }
+
+    static func token(task t: mach_port_t) -> audit_token_t? {
         var tok = audit_token_t()
         var count = mach_msg_type_number_t(MemoryLayout<audit_token_t>.size / MemoryLayout<natural_t>.size)
         let r = withUnsafeMutablePointer(to: &tok) {
             $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(t, task_flavor_t(TASK_AUDIT_TOKEN), $0, &count) }
         }
-        // val[6] is the asid (audit_token_to_asid; libbsm isn't linked).
-        return r == KERN_SUCCESS ? Int32(bitPattern: tok.val.6) : nil
+        return r == KERN_SUCCESS ? tok : nil
     }
 
     /// The session this app runs in.
@@ -94,11 +95,15 @@ enum LoginSessions {
 
     /// The session's flags and audit user (auditon A_GETSINFO_ADDR, which needs no privileges).
     static func info(_ asid: Int32) -> (flags: UInt64, auid: uid_t)? {
+        sessionRecord(asid).map { ($0.ai_flags, $0.ai_auid) }
+    }
+
+    static func sessionRecord(_ asid: Int32) -> auditinfo_addr? {
         guard let auditon else { return nil }
         var ai = auditinfo_addr()
         ai.ai_asid = asid
         guard auditon(A_GETSINFO_ADDR, &ai, Int32(MemoryLayout<auditinfo_addr>.size)) == 0 else { return nil }
-        return (ai.ai_flags, ai.ai_auid)
+        return ai
     }
 
     /// What each of these sessions is. One SystemConfiguration read plus one syscall per session.
@@ -124,5 +129,98 @@ enum LoginSessions {
             out[a] = s
         }
         return out
+    }
+}
+
+/// A process's audit token (task_info TASK_AUDIT_TOKEN): the identity the kernel attaches to every Mach message the
+/// process sends, which XPC services check their callers by.
+struct AuditToken: Codable, Equatable, Sendable {
+    /// Audit user: who logged in, kept across su and sudo. uid_t.max (AU_DEFAUDITID) when never set.
+    var auid: UInt32
+    var euid: UInt32
+    var egid: UInt32
+    var ruid: UInt32
+    var rgid: UInt32
+    var pid: Int32
+    var asid: Int32
+    /// Bumped on every exec, so a token names one program run by a pid, not the pid alone.
+    var pidVersion: Int32
+
+    init(_ t: audit_token_t) {
+        let v = t.val
+        auid = v.0; euid = v.1; egid = v.2; ruid = v.3; rgid = v.4
+        pid = Int32(bitPattern: v.5); asid = Int32(bitPattern: v.6); pidVersion = Int32(bitPattern: v.7)
+    }
+
+    /// The user's own processes, or any as root. nil when the token belongs to another process (the pid was reused).
+    static func read(_ pid: pid_t) -> AuditToken? {
+        guard pid > 0 else { return nil }
+        var t: mach_port_t = 0
+        guard task_name_for_pid(mach_task_self_, pid, &t) == KERN_SUCCESS else { return nil }
+        defer { mach_port_deallocate(mach_task_self_, t) }
+        return LoginSessions.token(task: t).map(AuditToken.init).flatMap { $0.pid == pid ? $0 : nil }
+    }
+}
+
+/// The kernel's record of an audit session (auditon A_GETSINFO_ADDR, readable by anyone).
+struct AuditSessionRecord: Equatable, Sendable {
+    var auid: UInt32
+    var flags: UInt64
+    /// Audit preselection masks: the event classes recorded on success and on failure.
+    var maskSuccess: UInt32
+    var maskFailure: UInt32
+    /// Terminal: the device or remote port, the address type (AU_IPv4 or AU_IPv6) and the address.
+    var termPort: Int32
+    var termType: UInt32
+    var termAddr: [UInt32]
+
+    static func read(_ asid: Int32) -> AuditSessionRecord? {
+        guard let ai = LoginSessions.sessionRecord(asid) else { return nil }
+        let a = ai.ai_termid.at_addr
+        return AuditSessionRecord(auid: ai.ai_auid, flags: ai.ai_flags, maskSuccess: ai.ai_mask.am_success,
+                                  maskFailure: ai.ai_mask.am_failure, termPort: ai.ai_termid.at_port,
+                                  termType: ai.ai_termid.at_type, termAddr: [a.0, a.1, a.2, a.3])
+    }
+
+    static let flagNames: [(UInt64, String, String)] = [
+        (0x0001, "IS_INITIAL", "launchd's boot session"),
+        (0x0010, "HAS_GRAPHIC_ACCESS", "can reach the window server"),
+        (0x0020, "HAS_TTY", "has a terminal"),
+        (0x1000, "IS_REMOTE", "logged in from another machine"),
+        (0x2000, "HAS_CONSOLE_ACCESS", "a login at the Mac itself"),
+        (0x4000, "HAS_AUTHENTICATED", "the user authenticated"),
+    ]
+
+    /// "HAS_TTY, IS_REMOTE, HAS_AUTHENTICATED", with any unnamed bits in hex.
+    var flagText: String {
+        var names = Self.flagNames.filter { flags & $0.0 != 0 }.map(\.1)
+        let rest = flags & ~Self.flagNames.reduce(0) { $0 | $1.0 }
+        if rest != 0 { names.append(String(format: "0x%llx", rest)) }
+        return names.isEmpty ? "none" : names.joined(separator: ", ")
+    }
+
+    /// "port 52114 from 192.168.64.1" for a remote login; for a local one the port is a device, named where it can be
+    /// ("/dev/null" for a GUI login, measured: loginwindow sets no real terminal).
+    var terminalText: String {
+        if flags & 0x1000 != 0 || address != nil {   // AU_SESSION_FLAG_IS_REMOTE
+            return "port \(termPort)" + (address.map { " from \($0)" } ?? "")
+        }
+        if termPort == 0 { return "none" }
+        let dev = dev_t(termPort)
+        let numbers = "device \((dev >> 24) & 0xff),\(dev & 0xff_ffff)"
+        guard let n = devname(dev, S_IFCHR) else { return numbers }
+        return "/dev/\(String(cString: n)) (\(numbers))"
+    }
+
+    /// The terminal's address: an IP address for a remote login, else nil (a local session has none).
+    var address: String? {
+        guard termAddr.contains(where: { $0 != 0 }) else { return nil }
+        // at_addr holds the address in network byte order, as in_addr / in6_addr.
+        var bytes: [UInt8] = []
+        for w in termAddr { withUnsafeBytes(of: w) { bytes += $0 } }
+        let family = termType == 16 /* AU_IPv6 */ ? AF_INET6 : AF_INET
+        var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        guard inet_ntop(family, bytes, &buf, socklen_t(buf.count)) != nil else { return nil }
+        return String(cString: buf)
     }
 }

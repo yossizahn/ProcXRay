@@ -34,6 +34,60 @@ final class LoginSessionTests: XCTestCase {
         XCTAssertEqual(rest, [100, 400])
     }
 
+    func testOwnAuditToken() throws {
+        let t = try XCTUnwrap(AuditToken.read(getpid()))
+        XCTAssertEqual(t.pid, getpid())
+        XCTAssertEqual(t.euid, geteuid())
+        XCTAssertEqual(t.rgid, getgid())
+        XCTAssertEqual(t.asid, LoginSessions.own)
+        XCTAssertNotNil(AuditSessionRecord.read(t.asid))
+        XCTAssertNil(AuditToken.read(0))
+    }
+
+    func testOwnTaskDetail() throws {
+        let d = try XCTUnwrap(TaskDetail.read(getpid()))
+        XCTAssertEqual(d.token?.pid, getpid())
+        let vm = try XCTUnwrap(d.vm)
+        XCTAssertGreaterThan(vm.footprint, 0)
+        XCTAssertGreaterThan(vm.internal, 0)
+        XCTAssertEqual(d.basic?.suspendCount, 0)
+        XCTAssertEqual(d.extmod?.anyFromOutside, false)
+        XCTAssertNotEqual(d.extmod?.uuid, UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)).uuidString)
+        // Only the token without `full`.
+        XCTAssertNil(TaskDetail.read(getpid(), full: false)?.vm)
+    }
+
+    /// A child started suspended (POSIX_SPAWN_START_SUSPENDED) has a suspend count of 1, and 0 once SIGCONT resumes it.
+    func testSuspendedChild() throws {
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        defer { posix_spawnattr_destroy(&attr) }
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_START_SUSPENDED))
+        var pid: pid_t = 0
+        let argv: [UnsafeMutablePointer<CChar>?] = [strdup("/bin/sleep"), strdup("30"), nil]
+        defer { argv.forEach { free($0) } }
+        XCTAssertEqual(posix_spawn(&pid, "/bin/sleep", nil, &attr, argv, nil), 0)
+        defer { kill(pid, SIGKILL); var st: Int32 = 0; waitpid(pid, &st, 0) }
+        XCTAssertEqual(TaskBasic.suspendCount(pid), 1)
+        kill(pid, SIGCONT)
+        usleep(100_000)
+        XCTAssertEqual(TaskBasic.suspendCount(pid), 0)
+    }
+
+    func testTerminalAddress() {
+        // 192.168.64.1, as at_addr[0] holds it (network byte order in memory).
+        var r = AuditSessionRecord(auid: 501, flags: 0x5020, maskSuccess: 0, maskFailure: 0, termPort: 22, termType: 4,
+                                   termAddr: [UInt32(bigEndian: 0xC0A8_4001), 0, 0, 0])
+        XCTAssertEqual(r.address, "192.168.64.1")
+        XCTAssertEqual(r.terminalText, "port 22 from 192.168.64.1")
+        XCTAssertEqual(r.flagText, "HAS_TTY, IS_REMOTE, HAS_AUTHENTICATED")
+        r.termAddr = [0, 0, 0, 0]
+        XCTAssertNil(r.address)
+        r.flags = 0x2030
+        r.termPort = 0x0300_0002
+        XCTAssertEqual(r.terminalText, "/dev/null (device 3,2)")
+    }
+
     func testOwnSessionReads() {
         XCTAssertNotNil(LoginSessions.own)
         XCTAssertEqual(LoginSessions.asid(getpid()), LoginSessions.own)

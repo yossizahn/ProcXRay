@@ -96,6 +96,13 @@ enum HelperDaemon {
             reply(try? JSONEncoder().encode(d))
         }
 
+        /// The audit token for every caller, like the asid in allMetrics: its ids are the ones the process list shows
+        /// anyway. The rest (memory, outside changes) only where the caller may inspect the process.
+        func taskDetail(pid: Int32, reply: @escaping (Data?) -> Void) {
+            guard let d = TaskDetail.read(pid, full: mayInspect(pid)) else { reply(nil); return }
+            reply(try? JSONEncoder().encode(d))
+        }
+
         func threads(pid: Int32, reply: @escaping (Data?) -> Void) {
             guard pid > 0, mayInspect(pid), let t = ThreadReader.read(pid) else { reply(nil); return }
             reply(try? JSONEncoder().encode(t))

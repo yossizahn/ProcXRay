@@ -57,6 +57,8 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var nice: Int32?
     var openFiles: Int?
     var compressed: UInt64?
+    /// task_suspend calls not yet resumed (ExtraReads.suspended); nil when not read.
+    var suspendCount: Int32?
     /// Jetsam band and memory limits (root only: from the helper, unless the app runs as root).
     var jetsam: JetsamInfo?
     /// Dirty tracking: whether it may be stopped when idle, and whether it's busy now.
@@ -153,7 +155,7 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
         // Counters as a whole: a local read that got only one of the two calls keeps its partial set.
         fill(\.energyNJ, m.energyNJ); fill(\.wakeups, m.wakeups); fill(\.counters, m.counters)
         fill(\.priority, m.priority); fill(\.nice, m.nice); fill(\.openFiles, m.openFiles)
-        fill(\.compressed, m.compressed); fill(\.jetsam, m.jetsam)
+        fill(\.compressed, m.compressed); fill(\.jetsam, m.jetsam); fill(\.suspendCount, m.suspendCount)
         return took
     }
 
@@ -899,6 +901,7 @@ final class Store {
             if extras.contains(.openFiles) { p.openFiles = ExtraRead.openFiles(k.pid) }
             if extras.contains(.nice) { p.nice = ExtraRead.nice(k.pid) }
             if extras.contains(.compressed) { p.compressed = ExtraRead.compressed(k.pid) }
+            if extras.contains(.suspended) { p.suspendCount = TaskBasic.suspendCount(k.pid) }
             if let assertions { p.assertions = assertions[k.pid] ?? [] }
             // A process with no GPU clients has used no GPU time, and one NetSampler didn't list moved no bytes.
             if let gpu { p.gpuNanos = gpu[k.pid] ?? 0 }

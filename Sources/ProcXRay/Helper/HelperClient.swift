@@ -74,6 +74,11 @@ final class HelperClient: @unchecked Sendable {
         return try? JSONDecoder().decode(SecurityDetail.self, from: data)
     }
 
+    func taskDetail(_ pid: Int32) -> TaskDetail? {
+        guard let data = call({ p, done in p.taskDetail(pid: pid) { done($0) } }, timeout: 3) ?? nil else { return nil }
+        return try? JSONDecoder().decode(TaskDetail.self, from: data)
+    }
+
     func threads(_ pid: Int32) -> ThreadSnapshot? {
         guard let data = call({ p, done in p.threads(pid: pid) { done($0) } }, timeout: 3) ?? nil else { return nil }
         return try? JSONDecoder().decode(ThreadSnapshot.self, from: data)

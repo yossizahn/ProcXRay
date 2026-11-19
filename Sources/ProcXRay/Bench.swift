@@ -145,7 +145,7 @@ enum Bench {
         }
     }
 
-    /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|stacks|powermetrics|counters|sessions> [pid] [--full]`:
+    /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|stacks|powermetrics|counters|sessions|task> [pid] [--full]`:
     /// one helper call from the shell, for testing the helper without the UI. Only this exact binary is accepted by the helper.
     /// The helper's trace path without XPC: start, read every 250 ms as the app does, decode, pair.
     static func trace(pid: Int32, seconds: Double, ktrace: Bool, activity: Bool = false, out: String?) {
@@ -269,6 +269,14 @@ enum Bench {
             }
             // Without a fresh authorization: refused.
             print("unauthorized: " + ((try? c.launch(r, authorization: Data(count: 32)).get()).map { "launched pid \($0.0.pid)!" } ?? "refused"))
+            return
+        }
+        if what == "task" {
+            // task <pid>: the helper's TaskDetail (token, outside changes, suspend count, memory breakdown), as JSON.
+            guard let d = c.taskDetail(pid) else { print("no reply"); return }
+            let e = JSONEncoder()
+            e.outputFormatting = [.prettyPrinted, .sortedKeys]
+            print(String(decoding: (try? e.encode(d)) ?? Data(), as: UTF8.self))
             return
         }
         if what == "sessions" {
