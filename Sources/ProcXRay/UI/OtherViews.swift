@@ -13,7 +13,7 @@ struct PanePlaceholder: View {
 
 struct BackgroundItemsView: View {
     @Environment(Store.self) var store
-    @State private var selection: BTMItem.ID?
+    @State private var selection: Set<BTMItem.ID> = []
     @State private var search = ""
     @AppStorage("background.onlyEnabled") private var onlyEnabled = false
 
@@ -65,44 +65,42 @@ struct BackgroundItemsView: View {
         return j.map { ($0.label, $0.pid) }
     }
 
+    /// The launchd job a record installed is matched as the Launch tab matches: executable path, then label.
+    /// Double-click or the context menu shows its process; the menu also reveals the target in Finder.
+    private var columns: [DataColumn<BTMItem>] {
+        [
+            DataColumn(id: "name", title: "Name", width: 220, minWidth: 140, text: \.name,
+                       dot: { $0.enabled ? .systemGreen : .tertiaryLabelColor },
+                       tooltip: { $0.enabled ? "Enabled" : "Disabled" },
+                       less: { $0.name.localizedStandardCompare($1.name) == .orderedAscending }),
+            .text("type", "Type", width: 140, \.type),
+            .text("disposition", "Disposition", width: 220, color: { _ in .secondaryLabelColor }, \.disposition),
+            .text("developer", "Developer", width: 150, \.developer),
+            .text("team", "Team", width: 90, mono: true, \.teamID),
+            .text("target", "Target", width: 260, color: { _ in .secondaryLabelColor }) { $0.executable.ifEmpty($0.url) },
+            .text("job", "Job", width: 220) { i in job(for: i).map { j in j.pid.map { "\(j.label) (\($0))" } ?? j.label } ?? "" },
+            .text("lastUse", "Last use", width: 150, \.lastUse),
+            .number("uid", "UID", width: 44, value: { Int($0.uid) }, format: { String($0) }),
+        ]
+    }
+
     @ViewBuilder
     private func btmTable(_ items: [BTMItem]) -> some View {
         SplitPane(id: "btm", defaultFraction: 0.65) {
-            Table(items, selection: $selection) {
-                TableColumn("Name") { i in
-                    HStack {
-                        Circle().fill(i.enabled ? .green : .gray).frame(width: 7, height: 7)
-                        Text(i.name).truncationHelp(i.name)
-                    }
-                }.width(min: 140, ideal: 220)
-                TableColumn("Type") { i in Text(i.type).truncationHelp(i.type) }.width(min: 90, ideal: 140)
-                TableColumn("Disposition") { i in Text(i.disposition).foregroundStyle(.secondary).truncationHelp(i.disposition) }.width(min: 120, ideal: 220)
-                TableColumn("Developer") { i in Text(i.developer).truncationHelp(i.developer) }.width(min: 90, ideal: 150)
-                TableColumn("Team") { i in Text(i.teamID).monospaced().truncationHelp(i.teamID) }.width(min: 70, ideal: 90)
-                TableColumn("Target") { i in
-                    let target = i.executable.ifEmpty(i.url)
-                    HStack(spacing: 4) {
-                        Text(target).foregroundStyle(.secondary).truncationMode(.middle).truncationHelp(target)
-                        if let path = Reveal.path(in: target) { Spacer(minLength: 0); RevealButton(path: path) }
-                    }
-                }.width(min: 120, ideal: 260)
-                TableColumn("Job") { i in
-                    // The launchd job it installed, matched as the Launch tab matches: executable path, then label.
-                    if let j = job(for: i) {
-                        HStack(spacing: 4) {
-                            Text(j.label).truncationMode(.middle).truncationHelp(j.label)
-                            if let pid = j.pid {
-                                Button { AppRouter.shared.show(pid) } label: { Text(verbatim: "\(pid)").monospacedDigit() }
-                                    .buttonStyle(.link).help("Show pid \(pid) in Processes")
-                            }
-                        }
-                    }
-                }.width(min: 120, ideal: 220)
-                TableColumn("Last use") { i in Text(i.lastUse).truncationHelp(i.lastUse) }.width(min: 90, ideal: 150)
-                TableColumn("UID") { i in Text(i.uid) }.width(40)
-            }
+            DataTable(rows: items, columns: columns, initialSort: ("name", true), autosave: "backgroundItems", live: true, selection: $selection,
+                      menu: { rows in
+                          guard rows.count == 1, let i = rows.first else { return [] }
+                          var items: [DataMenuItem] = []
+                          if let pid = job(for: i)?.pid { items.append(DataMenuItem(title: "Show in Processes") { AppRouter.shared.show(pid) }) }
+                          if let path = Reveal.path(in: i.executable.ifEmpty(i.url)) {
+                              items.append(DataMenuItem(title: "Reveal in Finder") { Reveal.reveal([path]) })
+                          }
+                          return items
+                      },
+                      onOpen: { i in if let pid = job(for: i)?.pid { AppRouter.shared.show(pid) } },
+                      exportName: "Background Items")
         } bottom: {
-            if let id = selection, let i = store.btm.first(where: { $0.id == id }) {
+            if selection.count == 1, let id = selection.first, let i = store.btm.first(where: { $0.id == id }) {
                 KV(rows: i.fields.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
                    + (i.embedded.isEmpty ? [] : [("Embedded items", i.embedded.joined(separator: "\n"))]))
             } else {
@@ -127,11 +125,11 @@ struct BackgroundItemsView: View {
 
 struct LaunchdView: View {
     @Environment(Store.self) var store
-    @State private var selection: LaunchdJob.ID?
+    @State private var selected: Set<LaunchdJob.ID> = []
+    private var selection: LaunchdJob.ID? { selected.count == 1 ? selected.first : nil }
     @State private var search = ""
     @AppStorage("launchd.runningOnly") private var runningOnly = true
     @State private var detail = ""
-    @State private var sort = [KeyPathComparator(\LaunchdJob.label)]
     /// Label → plist path, read once when the view appears.
     @State private var plists: [String: String] = [:]
 
@@ -141,33 +139,28 @@ struct LaunchdView: View {
         let all = store.jobs + store.otherJobs
         let jobs = all.filter {
             (!runningOnly || $0.pid != nil) && (search.isEmpty || $0.label.localizedCaseInsensitiveContains(search))
-        }.sorted(using: sort)
+        }
         let current = selection.flatMap { s in all.first { $0.id == s } }
         SplitPane(id: "launchd", defaultFraction: 0.6) {
-            Table(jobs, selection: $selection, sortOrder: $sort) {
-                TableColumn("Label", value: \.label) { j in Text(j.label).truncationHelp(j.label) }.width(min: 200, ideal: 340)
-                TableColumn("Domain", value: \.domain) { j in Text(j.domain).foregroundStyle(.secondary) }.width(min: 50, ideal: 60, max: 80)
-                TableColumn("PID") { j in Text(j.pid.map(String.init) ?? "—").monospacedDigit() }.width(60)
-                TableColumn("Last exit", value: \.lastExit) { j in
-                    Text(j.lastExit).foregroundStyle(j.lastExit == "0" || j.lastExit == "-" ? Color.secondary : Color.red)
-                }.width(70)
-                TableColumn("Process") { j in
-                    let path = j.pid.flatMap { procs[$0]?.path }
-                    HStack(spacing: 4) {
-                        Text(path ?? "").foregroundStyle(.secondary).truncationMode(.middle).truncationHelp(path ?? "")
-                        if let path { Spacer(minLength: 0); RevealButton(path: path) }
-                    }
-                }
-                TableColumn("Plist") { j in
-                    let path = plists[j.label] ?? ""
-                    Text(path).foregroundStyle(.secondary).truncationMode(.middle).truncationHelp(path)
-                }
-            }
-            .contextMenu(forSelectionType: LaunchdJob.ID.self) { ids in
-                if let id = ids.first, let pid = all.first(where: { $0.id == id })?.pid {
-                    Button("Show in Processes") { AppRouter.shared.show(pid) }
-                }
-            }
+            DataTable(rows: jobs, columns: [
+                .text("label", "Label", width: 340, \.label),
+                .text("domain", "Domain", width: 60, color: { _ in .secondaryLabelColor }, \.domain),
+                .number("pid", "PID", width: 60, value: { $0.pid }, format: { String($0) }),
+                .text("lastExit", "Last exit", width: 70,
+                      color: { $0.lastExit == "0" || $0.lastExit == "-" ? .secondaryLabelColor : .systemRed }, \.lastExit),
+                .text("process", "Process", width: 260, color: { _ in .secondaryLabelColor }) { j in j.pid.flatMap { procs[$0]?.path } ?? "" },
+                .text("plist", "Plist", width: 260, color: { _ in .secondaryLabelColor }) { plists[$0.label] ?? "" },
+            ], initialSort: ("label", true), autosave: "launchdJobs", live: true, selection: $selected,
+                      menu: { rows in
+                          guard rows.count == 1, let j = rows.first else { return [] }
+                          var items: [DataMenuItem] = []
+                          if let pid = j.pid { items.append(DataMenuItem(title: "Show in Processes") { AppRouter.shared.show(pid) }) }
+                          if let path = j.pid.flatMap({ procs[$0]?.path }) { items.append(DataMenuItem(title: "Reveal Process in Finder") { Reveal.reveal([path]) }) }
+                          if let plist = plists[j.label] { items.append(DataMenuItem(title: "Reveal Plist in Finder") { Reveal.reveal([plist]) }) }
+                          return items
+                      },
+                      onOpen: { j in if let pid = j.pid { AppRouter.shared.show(pid) } },
+                      exportName: "launchd Jobs")
         } bottom: {
             if selection != nil, current == nil {
                 PanePlaceholder(text: "\(selection ?? "") is no longer loaded in launchd")

@@ -71,7 +71,7 @@ struct WindowsTab: View {
             Text(r.windows.isEmpty ? "No windows." : "No windows on screen.").foregroundStyle(.secondary).padding(.horizontal, 10)
             Spacer()
         } else {
-            FastTable(rows: rows, columns: Self.columns, initialSort: ("layer", true),
+            DataTable(rows: rows, columns: Self.columns, initialSort: ("layer", true),
                       menu: { menu($0, r) }, onOpen: { w in act { WindowActions.raise(pid: proc.pid, window: w.id) } },
                       onSpace: { w, row in
                           if ScreenshotWindow.isShowing(w.id) { ScreenshotWindow.close() }
@@ -94,35 +94,35 @@ struct WindowsTab: View {
         refresh += 1
     }
 
-    private func menu(_ ws: [WindowList.Window], _ r: WindowList.Reading) -> [FastMenuItem] {
+    private func menu(_ ws: [WindowList.Window], _ r: WindowList.Reading) -> [DataMenuItem] {
         guard let w = ws.first, !exited else { return [] }
         let pid = proc.pid, name = proc.name
         let ax = r.accessibility
         let needs = ax ? "" : " (needs Accessibility)"
-        var items: [FastMenuItem] = [
-            FastMenuItem(title: "Bring to Front" + needs, enabled: ax) { act("Bring to Front") { WindowActions.raise(pid: pid, window: w.id) } },
+        var items: [DataMenuItem] = [
+            DataMenuItem(title: "Bring to Front" + needs, enabled: ax) { act("Bring to Front") { WindowActions.raise(pid: pid, window: w.id) } },
             w.minimized == true
-                ? FastMenuItem(title: "Restore" + needs, enabled: ax) { act("Restore") { WindowActions.setMinimized(false, pid: pid, window: w.id) } }
-                : FastMenuItem(title: "Minimize" + needs, enabled: ax) { act("Minimize") { WindowActions.setMinimized(true, pid: pid, window: w.id) } },
-            FastMenuItem(title: "Toggle Full Screen" + needs, enabled: ax) { act("Full screen") { WindowActions.toggleFullScreen(pid: pid, window: w.id) } },
-            FastMenuItem(title: "Close" + needs, enabled: ax) { act("Close") { WindowActions.close(pid: pid, window: w.id) } },
+                ? DataMenuItem(title: "Restore" + needs, enabled: ax) { act("Restore") { WindowActions.setMinimized(false, pid: pid, window: w.id) } }
+                : DataMenuItem(title: "Minimize" + needs, enabled: ax) { act("Minimize") { WindowActions.setMinimized(true, pid: pid, window: w.id) } },
+            DataMenuItem(title: "Toggle Full Screen" + needs, enabled: ax) { act("Full screen") { WindowActions.toggleFullScreen(pid: pid, window: w.id) } },
+            DataMenuItem(title: "Close" + needs, enabled: ax) { act("Close") { WindowActions.close(pid: pid, window: w.id) } },
             .separator,
         ]
         let hidden = WindowActions.isHidden(pid)
-        items.append(FastMenuItem(title: hidden ? "Unhide \(name)" : "Hide \(name)") {
+        items.append(DataMenuItem(title: hidden ? "Unhide \(name)" : "Hide \(name)") {
             act(hidden ? "Unhide" : "Hide") { WindowActions.setHidden(!hidden, pid: pid) }
         })
-        items.append(FastMenuItem(title: "Show on Screen", enabled: w.onScreen) { ScreenHighlight.flash(w.bounds, seconds: 2.5) })
+        items.append(DataMenuItem(title: "Show on Screen", enabled: w.onScreen) { ScreenHighlight.flash(w.bounds, seconds: 2.5) })
         items.append(.separator)
         let shot = r.screenRecording ? "" : " (needs Screen Recording)"
-        items.append(FastMenuItem(title: "Show Screenshot (Space)" + shot, enabled: r.screenRecording) { screenshot(w, .show) })
-        items.append(FastMenuItem(title: "Copy Screenshot" + shot, enabled: r.screenRecording) { screenshot(w, .copy) })
-        items.append(FastMenuItem(title: "Save Screenshot…" + shot, enabled: r.screenRecording) { screenshot(w, .save) })
+        items.append(DataMenuItem(title: "Show Screenshot (Space)" + shot, enabled: r.screenRecording) { screenshot(w, .show) })
+        items.append(DataMenuItem(title: "Copy Screenshot" + shot, enabled: r.screenRecording) { screenshot(w, .copy) })
+        items.append(DataMenuItem(title: "Save Screenshot…" + shot, enabled: r.screenRecording) { screenshot(w, .save) })
         items.append(.separator)
-        items.append(FastMenuItem(title: "Accessibility Tree of This Window" + needs, enabled: ax) {
+        items.append(DataMenuItem(title: "Accessibility Tree of This Window" + needs, enabled: ax) {
             AXTreeWindow.show(pid: pid, name: name, window: w.id, title: w.shownTitle)
         })
-        items.append(FastMenuItem(title: "Copy Window ID") { ProcessCommands.copy(String(w.id)) })
+        items.append(DataMenuItem(title: "Copy Window ID") { ProcessCommands.copy(String(w.id)) })
         return items
     }
 
@@ -160,7 +160,7 @@ struct WindowsTab: View {
         }
     }
 
-    private static let columns: [FastColumn<WindowList.Window>] = {
+    private static let columns: [DataColumn<WindowList.Window>] = {
         let secondary = NSColor.secondaryLabelColor
         func state(_ w: WindowList.Window) -> String {
             if w.minimized == true { return "Minimized" }
@@ -168,30 +168,30 @@ struct WindowsTab: View {
             return "Hidden"
         }
         return [
-            FastColumn(id: "id", title: "ID", width: 60, numeric: true,
+            DataColumn(id: "id", title: "ID", width: 60, numeric: true,
                        help: "The window server's window number (CGWindowID)",
                        text: { String($0.id) }, less: { $0.id < $1.id }),
-            FastColumn(id: "title", title: "Title", width: 220, text: { $0.shownTitle ?? "—" },
+            DataColumn(id: "title", title: "Title", width: 220, text: { $0.shownTitle ?? "—" },
                        color: { $0.shownTitle == nil ? secondary : nil }, tooltip: { $0.shownTitle },
                        less: { ($0.shownTitle ?? "") < ($1.shownTitle ?? "") }),
-            FastColumn(id: "layer", title: "Level", width: 110,
+            DataColumn(id: "layer", title: "Level", width: 110,
                        help: "The window level: which windows it stays above (kCGWindowLayer)",
                        text: { WindowList.layerName($0.layer) }, tooltip: { "kCGWindowLayer \($0.layer)" },
                        less: { ($0.layer, $0.id) < ($1.layer, $1.id) }),
-            FastColumn(id: "role", title: "Role", width: 190,
+            DataColumn(id: "role", title: "Role", width: 190,
                        help: "What kind of window the app says it is (Accessibility subrole)",
                        text: { $0.subrole.map(Self.roleName) ?? "—" }, color: { $0.subrole == nil ? secondary : nil },
                        tooltip: { $0.subrole }, less: { ($0.subrole ?? "") < ($1.subrole ?? "") }),
-            FastColumn(id: "state", title: "State", width: 90, text: state,
+            DataColumn(id: "state", title: "State", width: 90, text: state,
                        color: { $0.onScreen && $0.minimized != true ? nil : secondary }, less: { state($0) < state($1) }),
-            FastColumn(id: "frame", title: "Position", width: 110, numeric: true, mono: true,
+            DataColumn(id: "frame", title: "Position", width: 110, numeric: true, mono: true,
                        help: "Top-left corner in global screen coordinates (origin at the main display's top left)",
                        text: { "\(Int($0.bounds.minX)), \(Int($0.bounds.minY))" },
                        less: { ($0.bounds.minY, $0.bounds.minX) < ($1.bounds.minY, $1.bounds.minX) }),
-            FastColumn(id: "size", title: "Size", width: 90, numeric: true, mono: true,
+            DataColumn(id: "size", title: "Size", width: 90, numeric: true, mono: true,
                        text: { "\(Int($0.bounds.width))×\(Int($0.bounds.height))" },
                        less: { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height }),
-            FastColumn(id: "sharing", title: "Capture", width: 90,
+            DataColumn(id: "sharing", title: "Capture", width: 90,
                        help: "Whether screenshots and screen capture can see it (kCGWindowSharingState)",
                        text: { w in w.sharing.map { ["Hidden", "Allowed", "Allowed (read-write)"][min(max($0, 0), 2)] } ?? "—" },
                        color: { $0.sharing == 0 ? .systemOrange : $0.sharing == nil ? secondary : nil },

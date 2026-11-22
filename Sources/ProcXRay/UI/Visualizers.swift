@@ -748,8 +748,6 @@ struct VmmapView: View {
         case chart = "Chart", types = "Types", list = "All Regions", files = "Files", zones = "Malloc Zones"
     }
     @State private var mode = Mode.chart
-    @State private var regionSort = [KeyPathComparator(\VMRegion.resident, order: .reverse)]
-    @State private var zoneSort = [KeyPathComparator(\MallocZone.allocated, order: .reverse)]
     /// All Regions narrowed to one region type or one file, from Types, Files or the chart.
     @State private var scope: Scope?
     @State private var access = Access.all
@@ -876,64 +874,58 @@ struct VmmapView: View {
     }
 
     private var regionTable: some View {
-        let rows = filteredRegions.sorted(using: regionSort)
+        let rows = filteredRegions
         let maxRes = Double(rows.map(\.resident).max() ?? 1)
         let maxSwap = Double(rows.map(\.swapped).max() ?? 1)
-        return Table(rows, sortOrder: $regionSort) {
-            TableColumn("Region", value: \.name) { r in
-                HStack {
-                    Text(r.name).truncationHelp(r.name)
-                    if !r.note.isEmpty { Image(systemName: "info.circle").foregroundStyle(.secondary).help(r.note) }
-                }
-            }.width(min: 140, ideal: 220)
-            TableColumn("Virtual", value: \.virtual) { r in Text(Fmt.bytes(r.virtual)).monospacedDigit().foregroundStyle(.secondary) }
-                .width(min: 60, ideal: 70)
-            TableColumn("Resident", value: \.resident) { r in
-                HStack { MiniBar(fraction: Double(r.resident) / max(maxRes, 1), color: .blue, width: 50)
-                    Text(Fmt.bytes(r.resident)).monospacedDigit() }
-            }.width(min: 110, ideal: 130)
-            TableColumn("Dirty", value: \.dirty) { r in Text(Fmt.bytes(r.dirty)).monospacedDigit().foregroundStyle(r.dirty > 0 ? .orange : .secondary) }
-                .width(min: 60, ideal: 70)
-            TableColumn("Swapped", value: \.swapped) { r in
-                HStack { MiniBar(fraction: Double(r.swapped) / max(maxSwap, 1), color: .purple, width: 50)
-                    Text(Fmt.bytes(r.swapped)).monospacedDigit() }
-            }.width(min: 110, ideal: 130)
-            TableColumn("Count", value: \.count) { r in Text(verbatim: "\(r.count)").monospacedDigit() }.width(min: 40, ideal: 50)
+        func bytes(_ id: String, _ title: String, _ width: CGFloat, color: ((VMRegion) -> NSColor?)? = nil,
+                   bar: ((VMRegion) -> (fraction: Double, color: NSColor)?)? = nil, _ v: @escaping (VMRegion) -> UInt64) -> DataColumn<VMRegion> {
+            var c = DataColumn<VMRegion>.number(id, title, width: width, color: color, value: v, format: { Fmt.bytes($0) })
+            c.bar = bar
+            return c
         }
-        .contextMenu(forSelectionType: VMRegion.ID.self) { ids in
-            if let id = ids.first, !s.entries.isEmpty { Button("Show Regions") { show(.type(id)) } }
-        } primaryAction: { ids in
-            if let id = ids.first, !s.entries.isEmpty { show(.type(id)) }
-        }
+        var name = DataColumn<VMRegion>.text("region", "Region", width: 220) { $0.name }
+        name.tooltip = { $0.note.isEmpty ? nil : $0.note }
+        let canShow = !s.entries.isEmpty
+        return DataTable(rows: rows, columns: [
+            name,
+            bytes("virtual", "Virtual", 70, color: { _ in .secondaryLabelColor }) { $0.virtual },
+            bytes("resident", "Resident", 130, bar: { (Double($0.resident) / max(maxRes, 1), .systemBlue) }) { $0.resident },
+            bytes("dirty", "Dirty", 70, color: { $0.dirty > 0 ? .systemOrange : .secondaryLabelColor }) { $0.dirty },
+            bytes("swapped", "Swapped", 130, bar: { (Double($0.swapped) / max(maxSwap, 1), .systemPurple) }) { $0.swapped },
+            .number("count", "Count", width: 50, value: { $0.count }, format: { String($0) }),
+        ], initialSort: ("resident", false), autosave: "vmmap.regionTypes",
+                         menu: { rows in
+                             guard canShow, rows.count == 1, let r = rows.first else { return [] }
+                             return [DataMenuItem(title: "Show Regions") { show(.type(r.id)) }]
+                         },
+                         onOpen: { r in if canShow { show(.type(r.id)) } },
+                         exportName: "Memory regions by type")
     }
 
     private var zoneTable: some View {
-        let rows = s.zones.filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }.sorted(using: zoneSort)
+        let rows = s.zones.filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }
         let maxAlloc = Double(rows.map(\.allocated).max() ?? 1)
-        return Table(rows, sortOrder: $zoneSort) {
-            TableColumn("Zone", value: \.name) { z in Text(z.name).truncationHelp(z.name) }.width(min: 160, ideal: 240)
-            TableColumn("Allocated", value: \.allocated) { z in
-                HStack { MiniBar(fraction: Double(z.allocated) / max(maxAlloc, 1), color: .blue, width: 50)
-                    Text(Fmt.bytes(z.allocated)).monospacedDigit() }
-            }.width(min: 110, ideal: 130)
-            TableColumn("Allocations", value: \.allocations) { z in Text(verbatim: z.allocations.formatted()).monospacedDigit() }
-                .width(min: 70, ideal: 80)
-            TableColumn("Fragmentation", value: \.fragPercent) { z in
-                HStack {
-                    MiniBar(fraction: Double(z.fragPercent) / 100, color: z.fragPercent > 50 ? .red : .orange, width: 50)
-                    Text(verbatim: "\(z.fragPercent)%").monospacedDigit()
-                    Text(Fmt.bytes(z.fragSize)).foregroundStyle(.secondary).monospacedDigit()
-                }
-            }.width(min: 150, ideal: 170)
-            TableColumn("Resident", value: \.resident) { z in Text(Fmt.bytes(z.resident)).monospacedDigit() }.width(min: 60, ideal: 70)
-            TableColumn("Swapped", value: \.swapped) { z in Text(Fmt.bytes(z.swapped)).monospacedDigit().foregroundStyle(.secondary) }
-                .width(min: 60, ideal: 70)
-        }
-        .contextMenu(forSelectionType: MallocZone.ID.self) { ids in
-            if let id = ids.first, !s.entries.isEmpty { Button("Show Regions") { show(.zone(id)) } }
-        } primaryAction: { ids in
-            if let id = ids.first, !s.entries.isEmpty { show(.zone(id)) }
-        }
+        var allocated = DataColumn<MallocZone>.number("allocated", "Allocated", width: 130, value: { $0.allocated }, format: { Fmt.bytes($0) })
+        allocated.bar = { (Double($0.allocated) / max(maxAlloc, 1), .systemBlue) }
+        var frag = DataColumn<MallocZone>.number("fragmentation", "Fragmentation", width: 170, value: { $0.fragPercent },
+                                                 format: { "\($0)%" })
+        frag.text = { "\($0.fragPercent)%  \(Fmt.bytes($0.fragSize))" }
+        frag.bar = { (Double($0.fragPercent) / 100, $0.fragPercent > 50 ? .systemRed : .systemOrange) }
+        let canShow = !s.entries.isEmpty
+        return DataTable(rows: rows, columns: [
+            .text("zone", "Zone", width: 240) { $0.name },
+            allocated,
+            .number("allocations", "Allocations", width: 80, value: { $0.allocations }, format: { $0.formatted() }),
+            frag,
+            .number("resident", "Resident", width: 70, value: { $0.resident }, format: { Fmt.bytes($0) }),
+            .number("swapped", "Swapped", width: 70, color: { _ in .secondaryLabelColor }, value: { $0.swapped }, format: { Fmt.bytes($0) }),
+        ], initialSort: ("allocated", false), autosave: "vmmap.zones",
+                         menu: { rows in
+                             guard canShow, rows.count == 1, let z = rows.first else { return [] }
+                             return [DataMenuItem(title: "Show Regions") { show(.zone(z.id)) }]
+                         },
+                         onOpen: { z in if canShow { show(.zone(z.id)) } },
+                         exportName: "Malloc zones")
     }
 
     // MARK: All Regions
@@ -973,46 +965,46 @@ struct VmmapView: View {
                     .font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
             }
             .padding(.horizontal, 10)
-            FastTable(rows: rows, columns: Self.entryColumns, initialSort: ("address", true),
+            DataTable(rows: rows, columns: Self.entryColumns, initialSort: ("address", true),
                       menu: { entryMenu($0) }, onOpen: { e in if let p = e.path { show(.file(p)) } else { show(.type(e.type)) } })
                 .id("entries")
         }
     }
 
-    private static let entryColumns: [FastColumn<VMMapEntry>] = {
+    private static let entryColumns: [DataColumn<VMMapEntry>] = {
         let secondary = NSColor.secondaryLabelColor
-        func bytes(_ id: String, _ title: String, _ k: KeyPath<VMMapEntry, UInt64>, _ color: NSColor? = nil) -> FastColumn<VMMapEntry> {
-            FastColumn(id: id, title: title, width: 70, numeric: true, text: { Fmt.bytes($0[keyPath: k]) },
+        func bytes(_ id: String, _ title: String, _ k: KeyPath<VMMapEntry, UInt64>, _ color: NSColor? = nil) -> DataColumn<VMMapEntry> {
+            DataColumn(id: id, title: title, width: 70, numeric: true, text: { Fmt.bytes($0[keyPath: k]) },
                        color: { $0[keyPath: k] > 0 ? (color ?? .labelColor) : secondary }, less: { $0[keyPath: k] < $1[keyPath: k] })
         }
         return [
-            FastColumn(id: "address", title: "Address", width: 100, mono: true,
+            DataColumn(id: "address", title: "Address", width: 100, mono: true,
                        text: { $0.start.map { String($0, radix: 16) } ?? "—" }, tooltip: { range($0) },
                        less: { $0.address < $1.address }),
-            FastColumn(id: "type", title: "Type", width: 170, text: \.type, less: { $0.type < $1.type }),
+            DataColumn(id: "type", title: "Type", width: 170, text: \.type, less: { $0.type < $1.type }),
             bytes("size", "Size", \.virtual),
             bytes("resident", "Resident", \.resident),
             bytes("dirty", "Dirty", \.dirty, .systemOrange),
             bytes("swapped", "Swapped", \.swapped, .systemPurple),
-            FastColumn(id: "access", title: "Access", width: 70, mono: true,
+            DataColumn(id: "access", title: "Access", width: 70, mono: true,
                        help: "Protection now / the most it can be raised to (r read, w write, x execute)",
                        text: { "\($0.prot)/\($0.maxProt)" }, tooltip: { "Protection now \($0.prot), at most \($0.maxProt)" },
                        less: { ($0.prot, $0.maxProt) < ($1.prot, $1.maxProt) }),
-            FastColumn(id: "share", title: "Sharing", width: 55, mono: true, help: "vmmap's sharing mode (SM=)",
+            DataColumn(id: "share", title: "Sharing", width: 55, mono: true, help: "vmmap's sharing mode (SM=)",
                        text: \.share, tooltip: { shareHelp($0.share) }, less: { $0.share < $1.share }),
-            FastColumn(id: "purge", title: "Purgeable", width: 75, help: "Purgeable memory's state (PURGE=): the system may discard volatile memory",
+            DataColumn(id: "purge", title: "Purgeable", width: 75, help: "Purgeable memory's state (PURGE=): the system may discard volatile memory",
                        text: { purgeName($0.purge) }, color: { _ in secondary }, less: { $0.purge < $1.purge }),
-            FastColumn(id: "detail", title: "Detail", width: 380, help: "The mapped file, the malloc zone, the thread, or vmmap's note",
+            DataColumn(id: "detail", title: "Detail", width: 380, help: "The mapped file, the malloc zone, the thread, or vmmap's note",
                        text: \.detail, color: { _ in secondary }, less: { $0.detail < $1.detail }),
         ]
     }()
 
-    private func entryMenu(_ picked: [VMMapEntry]) -> [FastMenuItem] {
+    private func entryMenu(_ picked: [VMMapEntry]) -> [DataMenuItem] {
         var items = [
-            FastMenuItem(title: picked.count == 1 ? "Copy Address Range" : "Copy \(picked.count) Address Ranges") {
+            DataMenuItem(title: picked.count == 1 ? "Copy Address Range" : "Copy \(picked.count) Address Ranges") {
                 Self.copy(picked.map { Self.range($0) }.joined(separator: "\n"))
             },
-            FastMenuItem(title: picked.count == 1 ? "Copy Line" : "Copy \(picked.count) Lines") {
+            DataMenuItem(title: picked.count == 1 ? "Copy Line" : "Copy \(picked.count) Lines") {
                 Self.copy(picked.map { e in
                     [e.type, Self.range(e), Fmt.bytes(e.virtual), Fmt.bytes(e.resident), Fmt.bytes(e.dirty), Fmt.bytes(e.swapped),
                      "\(e.prot)/\(e.maxProt)", e.share, e.purge, e.detail].joined(separator: "\t")
@@ -1020,22 +1012,22 @@ struct VmmapView: View {
             },
         ]
         if picked.count == 1, let e = picked.first {
-            items += [.separator, FastMenuItem(title: "Show All \(e.type) Regions") { show(.type(e.type)) }]
+            items += [.separator, DataMenuItem(title: "Show All \(e.type) Regions") { show(.type(e.type)) }]
             if let p = e.path {
-                items.append(FastMenuItem(title: "Show All Regions of \((p as NSString).lastPathComponent)") { show(.file(p)) })
+                items.append(DataMenuItem(title: "Show All Regions of \((p as NSString).lastPathComponent)") { show(.file(p)) })
                 items += fileMenu(p)
             }
         }
         return items
     }
 
-    private func fileMenu(_ p: String) -> [FastMenuItem] {
+    private func fileMenu(_ p: String) -> [DataMenuItem] {
         let exists = Reveal.exists(p)
         // dyld shared cache images exist only in the cache, not as files: Reveal and Inspect are off for them.
         return [.separator,
-                FastMenuItem(title: "Copy Path") { Self.copy(p) },
-                FastMenuItem(title: Reveal.help, enabled: exists) { Reveal.reveal([p]) },
-                FastMenuItem(title: MachOOpen.help, enabled: exists && MachOProbe.target(p) != nil) { MachOOpen.open(p) }]
+                DataMenuItem(title: "Copy Path") { Self.copy(p) },
+                DataMenuItem(title: Reveal.help, enabled: exists) { Reveal.reveal([p]) },
+                DataMenuItem(title: MachOOpen.help, enabled: exists && MachOProbe.target(p) != nil) { MachOOpen.open(p) }]
     }
 
     // MARK: Files
@@ -1053,30 +1045,30 @@ struct VmmapView: View {
                     .font(.caption).foregroundStyle(.secondary).monospacedDigit()
             }
             .padding(.horizontal, 10)
-            FastTable(rows: rows, columns: Self.fileColumns, initialSort: ("resident", false),
+            DataTable(rows: rows, columns: Self.fileColumns, initialSort: ("resident", false),
                       menu: { picked in
                           guard let p = picked.first?.path else { return [] }
-                          return [FastMenuItem(title: "Show Regions") { show(.file(p)) }] + fileMenu(p)
+                          return [DataMenuItem(title: "Show Regions") { show(.file(p)) }] + fileMenu(p)
                       }, onOpen: { show(.file($0.path)) })
                 .id("files")
         }
     }
 
-    private static let fileColumns: [FastColumn<VMFile>] = {
+    private static let fileColumns: [DataColumn<VMFile>] = {
         let secondary = NSColor.secondaryLabelColor
-        func bytes(_ id: String, _ title: String, _ k: KeyPath<VMFile, UInt64>, _ color: NSColor? = nil) -> FastColumn<VMFile> {
-            FastColumn(id: id, title: title, width: 75, numeric: true, text: { Fmt.bytes($0[keyPath: k]) },
+        func bytes(_ id: String, _ title: String, _ k: KeyPath<VMFile, UInt64>, _ color: NSColor? = nil) -> DataColumn<VMFile> {
+            DataColumn(id: id, title: title, width: 75, numeric: true, text: { Fmt.bytes($0[keyPath: k]) },
                        color: { $0[keyPath: k] > 0 ? (color ?? .labelColor) : secondary }, less: { $0[keyPath: k] < $1[keyPath: k] })
         }
         return [
-            FastColumn(id: "name", title: "File", width: 200, text: \.name, tooltip: \.path, less: { $0.name < $1.name }),
-            FastColumn(id: "kind", title: "Kind", width: 85, text: \.kindName, color: { _ in secondary }, less: { $0.kindName < $1.kindName }),
+            DataColumn(id: "name", title: "File", width: 200, text: \.name, tooltip: \.path, less: { $0.name < $1.name }),
+            DataColumn(id: "kind", title: "Kind", width: 85, text: \.kindName, color: { _ in secondary }, less: { $0.kindName < $1.kindName }),
             bytes("resident", "Resident", \.resident),
             bytes("dirty", "Dirty", \.dirty, .systemOrange),
             bytes("swapped", "Swapped", \.swapped, .systemPurple),
             bytes("virtual", "Virtual", \.virtual),
-            FastColumn(id: "regions", title: "Regions", width: 60, numeric: true, text: { "\($0.regions)" }, less: { $0.regions < $1.regions }),
-            FastColumn(id: "path", title: "Path", width: 380, text: \.path, color: { _ in secondary }, less: { $0.path < $1.path }),
+            DataColumn(id: "regions", title: "Regions", width: 60, numeric: true, text: { "\($0.regions)" }, less: { $0.regions < $1.regions }),
+            DataColumn(id: "path", title: "Path", width: 380, text: \.path, color: { _ in secondary }, less: { $0.path < $1.path }),
         ]
     }()
 

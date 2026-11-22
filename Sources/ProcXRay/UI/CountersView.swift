@@ -203,7 +203,6 @@ final class CounterBrowser {
 struct SystemCountersView: View {
     @State private var b = CounterBrowser.shared
     @State private var selection: String?
-    @State private var sort = [KeyPathComparator(\CounterRow.order)]
 
     var body: some View {
         @Bindable var b = b
@@ -212,7 +211,7 @@ struct SystemCountersView: View {
         HSplitView {
             CounterGroupList().frame(minWidth: 220, idealWidth: 280, maxWidth: 420)
             SplitPane(id: "counters", defaultFraction: 0.6, showsBottom: selection.flatMap { b.counters[$0] } != nil) {
-                CounterTable(selection: $selection, sort: $sort)
+                CounterTable(selection: $selection)
             } bottom: {
                 if let id = selection, let c = b.counters[id] {
                     CounterDetail(info: c).id(id)
@@ -332,7 +331,6 @@ private struct CounterStatus: View {
 private struct CounterTable: View {
     @State private var b = CounterBrowser.shared
     @Binding var selection: String?
-    @Binding var sort: [KeyPathComparator<CounterRow>]
 
     var body: some View { table(rows) }
 
@@ -347,31 +345,29 @@ private struct CounterTable: View {
                               rate: rate.map { $0 == 0 ? "" : CounterText.rate($0, unit: c.unit) } ?? "",
                               rateSort: abs(rate ?? 0), pinned: b.isPinned(c.id))
         }
-        .sorted(using: sort)
     }
 
     private func table(_ rows: [CounterRow]) -> some View {
-        Table(rows, selection: $selection, sortOrder: $sort) {
-            TableColumn("Counter", value: \.order) { r in
-                HStack(spacing: 4) {
-                    if r.pinned { Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.secondary) }
-                    Text(r.name).truncationHelp(r.name)
-                    if !r.sub.isEmpty { Text(r.sub).foregroundStyle(.secondary).lineLimit(1).truncationHelp(r.sub) }
-                }
-            }
-            .width(min: 180, ideal: 340)
-            TableColumn("Value") { r in Text(r.value).monospacedDigit().truncationHelp(r.value) }
-                .width(min: 90, ideal: 200)
-            TableColumn("Change /s", value: \.rateSort) { r in Text(r.rate).monospacedDigit() }
-                .width(min: 70, ideal: 100)
-        }
-        .contextMenu(forSelectionType: String.self) { ids in
-            if let id = ids.first {
-                Button(b.isPinned(id) ? "Unpin" : "Pin") { b.togglePin(id) }
-                Button("Copy Value") { copy(CounterText.value(b.latest[id], unit: b.counters[id]?.unit ?? "")) }
-                Button("Copy ID") { copy(id) }
-            }
-        }
+        // One row at a time: the detail pane shows the selected counter.
+        let one = Binding<Set<String>>(get: { selection.map { [$0] } ?? [] }, set: { selection = $0.first })
+        return DataTable(rows: rows, columns: [
+            DataColumn(id: "counter", title: "Counter", width: 340, minWidth: 180,
+                       text: { r in r.name + (r.sub.isEmpty ? "" : "  ·  " + r.sub) },
+                       // Pinned counters carry a mark.
+                       dot: { $0.pinned ? .controlAccentColor : nil },
+                       tooltip: { r in r.sub.isEmpty ? nil : r.name + "\n" + r.sub },
+                       // The catalogue's own order.
+                       less: { $0.order < $1.order }),
+            .text("value", "Value", width: 200) { $0.value },
+            DataColumn(id: "rate", title: "Change /s", width: 100, minWidth: 70, numeric: true, text: { $0.rate },
+                       less: { $0.rateSort < $1.rateSort }),
+        ], initialSort: ("counter", true), autosave: "counters", live: true, selection: one, allowsMultipleSelection: false,
+                         menu: { rows in
+                             guard let r = rows.first else { return [] }
+                             return [DataMenuItem(title: b.isPinned(r.id) ? "Unpin" : "Pin") { b.togglePin(r.id) },
+                                     DataMenuItem(title: "Copy ID") { copy(r.id) }]
+                         },
+                         exportName: "Counters")
         .overlay {
             if !b.loading && rows.isEmpty {
                 Text(b.discovering ? "Checking which counters change…" : b.changingOnly ? "No counter here changed during the last check" : "No counters")

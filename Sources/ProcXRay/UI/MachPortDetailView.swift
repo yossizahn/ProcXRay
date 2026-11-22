@@ -60,22 +60,23 @@ struct MachPortDetailView: View {
                 let out = rows.filter(\.toPeer).count, full = rows.filter(\.full).count
                 Text("\(peerName) \(peer): \(out) rights of ours to its ports, \(rows.count - out) of its rights to ours\(full > 0 ? " · \(full) full queue\(full == 1 ? "" : "s")" : "") · lsmp run at \(r.at.formatted(date: .omitted, time: .standard))")
                     .font(.caption).foregroundStyle(.secondary)
-                Table(rows) {
-                    TableColumn("Direction") { r in Text(r.direction).truncationHelp(r.direction) }.width(min: 52, ideal: 56)
-                    TableColumn("Our name") { r in Text(r.ourName).monospaced().lineLimit(1).truncationHelp(r.ourName) }.width(min: 80, ideal: 88)
-                    TableColumn("Its name") { r in Text(r.theirName).monospaced().lineLimit(1).truncationHelp(r.theirName) }.width(min: 80, ideal: 88)
-                    TableColumn("Right") { r in Text(r.right).truncationHelp(r.right) }.width(min: 60, ideal: 66)
-                    TableColumn("Queue") { r in
-                        Text(r.queue).monospacedDigit().foregroundStyle(r.full ? AnyShapeStyle(.orange) : AnyShapeStyle(.primary))
-                            .help("\(r.queue). " + (r.full ? "Full: senders block or time out until the receiver takes a message" : "Messages waiting, of the queue's limit"))
-                    }.width(min: 60, ideal: 66)
-                    TableColumn("Boosts") { r in Text(r.d.boosts > 0 ? "\(r.d.boosts)" : "").monospacedDigit() }.width(min: 44, ideal: 48)
-                    TableColumn("Flags · receiver asked for") { r in
-                        let both = [r.flags, r.notifications].filter { !$0.isEmpty }.joined(separator: " · ")
-                        Text(both).foregroundStyle(.secondary).lineLimit(1)
-                            .help("Port flags (\(r.flags.isEmpty ? "none" : r.flags)), then the notifications the receiving process asked for (\(r.notifications.isEmpty ? "none" : r.notifications)). \"no sender\" is how a server notices its clients going away.")
-                    }.width(min: 100, ideal: 180)
-                }
+                // No column sorted to begin with: the order worked out above.
+                DataTable(rows: rows, columns: [
+                    .text("direction", "Direction", width: 56) { $0.direction },
+                    .text("ourName", "Our name", width: 88, mono: true) { $0.ourName },
+                    .text("theirName", "Its name", width: 88, mono: true) { $0.theirName },
+                    .text("right", "Right", width: 66) { $0.right },
+                    DataColumn(id: "queue", title: "Queue", width: 66, numeric: true, text: { $0.queue },
+                               color: { $0.full ? .systemOrange : nil },
+                               tooltip: { r in "\(r.queue). " + (r.full ? "Full: senders block or time out until the receiver takes a message" : "Messages waiting, of the queue's limit") },
+                               less: { $0.d.queued < $1.d.queued }),
+                    .number("boosts", "Boosts", width: 48, value: { $0.d.boosts > 0 ? $0.d.boosts : nil }, format: { String($0) }),
+                    DataColumn(id: "flags", title: "Flags · receiver asked for", width: 180, minWidth: 100,
+                               help: "Port flags, then the notifications the receiving process asked for. \"no sender\" is how a server notices its clients going away.",
+                               text: { r in [r.flags, r.notifications].filter { !$0.isEmpty }.joined(separator: " · ") },
+                               color: { _ in .secondaryLabelColor },
+                               less: { ($0.flags, $0.notifications) < ($1.flags, $1.notifications) }),
+                ], initialSort: ("", true), exportName: "Mach ports \(pid) and \(peer)")
             }
         }
         .padding(10)

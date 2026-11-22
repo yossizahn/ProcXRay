@@ -47,7 +47,6 @@ struct ThreadsView: View {
     @State private var last: ThreadSnapshot?
     @State private var viaHelper = false
     @State private var failed = false
-    @State private var sort = [KeyPathComparator(\Row.cpuKey, order: .reverse), KeyPathComparator(\Row.timeKey, order: .reverse)]
     @State private var selection = Set<UInt64>()
     @State private var filter = ""
     @AppStorage("threads.busyOnly") private var busyOnly = false
@@ -81,7 +80,8 @@ struct ThreadsView: View {
                     || (r.kind?.text.localizedCaseInsensitiveContains(f) ?? false)
                     || (r.detail?.stack.contains { $0.symbol.localizedCaseInsensitiveContains(f) } ?? false))
         }
-        .sorted(using: sort)
+        // The table sorts by a column; within a tie, the thread with more CPU time comes first.
+        .sorted { $0.timeKey > $1.timeKey }
     }
 
     var body: some View {
@@ -180,7 +180,8 @@ struct ThreadsView: View {
             } else {
                 failed = rows.isEmpty
             }
-            try? await Task.sleep(for: .seconds(max(store.interval, 0.5)))
+            // 0: the list isn't refreshing (another app is in front, and it's set to stop then).
+            try? await Task.sleep(for: .seconds(store.interval > 0 ? max(store.interval, 0.5) : 10))
         }
     }
 
@@ -244,7 +245,7 @@ struct ThreadsView: View {
     private var sourceNote: String {
         if exited { return "Exited: the last read is shown." }
         if rows.isEmpty { return "" }
-        let live = "Every \(store.interval.formatted()) s · " + (viaHelper ? "as root via helper" : "as \(NSUserName())")
+        let live = (store.interval > 0 ? "Every \(store.interval.formatted()) s · " : "Every 10 s · ") + (viaHelper ? "as root via helper" : "as \(NSUserName())")
             + (isKernel ? " · kernel threads have no user-space stacks to sample" : "")
         guard let d = details, d.hasStacks || d.hasQoS else { return live }
         return live + " · stacks at " + d.at.formatted(date: .omitted, time: .standard)
@@ -270,116 +271,60 @@ struct ThreadsView: View {
     }
 
     private var table: some View {
-        Table(shown, selection: $selection, sortOrder: $sort) {
-          // A table builder block takes at most 10 columns.
-          Group {
-            TableColumn("ID", value: \Row.id) { r in Text(String(r.id)).monospacedDigit().foregroundStyle(.secondary) }
-                .width(min: 50, ideal: 72, max: 110)
-            TableColumn("Name", value: \Row.shownName) { r in
-                Text(r.shownName.isEmpty ? "—" : r.shownName)
-                    .foregroundStyle(r.t.name.isEmpty ? .secondary : .primary)
-                    .italic(r.t.name.isEmpty && r.isMain)
-                    .truncationHelp(r.shownName)
-            }
-            .width(min: 90, ideal: 180)
-            TableColumn("Kind", value: \Row.kindKey) { r in
-                Text(r.kind?.text ?? "").foregroundStyle(r.kind == .gcdIdle || r.kind == .gcdNotRun ? .secondary : .primary)
-                    .help(r.kind?.help ?? (details == nil ? "From the stack capture." : "No stack for this thread in the last capture."))
-            }
-            .width(min: 50, ideal: 110, max: 150)
-            TableColumn("CPU %", value: \Row.cpuKey) { r in
-                Text(r.cpu.map(Fmt.pct) ?? "—").monospacedDigit()
-                    .foregroundStyle((r.cpu ?? 0) > 0 ? .primary : .secondary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(min: 60, ideal: 64, max: 90)
-            TableColumn("CPU time", value: \Row.timeKey) { r in
-                Text(Fmt.secs(r.t.cpuNanos)).monospacedDigit().frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(min: 60, ideal: 80, max: 110)
-            TableColumn("User time", value: \Row.userKey) { r in
-                Text(Fmt.secs(r.t.userNanos)).monospacedDigit().foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(min: 50, ideal: 70, max: 110)
-            TableColumn("System time", value: \Row.systemKey) { r in
-                Text(Fmt.secs(r.t.systemNanos)).monospacedDigit().foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(min: 50, ideal: 70, max: 110)
-          }
-          Group {
-            TableColumn("P-core share", value: \Row.perfKey) { r in
-                Text(r.t.perfShare.map { "\(Fmt.pct($0)) %" } ?? "—").monospacedDigit()
-                    .foregroundStyle(r.t.perfShare == nil ? .secondary : .primary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .help(Self.coresHelp(r.t))
-            }
-            .width(min: 50, ideal: 60, max: 90)
-            TableColumn("Instr/cycle", value: \Row.ipcKey) { r in
-                Text(r.t.ipc.map { $0.formatted(.number.precision(.fractionLength(2))) } ?? "—").monospacedDigit()
-                    .foregroundStyle(r.t.ipc == nil ? .secondary : .primary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .help(Self.coresHelp(r.t))
-            }
-            .width(min: 36, ideal: 44, max: 70)
-            TableColumn("Power", value: \Row.powerKey) { r in
-                Text(r.power.map(Self.mW) ?? "—").monospacedDigit()
-                    .foregroundStyle((r.power ?? 0) > 0 ? .primary : .secondary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .help("CPU energy over the last interval, from the kernel's per-thread counters.")
-            }
-            .width(min: 50, ideal: 64, max: 90)
-            TableColumn("Energy", value: \Row.energyKey) { r in
-                Text(r.t.energyNJ.map(Self.joules) ?? "—").monospacedDigit()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .help(Self.coresHelp(r.t))
-            }
-            .width(min: 50, ideal: 64, max: 90)
-            TableColumn("Waiting in", value: \Row.waitKey) { r in
-                let w = Self.waitText(r.detail)
-                Text(w.isEmpty ? "—" : w).foregroundStyle(w.isEmpty ? .secondary : .primary).truncationHelp(w)
-            }
-            .width(min: 100, ideal: 260)
-            TableColumn("Queue", value: \Row.queueKey) { r in
-                Text(r.detail?.queue ?? "").foregroundStyle(.secondary).truncationHelp(r.detail?.queue ?? "")
-            }
-            .width(min: 50, ideal: 140)
-            TableColumn("QoS", value: \Row.qosKey) { r in
-                Text(r.detail?.effectiveQoS ?? (r.detail?.requestedQoS == nil && r.detail?.schedMode != nil ? "unspecified" : ""))
-                    .foregroundStyle(r.detail?.darwinBG == true ? .orange : .primary)
-                    .help(Self.qosHelp(r.detail))
-            }
-            .width(min: 60, ideal: 96, max: 130)
-            TableColumn("State", value: \Row.stateKey) { r in
-                Text(r.t.stateText).foregroundStyle(Self.stateColor(r.t.runState))
-            }
-            .width(min: 50, ideal: 64, max: 110)
-          }
-          Group {
-            TableColumn("Priority", value: \Row.priorityKey) { r in
-                Text("\(r.t.curPriority)").monospacedDigit()
-                    .help("Current priority. Higher runs first; 31 is the default, 46–47 is user-interactive work.")
-            }
-            .width(min: 44, ideal: 56, max: 90)
-            TableColumn("Base priority", value: \Row.basePriorityKey) { r in
-                Text("\(r.t.basePriority)").monospacedDigit().foregroundStyle(r.t.basePriority == r.t.curPriority ? .secondary : .primary)
-            }
-            .width(min: 44, ideal: 56, max: 90)
-            TableColumn("Max priority", value: \Row.maxPriorityKey) { r in
-                Text("\(r.t.maxPriority)").monospacedDigit().foregroundStyle(.secondary)
-            }
-            .width(min: 44, ideal: 56, max: 90)
-            TableColumn("Policy", value: \Row.policyKey) { r in
-                Text(r.t.policyText).foregroundStyle(r.t.policy == 1 ? .secondary : .primary)
-                    .help(r.t.policy == 1 ? "Timesharing: the usual policy." : "Fixed-priority policy, as real-time threads (audio, for example) use.")
-            }
-            .width(min: 60, ideal: 76, max: 110)
-          }
+        DataTable(rows: shown, columns: columns, initialSort: ("cpu", false), autosave: "threads", live: true,
+                  selection: $selection, exportName: "\(proc.name) threads")
+    }
+
+    private var columns: [DataColumn<Row>] {
+        let secondary: (Row) -> NSColor? = { _ in .secondaryLabelColor }
+        let noDetail = details == nil ? "From the stack capture." : "No stack for this thread in the last capture."
+        func number<N: Comparable>(_ id: String, _ title: String, _ width: CGFloat, help: String? = nil,
+                                   color: ((Row) -> NSColor?)? = nil, tooltip: ((Row) -> String?)? = nil,
+                                   _ value: @escaping (Row) -> N?, _ format: @escaping (N) -> String) -> DataColumn<Row> {
+            var c = DataColumn<Row>.number(id, title, width: width, help: help, color: color, value: value, format: format)
+            // A dash rather than a blank where a counter couldn't be read.
+            c.text = { value($0).map(format) ?? "—" }
+            c.tooltip = tooltip
+            return c
         }
-        .font(.system(size: 11))
-        .contextMenu(forSelectionType: UInt64.self) { ids in
-            Button("Copy") { copy(ids) }
+        func text(_ id: String, _ title: String, _ width: CGFloat, color: ((Row) -> NSColor?)? = nil,
+                  tooltip: ((Row) -> String?)? = nil, _ value: @escaping (Row) -> String) -> DataColumn<Row> {
+            var c = DataColumn<Row>.text(id, title, width: width, color: color, value)
+            c.tooltip = tooltip
+            return c
         }
-        .onCopyCommand { [ids = selection] in [NSItemProvider(object: text(for: ids) as NSString)] }
+        var kind = text("kind", "Kind", 110, color: { $0.kind == .gcdIdle || $0.kind == .gcdNotRun ? .secondaryLabelColor : nil },
+                        tooltip: { $0.kind?.help ?? noDetail }) { $0.kind?.text ?? "" }
+        kind.less = { $0.kindKey < $1.kindKey }
+        var qos = text("qos", "QoS", 96, color: { $0.detail?.darwinBG == true ? .systemOrange : nil }, tooltip: { Self.qosHelp($0.detail) }) { r in
+            r.detail?.effectiveQoS ?? (r.detail?.requestedQoS == nil && r.detail?.schedMode != nil ? "unspecified" : "")
+        }
+        qos.less = { $0.qosKey < $1.qosKey }
+        return [
+            number("id", "ID", 72, color: secondary, { $0.id }, { String($0) }),
+            text("name", "Name", 180, color: { $0.t.name.isEmpty ? .secondaryLabelColor : nil }) { $0.shownName.isEmpty ? "—" : $0.shownName },
+            kind,
+            number("cpu", "CPU %", 64, color: { ($0.cpu ?? 0) > 0 ? nil : .secondaryLabelColor }, { $0.cpu }, Fmt.pct),
+            number("cpuTime", "CPU time", 80, { $0.t.cpuNanos }, { Fmt.secs($0) }),
+            number("userTime", "User time", 70, color: secondary, { $0.t.userNanos }, { Fmt.secs($0) }),
+            number("systemTime", "System time", 70, color: secondary, { $0.t.systemNanos }, { Fmt.secs($0) }),
+            number("pCore", "P-core share", 60, tooltip: { Self.coresHelp($0.t) }, { $0.t.perfShare }, { "\(Fmt.pct($0)) %" }),
+            number("ipc", "Instr/cycle", 44, tooltip: { Self.coresHelp($0.t) }, { $0.t.ipc }, { $0.formatted(.number.precision(.fractionLength(2))) }),
+            number("power", "Power", 64, help: "CPU energy over the last interval, from the kernel's per-thread counters.",
+                   color: { ($0.power ?? 0) > 0 ? nil : .secondaryLabelColor }, { $0.power }, Self.mW),
+            number("energy", "Energy", 64, tooltip: { Self.coresHelp($0.t) }, { $0.t.energyNJ }, Self.joules),
+            text("wait", "Waiting in", 260) { Self.waitText($0.detail) },
+            text("queue", "Queue", 140, color: secondary) { $0.detail?.queue ?? "" },
+            qos,
+            text("state", "State", 64, color: { NSColor(Self.stateColor($0.t.runState)) }) { $0.t.stateText },
+            number("priority", "Priority", 56, help: "Current priority. Higher runs first; 31 is the default, 46–47 is user-interactive work.",
+                   { $0.t.curPriority }, { String($0) }),
+            number("basePriority", "Base priority", 56, color: { $0.t.basePriority == $0.t.curPriority ? .secondaryLabelColor : nil },
+                   { $0.t.basePriority }, { String($0) }),
+            number("maxPriority", "Max priority", 56, color: secondary, { $0.t.maxPriority }, { String($0) }),
+            text("policy", "Policy", 76, color: { $0.t.policy == 1 ? .secondaryLabelColor : nil },
+                 tooltip: { $0.t.policy == 1 ? "Timesharing: the usual policy." : "Fixed-priority policy, as real-time threads (audio, for example) use." }) { $0.t.policyText },
+        ]
     }
 
     /// "mach_msg2_trap ← __CFRunLoopServiceMachPort": the innermost frame, and the innermost one outside the
@@ -466,19 +411,5 @@ struct ThreadsView: View {
         case 3: .secondary
         default: .orange   // stopped, uninterruptible, halted
         }
-    }
-
-    private func text(for ids: Set<UInt64>) -> String {
-        shown.filter { ids.contains($0.id) }.map { r in
-            [String(r.id), r.shownName, r.kind?.text ?? "", r.cpu.map(Fmt.pct) ?? "—", Fmt.secs(r.t.cpuNanos),
-             r.t.perfShare.map(Fmt.pct) ?? "—", r.t.ipc.map { String(format: "%.2f", $0) } ?? "—",
-             r.power.map(Self.mW) ?? "—", r.t.energyNJ.map(Self.joules) ?? "—", Self.waitText(r.detail),
-             r.detail?.queue ?? "", r.detail?.effectiveQoS ?? "", r.t.stateText, "\(r.t.curPriority)", r.t.policyText].joined(separator: "\t")
-        }.joined(separator: "\n")
-    }
-
-    private func copy(_ ids: Set<UInt64>) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text(for: ids), forType: .string)
     }
 }
