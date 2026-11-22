@@ -312,6 +312,21 @@ struct ProcXRayApp: App {
                                       list: !CommandLine.arguments.contains("--no-list")) ?? "no task port for \(pid)")
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--parse-heap") {
+            // heap output (a file, or - for stdin) through HeapParser: what the Memory tab's Heap Objects view gets.
+            guard i + 1 < CommandLine.arguments.count else { print("usage: --parse-heap <file|->"); exit(2) }
+            let a = CommandLine.arguments[i + 1]
+            let data = a == "-" ? FileHandle.standardInput.readDataToEndOfFile() : (FileManager.default.contents(atPath: a) ?? Data())
+            let t0 = Date()
+            let r = HeapParser.parse(String(decoding: data, as: UTF8.self))
+            let ms = -t0.timeIntervalSinceNow * 1000
+            print(String(format: "parsed in %.0f ms: %d types, %d sizes, %d zones", ms, r.classes.count, r.sizes.count, r.zoneCount ?? -1))
+            print("total: \(r.totalNodes ?? -1) nodes, \(r.totalBytes ?? 0) bytes; rows sum \(r.classes.reduce(0) { $0 + $1.count }) nodes, \(r.classes.reduce(UInt64(0)) { $0 + $1.bytes }) bytes")
+            print("sizes sum: \(r.sizes.reduce(0) { $0 + $1.count }) nodes; found: \(r.found)")
+            print("types: \(Dictionary(grouping: r.classes, by: \.type).mapValues(\.count))")
+            for c in r.classes.sorted(by: { $0.bytes > $1.bytes }).prefix(8) { print(c) }
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--parse-vmmap") {
             // vmmap output (a file, or - for stdin) through VmmapParser: what the Memory tab gets from it.
             guard i + 1 < CommandLine.arguments.count else { print("usage: --parse-vmmap <file|->"); exit(2) }
