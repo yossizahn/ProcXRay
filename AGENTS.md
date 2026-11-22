@@ -52,6 +52,8 @@ Rules the measurements led to:
 - The menu bar monitor reads the processes on every Nth reading while nothing shows them (`Tuning.menuBarProcesses`), and the per-process network reader runs at the pace of whoever shows its figures (`NetPace`), not on a fixed 2 s.
 - A SwiftUI form re-evaluates every control when anything its body reads changes: a value that updates on a timer (the Performance tab's cost readout) goes in a view of its own.
 - Measuring in the Atlas login: its user isn't an admin, so the helper gives it figures for its own processes only, and the helper share measured there is not what an admin user sees (use the VM for that). `PROCXRAY_ASSUME_VISIBLE` keeps the list refreshing but doesn't make the app count as in front. Save panels take no input there, and the menu bar popover closes as soon as it opens under automated clicks.
+- `for x in` over an array or dictionary of large structs (`ProcInfo`, `AmbientProc`, `AmbientGroup`) copies each element, retaining every string in it: to read a field or two of each, go by index. That copying was half of the menu bar monitor's time.
+- No `beginUpdates`/`endUpdates` on a table when nothing structural changed: AppKit rebuilds the header's views for an empty transaction.
 - Whole-app numbers move by a point or more with machine load. To compare two builds, measure them in turns (old, new, old, new) or use `ProcXRay --bench` (release build), which gives CPU time per stage: `tick: snapshot…` and `nodes(…)` lines.
 
 ## Shared UI components
