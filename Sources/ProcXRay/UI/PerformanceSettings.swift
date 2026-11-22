@@ -73,7 +73,6 @@ struct PerformanceSettings: View {
     @AppStorage(Tuning.pidDomains) private var pidDomains = true
     @AppStorage(Tuning.historyMinutes) private var historyMinutes = 4.0
     @AppStorage(Tuning.idleEvery) private var idleEvery = 2.0
-    @State private var meter = SelfMeter.shared
 
     /// Recomputed with the body: any of the values above changing redraws it.
     private var preset: Tuning.Preset { Tuning.preset }
@@ -86,8 +85,7 @@ struct PerformanceSettings: View {
                 }
                 .pickerStyle(.segmented)
                 Hint(preset.summary)
-                LabeledContent("Proc X-Ray now") { Text(now).monospacedDigit() }
-                    .help("This process, as it runs with this window open: CPU over the last two seconds, memory footprint, and how often it wakes a sleeping CPU. The helper and the tools it starts are not counted.")
+                SelfMeterRow()
             }
             SwiftUI.Section("Refresh") {
                 Picker("Process window", selection: $windowInterval) {
@@ -132,8 +130,6 @@ struct PerformanceSettings: View {
         .onChange(of: savePower) { _, _ in Tuning.changed() }
         .onChange(of: signatures) { _, _ in Tuning.changed() }
         .onChange(of: pidDomains) { _, _ in Tuning.changed() }
-        .onAppear { meter.addViewer() }
-        .onDisappear { meter.removeViewer() }
     }
 
     /// Five lanes of 4-byte readings per process.
@@ -141,8 +137,21 @@ struct PerformanceSettings: View {
         let perProcess = Tuning.historyLength * 5 * 4
         return perProcess == 0 ? "no memory" : Fmt.bytes(UInt64(perProcess * 1000)) + " per 1,000 processes"
     }
+}
 
-    /// "1.2 % CPU · 132 MB · 4 wake-ups/s"
+/// "Proc X-Ray now  1.2 % CPU · 132 MB · 4 wake-ups/s". Its own view, so a new reading redraws this row only: read in
+/// the form's body, the meter made SwiftUI rebuild every picker of the form every two seconds, which cost more than
+/// the figure it was showing.
+private struct SelfMeterRow: View {
+    @State private var meter = SelfMeter.shared
+
+    var body: some View {
+        LabeledContent("Proc X-Ray now") { Text(now).monospacedDigit() }
+            .help("This process, as it runs with this window open: CPU over the last two seconds, memory footprint, and how often it wakes a sleeping CPU. The helper and the tools it starts are not counted.")
+            .onAppear { meter.addViewer() }
+            .onDisappear { meter.removeViewer() }
+    }
+
     private var now: String {
         [meter.cpu.map { String(format: "%.1f %% CPU", $0) } ?? "… CPU", Fmt.bytes(meter.footprint),
          meter.wakeups.map { String(format: "%.0f wake-ups/s", $0) } ?? "… wake-ups/s"].joined(separator: " · ")
