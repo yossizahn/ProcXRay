@@ -631,8 +631,9 @@ final class AmbientMonitor {
         for m in AmbientMetric.allCases {
             // One pass, keeping the best few in order.
             var best: [(Double, Int)] = []
-            for (i, p) in procs.enumerated() {
-                guard let v = m.value(p), v > 0, best.count < topCount || v > best[best.count - 1].0 else { continue }
+            // By index, not `for p in procs`: that copies each process (see AmbientGroups.top).
+            for i in procs.indices {
+                guard let v = m.value(procs[i]), v > 0, best.count < topCount || v > best[best.count - 1].0 else { continue }
                 best.insert((v, i), at: best.firstIndex { $0.0 < v } ?? best.count)
                 if best.count > topCount { best.removeLast() }
             }

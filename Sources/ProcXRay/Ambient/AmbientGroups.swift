@@ -217,8 +217,10 @@ enum AmbientGroups {
     /// The best `count` groups by a metric, in one pass.
     static func top(_ groups: [AmbientGroup], _ m: AmbientMetric, count: Int) -> [AmbientGroup] {
         var best: [(Double, Int)] = []
-        for (i, g) in groups.enumerated() {
-            guard let v = g.sums.value(m), v > 0, best.count < count || v > best[best.count - 1].0 else { continue }
+        // By index: `for g in groups` copied every group (its leader's strings, its member arrays) to look at one
+        // number of it, five times a reading, which was half of the monitor's CPU time.
+        for i in groups.indices {
+            guard let v = groups[i].sums.value(m), v > 0, best.count < count || v > best[best.count - 1].0 else { continue }
             best.insert((v, i), at: best.firstIndex { $0.0 < v } ?? best.count)
             if best.count > count { best.removeLast() }
         }
