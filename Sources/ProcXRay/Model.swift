@@ -728,7 +728,7 @@ final class Store {
             let perfS = PerfStages.begin()
             var marked = Self.snapshot(prev: prev, signCache: cache, argvCache: argv, jobParents: jobParents, domainHosts: hosts, extras: extras, priv: { priv?.wait() },
                                        ls: ls, jobs: jobs, otherJobs: other, recheck: recheck, reuse: reuse, skip: skip)
-            Self.markLeftBehind(&marked.procs, lsApps: marked.ls)
+            let leftBehind = Self.markLeftBehind(&marked.procs, lsApps: marked.ls)
             PerfStages.end(.snapshot, perfS)
             let snap = marked
             // The table's tree for the new data, built here so the main thread only swaps it in.
@@ -768,7 +768,7 @@ final class Store {
                 self.prevSamples = snap.samples
                 self.recordHistory(snap.procs)
                 if full { self.fullRefreshGen &+= 1 }
-                self.updateGhostCount()
+                if leftBehind != self.ghostCount { self.ghostCount = leftBehind }
                 self.lastRefresh = Date()
                 self.refreshMillis = ms
                 self.refreshing = false
@@ -1279,8 +1279,11 @@ final class Store {
     /// Tags every survivor of a Left Behind group with its dead app, so the LEFT badge, the Responsible
     /// column and the Responsible tree agree with the Left Behind filter. On macOS 27 a leftover reports
     /// itself as its own responsible process, so "responsible pid is dead" alone no longer finds it.
-    nonisolated static func markLeftBehind(_ procs: inout [pid_t: ProcInfo], lsApps: [LSApp]) {
-        for g in ghosts(procs: procs, lsApps: lsApps) {
+    /// Returns how many Left Behind groups there are, for the sidebar's badge.
+    @discardableResult
+    nonisolated static func markLeftBehind(_ procs: inout [pid_t: ProcInfo], lsApps: [LSApp]) -> Int {
+        let found = ghosts(procs: procs, lsApps: lsApps)
+        for g in found {
             for s in g.survivors {
                 procs[s.pid]?.leftBehindGroup = g.id
                 procs[s.pid]?.leftBehindApp = g.name
@@ -1288,15 +1291,13 @@ final class Store {
                 procs[s.pid]?.leftBehindTags = g.lsApp?.stateTags ?? []
             }
         }
+        return found.count
     }
 
     /// For the sidebar badge: a stored value that is only written when it changes, so the sidebar
     /// doesn't re-render on every refresh.
     private(set) var ghostCount = 0
-    private func updateGhostCount() {
-        let n = ghosts.count
-        if n != ghostCount { ghostCount = n }
-    }
+
 
     /// Four signals: (1) responsible pid points at a dead process; (2) LaunchServices marks an app
     /// `exited-with-subordinates` — survivors share its coalition, or (2b) run a launchd job the app loaded
