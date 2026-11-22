@@ -96,6 +96,7 @@ private struct MenuBarSettings: View {
     @AppStorage(AmbientPrefs.widgetGraphs) private var graphs = true
     @AppStorage(AmbientPrefs.widgetColors) private var colors = true
     @State private var monitor = AmbientMonitor.shared
+    @Environment(\.colorScheme) private var scheme
 
     private func binding(_ m: AmbientMetric) -> Binding<Bool> {
         Binding(get: { widgets.split(separator: ",").contains(Substring(m.rawValue)) }, set: { on in
@@ -120,8 +121,10 @@ private struct MenuBarSettings: View {
                     if list.isEmpty {
                         Image(systemName: "waveform.path.ecg")
                     } else {
-                        MenuBarWidgets(metrics: list, alert: monitor.attentionCount > 0, graphs: graphs, system: monitor.system,
-                                       history: monitor.systemHistory, io: monitor.ioHistory, ink: .primary, colored: colors && graphs)
+                        // The item's own picture; as a template it takes the text color here as it does in the menu bar.
+                        Image(nsImage: MenuBarImage.render(metrics: list, alert: monitor.attentionCount > 0, graphs: graphs, system: monitor.system,
+                                                           history: monitor.systemHistory, io: monitor.ioHistory,
+                                                           ink: colors && graphs && scheme == .dark ? .white : .black, colored: colors && graphs).image)
                     }
                     Spacer()
                 }

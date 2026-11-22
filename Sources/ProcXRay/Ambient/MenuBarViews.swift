@@ -103,8 +103,8 @@ extension SystemStats.Rates {
     var thermalText: String? { thermal.map { "Thermal pressure: " + SystemStats.thermalLevelName($0) } }
 }
 
-/// What the menu bar shows: the chosen widgets, drawn into one template image so the system tints it for
-/// the menu bar's appearance; a warning sign first while any alert is live.
+/// What the menu bar shows: the chosen widgets, drawn into one image (MenuBarImage), a template so the system
+/// tints it for the menu bar's appearance; a warning sign first while any alert is live.
 struct MenuBarLabel: View {
     @State private var monitor = AmbientMonitor.shared
     @State private var appearance = MenuBarAppearance.shared
@@ -130,33 +130,10 @@ struct MenuBarLabel: View {
         // drawn in the menu bar's own color: white on a dark menu bar, black on a light one.
         let colored = colors && graphs
         if colored { appearance.attachSoon() }
-        let ink: Color = colored && appearance.dark ? .white : .black
-        func widgets(_ ms: [AmbientMetric], alert: Bool) -> MenuBarWidgets {
-            MenuBarWidgets(metrics: ms, alert: alert, graphs: graphs, system: monitor.system, history: monitor.systemHistory,
-                           io: monitor.ioHistory, ink: ink, colored: colored)
-        }
-        let r = ImageRenderer(content: widgets(list, alert: alert))
-        r.scale = NSScreen.main?.backingScaleFactor ?? 2
-        let img = r.nsImage ?? NSImage()
-        img.isTemplate = !colored
-        MenuBarHit.shared.layout({ Self.ranges(list, alert: alert, widgets: widgets) }, imageWidth: img.size.width)
-        return img
-    }
-
-    /// Each widget's x range in the label, for telling which one a click hit: each widget rendered on its own
-    /// (the alert sign too), laid end to end with the HStack's spacing.
-    @MainActor
-    private static func ranges(_ list: [AmbientMetric], alert: Bool,
-                               widgets: ([AmbientMetric], Bool) -> MenuBarWidgets) -> [(AmbientMetric, ClosedRange<CGFloat>)] {
-        func width(_ v: MenuBarWidgets) -> CGFloat { ImageRenderer(content: v).nsImage?.size.width ?? 0 }
-        var x: CGFloat = alert ? width(widgets([], true)) + MenuBarWidgets.spacing : 0
-        var out: [(AmbientMetric, ClosedRange<CGFloat>)] = []
-        for m in list {
-            let w = width(widgets([m], false))
-            out.append((m, x...(x + w)))
-            x += w + MenuBarWidgets.spacing
-        }
-        return out
+        let r = MenuBarImage.render(metrics: list, alert: alert, graphs: graphs, system: monitor.system, history: monitor.systemHistory,
+                                    io: monitor.ioHistory, ink: colored && appearance.dark ? .white : .black, colored: colored)
+        MenuBarHit.shared.layout({ r.ranges }, imageWidth: r.image.size.width)
+        return r.image
     }
 }
 
@@ -191,162 +168,6 @@ final class MenuBarAppearance {
     private func update(_ a: NSAppearance) {
         let d = a.bestMatch(from: [.aqua, .darkAqua, .vibrantDark, .vibrantLight]).map { $0 == .darkAqua || $0 == .vibrantDark } ?? false
         if d != dark { dark = d }
-    }
-}
-
-/// The widgets as one view (rendered to an image by MenuBarLabel). Black on clear when the image is a template;
-/// with colored graphs, text in the menu bar's color and each graph in its metric's color.
-struct MenuBarWidgets: View {
-    let metrics: [AmbientMetric]
-    let alert: Bool
-    let graphs: Bool
-    let system: SystemStats.Rates
-    let history: [AmbientMetric: [Double]]
-    var io: [IOSeries: [Double]] = [:]
-    /// Black for the menu bar's template image; the Settings preview draws in the label color.
-    var ink: Color = .black
-    var colored = false
-
-    /// Fixed colors (not dynamic system colors: the image is rendered outside any appearance). Memory follows
-    /// the kernel's pressure level.
-    private func graphColor(_ m: AmbientMetric) -> Color {
-        guard colored else { return ink }
-        switch m {
-        case .cpu: return Color(red: 0.20, green: 0.78, blue: 0.35)
-        case .gpu: return Color(red: 0.69, green: 0.32, blue: 0.87)
-        case .memory:
-            let p = system.memory?.pressure ?? 1
-            return p >= 4 ? Color(red: 1, green: 0.27, blue: 0.23) : p >= 2 ? Color(red: 1, green: 0.62, blue: 0.04) : Color(red: 0.04, green: 0.52, blue: 1)
-        case .disk, .network: return ink
-        }
-    }
-
-    /// Incoming (disk read, network received) up from the middle in blue, outgoing (written, sent) down in red,
-    /// as Activity Monitor colors them.
-    private func ioColors() -> (Color, Color) {
-        colored ? (Color(red: 0.04, green: 0.52, blue: 1), Color(red: 1, green: 0.27, blue: 0.23)) : (ink, ink)
-    }
-
-    /// Between widgets (and after the alert sign); MenuBarLabel.ranges lays them out with it too.
-    static let spacing: CGFloat = 6
-
-    var body: some View {
-        HStack(spacing: Self.spacing) {
-            if alert {
-                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(colored ? Color(red: 1, green: 0.62, blue: 0.04) : ink)
-            }
-            ForEach(metrics) { m in widget(m) }
-        }
-        .foregroundStyle(ink)
-        .frame(height: 18)
-        .fixedSize()
-    }
-
-    @ViewBuilder
-    private func widget(_ m: AmbientMetric) -> some View {
-        HStack(spacing: 3) {
-            if graphs {
-                Group {
-                    if m == .disk || m == .network {
-                        let (up, down) = ioColors()
-                        LabelMirrorGraph(up: io[m == .disk ? .diskRead : .netIn] ?? [], down: io[m == .disk ? .diskWrite : .netOut] ?? [],
-                                    upColor: up, downColor: down)
-                    } else {
-                        LabelGraph(values: history[m] ?? [], maxValue: 100, color: graphColor(m))
-                    }
-                }
-                .frame(width: 22, height: 14)
-                // White behind colored graphs (a template image can't have one: it would draw as a solid block).
-                .background(colored ? Color.white : .clear, in: RoundedRectangle(cornerRadius: 1.5))
-                .overlay(RoundedRectangle(cornerRadius: 1.5).stroke(ink.opacity(0.5), lineWidth: 0.75))
-            }
-            switch m {
-            case .disk, .network:
-                let (a, b): (Double?, Double?) = m == .disk ? (system.diskRead, system.diskWrite) : (system.netIn, system.netOut)
-                VStack(alignment: .trailing, spacing: -2) {
-                    Text(verbatim: (m == .disk ? "R " : "↓ ") + (a.map(Compact.bytes) ?? "–"))
-                    Text(verbatim: (m == .disk ? "W " : "↑ ") + (b.map(Compact.bytes) ?? "–"))
-                }
-                .font(.system(size: 8.5, weight: .semibold).monospacedDigit())
-                .frame(minWidth: 34, alignment: .trailing)
-            default:
-                VStack(alignment: .leading, spacing: -2) {
-                    Text(verbatim: m.short).font(.system(size: 7, weight: .bold))
-                    Text(verbatim: Compact.percent(value(m))).font(.system(size: 10, weight: .semibold).monospacedDigit())
-                }
-                .frame(minWidth: 26, alignment: .leading)
-            }
-        }
-    }
-
-    private func value(_ m: AmbientMetric) -> Double? {
-        switch m {
-        case .cpu: system.cpuPercent
-        case .gpu: system.gpuPercent
-        case .memory: system.memory.map { $0.usedFraction * 100 }
-        case .disk, .network: nil
-        }
-    }
-}
-
-/// The menu bar label's graphs. The label is an image rendered from SwiftUI (ImageRenderer), which can't draw an
-/// AppKit view, so these two draw in a Canvas; every graph that is on screen as a view is a SeriesGraph.
-private struct LabelGraph: View {
-    let values: [Double]
-    var maxValue: Double?
-    var color: Color
-    var capacity = AmbientMonitor.historyLength
-
-    var body: some View {
-        Canvas { ctx, size in
-            guard values.count > 1 else { return }
-            let top = max(maxValue ?? (values.max() ?? 1), 1e-9)
-            let step = size.width / CGFloat(max(capacity - 1, 1))
-            let start = size.width - CGFloat(values.count - 1) * step
-            var line = Path()
-            for (i, v) in values.enumerated() {
-                let p = CGPoint(x: start + CGFloat(i) * step, y: size.height - CGFloat(min(v / top, 1)) * size.height)
-                if i == 0 { line.move(to: p) } else { line.addLine(to: p) }
-            }
-            var area = line
-            area.addLine(to: CGPoint(x: size.width, y: size.height))
-            area.addLine(to: CGPoint(x: start, y: size.height))
-            area.closeSubpath()
-            ctx.fill(area, with: .color(color.opacity(0.55)))
-            ctx.stroke(line, with: .color(color), lineWidth: 1)
-        }
-    }
-}
-
-/// Two series around a middle line, both scaled to the larger one's peak (see LabelGraph).
-private struct LabelMirrorGraph: View {
-    let up: [Double]
-    let down: [Double]
-    var upColor: Color
-    var downColor: Color
-    var capacity = AmbientMonitor.historyLength
-
-    var body: some View {
-        Canvas { ctx, size in
-            let peak = max(up.max() ?? 0, down.max() ?? 0, 1)
-            let mid = size.height / 2
-            let step = size.width / CGFloat(max(capacity - 1, 1))
-            func draw(_ values: [Double], _ color: Color, _ sign: CGFloat) {
-                guard values.count > 1 else { return }
-                let start = size.width - CGFloat(values.count - 1) * step
-                var area = Path()
-                area.move(to: CGPoint(x: start, y: mid))
-                for (i, v) in values.enumerated() {
-                    area.addLine(to: CGPoint(x: start + CGFloat(i) * step, y: mid - sign * CGFloat(min(v / peak, 1)) * mid))
-                }
-                area.addLine(to: CGPoint(x: size.width, y: mid))
-                area.closeSubpath()
-                ctx.fill(area, with: .color(color.opacity(0.85)))
-            }
-            draw(up, upColor, 1)
-            draw(down, downColor, -1)
-        }
     }
 }
 
