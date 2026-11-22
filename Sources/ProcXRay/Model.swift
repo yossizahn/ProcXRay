@@ -11,8 +11,18 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var pgid: pid_t
     var uid: uid_t
     var user: String
-    var comm: String { didSet { name = ProcInfo.displayName(path: path, comm: comm) } }
-    var path: String? { didSet { name = ProcInfo.displayName(path: path, comm: comm) } }
+    var comm: String {
+        didSet {
+            name = ProcInfo.displayName(path: path, comm: comm)
+            if cdhash == nil, path == nil { codeKey = "\(key):\(comm)" }
+        }
+    }
+    var path: String? {
+        didSet {
+            name = ProcInfo.displayName(path: path, comm: comm)
+            if cdhash == nil { codeKey = "\(key):\(path ?? comm)" }
+        }
+    }
     let start: Date
     var stat: Int8
     var pflags: Int32
@@ -28,6 +38,7 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
         self.path = path; self.start = start; self.stat = stat; self.pflags = pflags
         key = "\(pid):\(start.timeIntervalSince1970)"
         name = ProcInfo.displayName(path: path, comm: comm)
+        codeKey = "\(key):\(path ?? comm)"
     }
 
     var responsible: pid_t?
@@ -120,10 +131,14 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     }
 
     /// CDHash of the running code (see Native.cdhash); changes when the process execs something else.
-    var cdhash: String?
+    var cdhash: String? {
+        didSet { if cdhash != oldValue { codeKey = "\(key):\(cdhash ?? path ?? comm)" } }
+    }
     /// Key for signing details: pid and start time survive exec, so the running code is part of it.
     /// Without it a process could show an Apple signature while running unsigned code it exec'd.
-    var codeKey: String { "\(key):\(cdhash ?? path ?? comm)" }
+    /// Stored, like `key`: it is looked up for every process several times per refresh, on the main thread too,
+    /// and building the string each time was a measurable part of both. Kept in step by the three it's made of.
+    private(set) var codeKey: String
 
     /// The executable's file name, or, when that file is named for a version, the folder it's installed in:
     /// Claude Code runs as ~/.local/share/claude/versions/2.1.325 (the kernel's name for it is "2.1.325" too),
@@ -644,6 +659,20 @@ final class Store {
         let readJobs = full || readLS || jobs.isEmpty || (jobsDirty && now.timeIntervalSince(jobsReadAt) >= spacing)
         if readLS { lsDirty = false; lsReadAt = now }
         if readJobs { jobsDirty = false; jobsReadAt = now }
+        let recheck = full || ticksSinceRecheck + 1 >= Self.recheckEvery
+        ticksSinceRecheck = recheck ? 0 : ticksSinceRecheck + 1
+        // The processes this refresh doesn't read: those that used no CPU at their last reading (or couldn't be
+        // read at all), each in its turn so that every one is read every idleReadEvery refreshes.
+        refreshTick &+= 1
+        let every = Tuning.idleReadEvery
+        var skip: Set<pid_t> = []
+        if !full, every > 1, !prev.isEmpty {
+            let tick = refreshTick
+            for p in procs.values where p.pid > 0 && (Int(p.pid) &+ tick) % every != 0 {
+                if p.cpuNanos == nil || (p.rates != nil && (p.cpuPercent ?? 0) < 0.05) { skip.insert(p.pid) }
+            }
+        }
+        let reuse = skip.isEmpty ? [:] : procs
         let oldLS = lsApps, oldJobs = jobs, oldOther = otherJobs
         let btmOwners = btmOwners
         let spec = treeSpec
@@ -652,7 +681,8 @@ final class Store {
         // A timer refresh asks the helper only for what the app couldn't read last time and what started since
         // (a second's margin for the time the last snapshot took); a full one asks for everything.
         let ask: HelperAsk? = full || prev.isEmpty ? nil
-            : HelperAsk(pids: prev.values.lazy.filter(\.needsHelper).map(\.pid), since: lastRefresh.timeIntervalSince1970 - 1 - Double(refreshMillis) / 1000)
+            : HelperAsk(pids: prev.values.lazy.filter { $0.needsHelper && !skip.contains($0.pid) }.map(\.pid),
+                        since: lastRefresh.timeIntervalSince1970 - 1 - Double(refreshMillis) / 1000)
         Task.detached(priority: .userInitiated) {
             let t0 = DispatchTime.now().uptimeNanoseconds
             // Ask the helper first, but collect local data while it answers; the snapshot waits for the
@@ -666,7 +696,7 @@ final class Store {
             PerfStages.end(.registries, perfR)
             let perfS = PerfStages.begin()
             var marked = Self.snapshot(prev: prev, signCache: cache, argvCache: argv, jobParents: jobParents, domainHosts: hosts, extras: extras, priv: { priv?.wait() },
-                                       ls: ls, jobs: jobs, otherJobs: other)
+                                       ls: ls, jobs: jobs, otherJobs: other, recheck: recheck, reuse: reuse, skip: skip)
             Self.markLeftBehind(&marked.procs, lsApps: marked.ls)
             PerfStages.end(.snapshot, perfS)
             let snap = marked
@@ -1045,6 +1075,13 @@ final class Store {
     /// `ls` / `jobs`: reuse these instead of re-reading LaunchServices / launchd (nil = read them now).
     /// Longest a refresh waits for the helper's metrics; under the 2 s refresh interval.
     nonisolated static let helperBudget = 1.5
+    /// What a refresh found unset or unreadable for a process (not sandboxed, no responsible process, no login
+    /// session, no coalition) is asked for again every recheckEvery refreshes and by a full refresh, not every
+    /// time; the sandbox also while the process is younger than sandboxSettle.
+    nonisolated static let sandboxSettle: TimeInterval = 30
+    private static let recheckEvery = 30
+    @ObservationIgnored private var ticksSinceRecheck = 0
+    @ObservationIgnored private var refreshTick = 0
 
     /// `priv`: helper metrics, asked for only after the local pass so a slow helper delays just the merge.
     nonisolated static func snapshot(prev: [String: Sample], signCache: [String: SignInfo],
@@ -1054,7 +1091,8 @@ final class Store {
                                      extras: ExtraReads = [],
                                      priv privSource: () -> [Int32: PrivMetrics]? = { nil },
                                      ls: [LSApp]? = nil, jobs: [LaunchdJob]? = nil,
-                                     otherJobs: [LaunchdJob]? = nil) -> Snapshot {
+                                     otherJobs: [LaunchdJob]? = nil, recheck: Bool = true,
+                                     reuse: [pid_t: ProcInfo] = [:], skip: Set<pid_t> = []) -> Snapshot {
         let ls = ls ?? LSAppInfo.list()
         let jobs = jobs ?? Launchd.list()
         let otherJobs = otherJobs ?? Launchd.otherDomains()
@@ -1087,7 +1125,23 @@ final class Store {
         }
         built.reserveCapacity(list.count)
         samples.reserveCapacity(list.count)
+        // Indices of `built` taken over from the last refresh as they were (`skip`).
+        var reused: Set<Int> = []
         for k in list where k.pid >= 0 {
+            // A process that used no CPU at its last reading isn't read on this refresh (Tuning.idleReadEvery):
+            // it keeps the last refresh's figures and its sample, so its next reading's rates cover the whole
+            // stretch. Only what other processes decide is worked out again: who is left behind, hung, hosted.
+            if skip.contains(k.pid), var p = reuse[k.pid], p.start == k.start, let s = prev[p.key] {
+                p.ppid = k.ppid
+                p.leftBehindGroup = nil; p.leftBehindApp = nil; p.leftBehindPid = nil; p.leftBehindTags = []
+                p.notResponding = false
+                if let j = labelByPid[k.pid] { p.launchdLabel = j.label; p.launchdDomain = j.domain }
+                if let a = lsByPid[k.pid] { p.lsAppName = a.name; p.lsTags = a.stateTags; p.lsType = a.type }
+                samples[p.key] = s
+                reused.insert(built.count)
+                built.append(p)
+                continue
+            }
             let user = users[k.uid] ?? { let u = Native.userName(k.uid); users[k.uid] = u; return u }()
             var p = ProcInfo(pid: k.pid, ppid: k.ppid, pgid: k.pgid, uid: k.uid, user: user, comm: k.comm,
                              path: nil, start: k.start, stat: k.stat, pflags: k.flags)
@@ -1104,10 +1158,13 @@ final class Store {
                 p.path = Native.path(k.pid)
                 if let path = p.path { p.extensionPoint = ExtensionInfo.point(forExecutable: path) }
             }
-            p.responsible = fixed?.responsible ?? Native.responsible(k.pid)
-            p.asid = fixed?.asid ?? LoginSessions.asid(k.pid)
+            // What couldn't be read last time (another user's process, without the helper) is not asked for again
+            // on every refresh either: only when `recheck` says so.
+            let ask = fixed == nil || recheck
+            p.responsible = fixed?.responsible ?? (ask ? Native.responsible(k.pid) : nil)
+            p.asid = fixed?.asid ?? (ask ? LoginSessions.asid(k.pid) : nil)
             if let c = fixed?.coalition { p.coalition = c; p.jetsamCoalition = fixed?.jetsamCoalition }
-            else if let c = Native.coalition(k.pid) { p.coalition = c.0; p.jetsamCoalition = c.1 }
+            else if ask, let c = Native.coalition(k.pid) { p.coalition = c.0; p.jetsamCoalition = c.1 }
             _ = p.fill(from: .read(k.pid))
             if let j = labelByPid[k.pid] { p.launchdLabel = j.label; p.launchdDomain = j.domain }
             if let b = jobParents[p.key] { p.launchdParentBundle = b }
@@ -1136,8 +1193,9 @@ final class Store {
             built.append(p)
         }
         let priv = privSource()
+        let wall = Date()
         // Into an array first: writing back into a dictionary being iterated copied all of it.
-        for i in built.indices {
+        for i in built.indices where !reused.contains(i) {
             var p = built[i]
             let pid = p.pid
             if let m = priv?[pid] {
@@ -1150,7 +1208,13 @@ final class Store {
             let before = prev[p.key]
             // sandbox check is cheap but noisy for zombies. A process can enter a sandbox but never leave it, so
             // one seen sandboxed isn't asked again: confirming a "yes" costs a sysctl (Native.isSame).
+            // One seen not sandboxed, or that couldn't be asked about, is asked again while it is young (a process
+            // enters its sandbox as it starts up) and after that only now and then (`recheck`): the check is
+            // ~7 µs a process.
             if before?.sandboxed == true { p.sandboxed = true }
+            else if let before, !recheck, wall.timeIntervalSince(p.start) > Self.sandboxSettle {
+                p.sandboxed = before.sandboxed
+            }
             // The helper answers this once per process (HelperAsk), so its answer is kept from then on.
             else if !p.isZombie { p.sandboxed = Native.sandboxed(pid, start: p.start) ?? priv?[pid]?.sandboxed ?? before?.sandboxed }
             let sample = Sample(p, at: now)

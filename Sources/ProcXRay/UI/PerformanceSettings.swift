@@ -72,6 +72,7 @@ struct PerformanceSettings: View {
     @AppStorage(Tuning.signatures) private var signatures = true
     @AppStorage(Tuning.pidDomains) private var pidDomains = true
     @AppStorage(Tuning.historyMinutes) private var historyMinutes = 4.0
+    @AppStorage(Tuning.idleEvery) private var idleEvery = 2.0
     @State private var meter = SelfMeter.shared
 
     /// Recomputed with the body: any of the values above changing redraws it.
@@ -98,6 +99,12 @@ struct PerformanceSettings: View {
                 Picker("While another app is in front", selection: $inactive) {
                     ForEach(Tuning.Inactive.allCases) { Text($0.title).tag($0) }
                 }
+                Picker("Processes using no CPU", selection: $idleEvery) {
+                    Text("read every refresh").tag(1.0)
+                    Text("every 2nd refresh").tag(2.0)
+                    Text("every 4th refresh").tag(4.0)
+                }
+                Hint("Most processes are idle. One that wakes up shows its figures at its next reading; the rest of the list stays as fresh as set above.")
                 Toggle("Half as often on battery or in Low Power Mode", isOn: $savePower)
                 Hint("A window that is closed, minimized or covered is never refreshed.")
             }
@@ -120,7 +127,7 @@ struct PerformanceSettings: View {
         // Taller than a small screen otherwise: the form scrolls.
         .frame(height: 600)
         .formStyle(.grouped)
-        .onChange(of: [windowInterval, menuBarInterval, registryEvery, historyMinutes]) { _, _ in Tuning.changed() }
+        .onChange(of: [windowInterval, menuBarInterval, registryEvery, historyMinutes, idleEvery]) { _, _ in Tuning.changed() }
         .onChange(of: inactive) { _, _ in Tuning.changed() }
         .onChange(of: savePower) { _, _ in Tuning.changed() }
         .onChange(of: signatures) { _, _ in Tuning.changed() }

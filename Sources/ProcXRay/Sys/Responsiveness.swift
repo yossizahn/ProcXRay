@@ -33,14 +33,40 @@ enum Responsiveness {
 
     static var available: Bool { api != nil }
 
-    /// The pids among `pids` that WindowServer reports as not responding.
-    static func unresponsive(_ pids: some Sequence<pid_t>) -> Set<pid_t> {
+    /// Each app's last answer and when it was given, for `maxAge`.
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var last: [pid_t: (at: UInt64, hung: Bool)] = [:]
+
+    /// The pids among `pids` that WindowServer reports as not responding. Each pid is a round trip to
+    /// WindowServer (a third of a refresh's wall time, measured), and an app counts as hung only after ~18 s, so
+    /// an app's answer is given again for `maxAge` seconds: the process list and the menu bar monitor, which
+    /// both ask on their own timers, share it.
+    static func unresponsive(_ pids: some Sequence<pid_t>, maxAge: Double = 5) -> Set<pid_t> {
         guard let api else { return [] }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let fresh = UInt64(maxAge * 1e9)
+        lock.lock()
+        let known = last
+        lock.unlock()
         var out: Set<pid_t> = []
+        var asked: [pid_t: (at: UInt64, hung: Bool)] = [:]
         for pid in pids where pid > 0 {
+            if let k = known[pid], now &- k.at <= fresh {
+                if k.hung { out.insert(pid) }
+                continue
+            }
             var psn = ProcessSerialNumber()
             guard api.psn(pid, &psn) == noErr else { continue }
-            if api.unresponsive(api.connection, &psn) { out.insert(pid) }
+            let hung = api.unresponsive(api.connection, &psn)
+            if hung { out.insert(pid) }
+            asked[pid] = (now, hung)
+        }
+        if !asked.isEmpty {
+            lock.lock()
+            // Forget apps not asked about for a while (they have quit).
+            last = last.filter { now &- $0.value.at <= fresh * 12 }
+            last.merge(asked) { _, b in b }
+            lock.unlock()
         }
         return out
     }

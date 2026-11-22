@@ -43,7 +43,22 @@ enum Bench {
         // A timer tick in steady state: LaunchServices and launchd reused, every cache warm, rates computed.
         do {
             let warm = Store.snapshot(prev: snap.samples, signCache: [:], priv: { priv }, ls: snap.ls, jobs: snap.jobs, otherJobs: snap.otherJobs)
+            // As 29 timer refreshes of 30 run: what was unset or unreadable last time isn't asked for again.
             time("tick: snapshot (ls/jobs reused)") {
+                _ = Store.snapshot(prev: warm.samples, signCache: [:], priv: { priv }, ls: snap.ls, jobs: snap.jobs, otherJobs: snap.otherJobs,
+                                   recheck: false)
+            }
+            // With idle processes read in turns (Tuning.idleReadEvery), as the Balanced and Efficient profiles do.
+            let idle = Set(warm.procs.values.filter { $0.pid > 0 && ($0.cpuNanos == nil || ($0.rates != nil && ($0.cpuPercent ?? 0) < 0.05)) }.map(\.pid))
+            print("idle at the last reading: \(idle.count) of \(warm.procs.count) processes")
+            for every in [2, 4] {
+                let skip = idle.filter { Int($0) % every != 0 }
+                time("tick: snapshot, idle read every \(every)") {
+                    _ = Store.snapshot(prev: warm.samples, signCache: [:], priv: { priv }, ls: snap.ls, jobs: snap.jobs, otherJobs: snap.otherJobs,
+                                       recheck: false, reuse: warm.procs, skip: skip)
+                }
+            }
+            time("tick: snapshot, all asked again") {
                 _ = Store.snapshot(prev: warm.samples, signCache: [:], priv: { priv }, ls: snap.ls, jobs: snap.jobs, otherJobs: snap.otherJobs)
             }
             time("tick: per-pid cdhash") { for p in pids { _ = Native.cdhash(p) } }

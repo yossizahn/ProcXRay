@@ -20,6 +20,7 @@ enum Tuning {
     static let signatures = "perf.signatures"                // check code signatures in the background
     static let pidDomains = "perf.pidDomains"                // read launchd pid domains (one launchctl per process)
     static let historyMinutes = "perf.historyMinutes"        // graph history kept per process; 0: none
+    static let idleEvery = "perf.idleEvery"                  // a process using no CPU is read every Nth refresh
 
     /// What the process window does while another app is in front.
     enum Inactive: String, CaseIterable, Identifiable, Sendable {
@@ -60,13 +61,13 @@ enum Tuning {
             switch self {
             case .efficient:
                 [windowInterval: 5.0, menuBarInterval: 5.0, inactive: Inactive.slow.rawValue, savePower: true,
-                 registryEvery: 60.0, signatures: true, pidDomains: false, historyMinutes: 2.0]
+                 registryEvery: 60.0, signatures: true, pidDomains: false, historyMinutes: 2.0, idleEvery: 4.0]
             case .balanced:
                 [windowInterval: 2.0, menuBarInterval: 3.0, inactive: Inactive.half.rawValue, savePower: true,
-                 registryEvery: 10.0, signatures: true, pidDomains: true, historyMinutes: 4.0]
+                 registryEvery: 10.0, signatures: true, pidDomains: true, historyMinutes: 4.0, idleEvery: 2.0]
             case .live:
                 [windowInterval: 1.0, menuBarInterval: 2.0, inactive: Inactive.same.rawValue, savePower: false,
-                 registryEvery: 5.0, signatures: true, pidDomains: true, historyMinutes: 10.0]
+                 registryEvery: 5.0, signatures: true, pidDomains: true, historyMinutes: 10.0, idleEvery: 1.0]
             case .custom: nil
             }
         }
@@ -97,6 +98,8 @@ enum Tuning {
     static var readsPidDomains: Bool { d.bool(forKey: pidDomains) }
     static var registrySpacing: TimeInterval { max(2, d.double(forKey: registryEvery)) }
     static var inactiveMode: Inactive { Inactive(rawValue: d.string(forKey: inactive) ?? "") ?? .half }
+    /// A process that used no CPU at its last reading is read again every this many refreshes (1: every one).
+    static var idleReadEvery: Int { min(8, max(1, Int(d.double(forKey: idleEvery)))) }
 
     /// Readings kept per process for the graphs, at the window's own interval. 0: none are kept.
     static var historyLength: Int {
