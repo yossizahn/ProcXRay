@@ -250,10 +250,10 @@ struct MenuBarWidgets: View {
                 Group {
                     if m == .disk || m == .network {
                         let (up, down) = ioColors()
-                        MirrorGraph(up: io[m == .disk ? .diskRead : .netIn] ?? [], down: io[m == .disk ? .diskWrite : .netOut] ?? [],
+                        LabelMirrorGraph(up: io[m == .disk ? .diskRead : .netIn] ?? [], down: io[m == .disk ? .diskWrite : .netOut] ?? [],
                                     upColor: up, downColor: down)
                     } else {
-                        MiniGraph(values: history[m] ?? [], maxValue: 100, color: graphColor(m), filled: true)
+                        LabelGraph(values: history[m] ?? [], maxValue: 100, color: graphColor(m))
                     }
                 }
                 .frame(width: 22, height: 14)
@@ -290,13 +290,41 @@ struct MenuBarWidgets: View {
     }
 }
 
-/// Two series around a middle line, newest on the right: `up` drawn upward, `down` downward, both scaled to the
-/// larger series' peak so their heights compare.
-struct MirrorGraph: View {
+/// The menu bar label's graphs. The label is an image rendered from SwiftUI (ImageRenderer), which can't draw an
+/// AppKit view, so these two draw in a Canvas; every graph that is on screen as a view is a SeriesGraph.
+private struct LabelGraph: View {
+    let values: [Double]
+    var maxValue: Double?
+    var color: Color
+    var capacity = AmbientMonitor.historyLength
+
+    var body: some View {
+        Canvas { ctx, size in
+            guard values.count > 1 else { return }
+            let top = max(maxValue ?? (values.max() ?? 1), 1e-9)
+            let step = size.width / CGFloat(max(capacity - 1, 1))
+            let start = size.width - CGFloat(values.count - 1) * step
+            var line = Path()
+            for (i, v) in values.enumerated() {
+                let p = CGPoint(x: start + CGFloat(i) * step, y: size.height - CGFloat(min(v / top, 1)) * size.height)
+                if i == 0 { line.move(to: p) } else { line.addLine(to: p) }
+            }
+            var area = line
+            area.addLine(to: CGPoint(x: size.width, y: size.height))
+            area.addLine(to: CGPoint(x: start, y: size.height))
+            area.closeSubpath()
+            ctx.fill(area, with: .color(color.opacity(0.55)))
+            ctx.stroke(line, with: .color(color), lineWidth: 1)
+        }
+    }
+}
+
+/// Two series around a middle line, both scaled to the larger one's peak (see LabelGraph).
+private struct LabelMirrorGraph: View {
     let up: [Double]
     let down: [Double]
-    var upColor: Color = .accentColor
-    var downColor: Color = .orange
+    var upColor: Color
+    var downColor: Color
     var capacity = AmbientMonitor.historyLength
 
     var body: some View {
@@ -318,37 +346,6 @@ struct MirrorGraph: View {
             }
             draw(up, upColor, 1)
             draw(down, downColor, -1)
-        }
-    }
-}
-
-/// A small area or line graph of the last readings, newest on the right; `maxValue` nil scales to the peak.
-struct MiniGraph: View {
-    let values: [Double]
-    var maxValue: Double?
-    var color: Color = .accentColor
-    var filled = true
-    var capacity = AmbientMonitor.historyLength
-
-    var body: some View {
-        Canvas { ctx, size in
-            guard values.count > 1 else { return }
-            let top = max(maxValue ?? (values.max() ?? 1), 1e-9)
-            let step = size.width / CGFloat(max(capacity - 1, 1))
-            let start = size.width - CGFloat(values.count - 1) * step
-            var line = Path()
-            for (i, v) in values.enumerated() {
-                let p = CGPoint(x: start + CGFloat(i) * step, y: size.height - CGFloat(min(v / top, 1)) * size.height)
-                if i == 0 { line.move(to: p) } else { line.addLine(to: p) }
-            }
-            if filled {
-                var area = line
-                area.addLine(to: CGPoint(x: size.width, y: size.height))
-                area.addLine(to: CGPoint(x: start, y: size.height))
-                area.closeSubpath()
-                ctx.fill(area, with: .color(color.opacity(0.55)))
-            }
-            ctx.stroke(line, with: .color(color), lineWidth: 1)
         }
     }
 }
