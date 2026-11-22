@@ -23,18 +23,35 @@ enum AppIntentsInfo {
         var summary: String
         /// "appIntent" or "siriIntent" (the index's toolType).
         var kind: String
-        /// The index's visibilityFlags. 0 for every action whose metadata says isDiscoverable = false (checked
-        /// against 366 actions); what the other bits (seen: 2, 3, 5, 7, 13, 15) mean isn't known.
+        /// The index's visibilityFlags. Bit 0 (1): offered in Shortcuts; bit 1 (2): offered to Siri. Checked
+        /// against 815 actions' bundle metadata: assistantOnly actions are 2, isDiscoverable = false ones 0, Siri's
+        /// own flow tools 2, built-in Shortcuts actions 5, 7 or 15. Bits 2 and 3 (4, 8: seen as 3, 7 and 15 on
+        /// otherwise alike actions of one app) follow nothing in the metadata; the index sets them.
         var visibilityFlags: Int?
-        /// isDiscoverable from the bundle's metadata.
+        /// isDiscoverable from the bundle's metadata: false for an assistantOnly action too.
         var discoverable: Bool?
+        /// visibilityMetadata.assistantOnly from the bundle: for Siri, not offered in Shortcuts.
+        var assistantOnly: Bool? = nil
+        /// The Apple Intelligence schemas it adopts (@AppIntent(schema:)): "mail.createDraft" from the bundle's
+        /// assistantDefinedSchemas, or "notes.CreateNoteIntent" from the index's appIntentSchema.* protocols.
+        var schemas: [String] = []
+        /// Siri can call it as a tool (the index's assistantInvocable protocol, the bundle's AssistantIntent).
+        var assistantInvocable = false
+        /// The system protocols it adopts, as the index names them (openEntity, deleteEntity, audioStarting, …),
+        /// without the ones shown on their own (appIntent, assistantInvocable, the schemas).
+        var traits: [String] = []
         var openAppWhenRun: Bool?
         var authenticationPolicy: String?
         var parameters: [Parameter]
         var output: String?
         /// Where it came from: "index", or the bundle-relative path of the metadata file.
         var source: String
-        var hidden: Bool { visibilityFlags.map { $0 == 0 } ?? (discoverable == false) }
+
+        var inShortcuts: Bool? { visibilityFlags.map { $0 & 1 != 0 } ?? discoverable }
+        var inSiri: Bool? { visibilityFlags.map { $0 & 2 != 0 } ?? (assistantOnly == true ? true : nil) }
+        /// Offered nowhere: not in Shortcuts and not to Siri.
+        var hidden: Bool { inShortcuts == false && inSiri != true }
+        var siriOnly: Bool { inShortcuts == false && inSiri == true }
     }
     struct Entity: Sendable, Equatable, Identifiable {
         var id: String
@@ -101,6 +118,12 @@ enum AppIntentsInfo {
                 if let at = byID[full] ?? byID[a.id] {
                     r.actions[at].openAppWhenRun = a.openAppWhenRun
                     r.actions[at].discoverable = a.discoverable
+                    r.actions[at].assistantOnly = a.assistantOnly
+                    // The bundle's public schema ids ("mail.createDraft") read better than the index's type names.
+                    if !a.schemas.isEmpty { r.actions[at].schemas = a.schemas }
+                    r.actions[at].assistantInvocable = r.actions[at].assistantInvocable || a.assistantInvocable
+                    // The two name some protocols differently (PropertyUpdater, entityUpdating): one or the other.
+                    if r.actions[at].traits.isEmpty { r.actions[at].traits = a.traits }
                     if r.actions[at].output == nil { r.actions[at].output = a.output }
                     for p in a.parameters where !r.actions[at].parameters.contains(where: { $0.key == p.key }) {
                         r.actions[at].parameters.append(p)
@@ -216,8 +239,19 @@ enum AppIntentsInfo {
                 let name = text(st, 4).flatMap { $0.isEmpty ? nil : $0 } ?? raw
                 types[k, default: [:]][text(st, 3) ?? ""] = (name, "")
             }
+            // System protocols by name (the protocol column is a protobuf with the details; the name is enough).
+            // Optional: an index without the table still lists the actions.
+            var protocols: [Int64: [String]] = [:]
+            _ = rows("SELECT toolId, identifier FROM SystemToolProtocols WHERE toolId IN (\(ids)) ORDER BY rowid", []) { st in
+                protocols[sqlite3_column_int64(st, 0), default: []].append(text(st, 1) ?? "")
+            }
             for (row, var a) in tools {
                 if let n = names[row].flatMap(best) { a.name = n.0; a.summary = n.1 }
+                for pr in protocols[row] ?? [] {
+                    if pr.hasPrefix("appIntentSchema.") { a.schemas.append(String(pr.dropFirst("appIntentSchema.".count))) }
+                    else if pr == "assistantInvocable" { a.assistantInvocable = true }
+                    else if !["appIntent", "siriKitIntent", "unknown", ""].contains(pr), !a.traits.contains(pr) { a.traits.append(pr) }
+                }
                 a.parameters = (params[row] ?? []).sorted { $0.order < $1.order }.map { p in
                     let n = best(p.names)
                     return Parameter(key: p.key, name: n?.0 ?? p.key, type: types["\(row)|\(p.key)"].flatMap(best)?.0 ?? "",
@@ -314,10 +348,22 @@ enum AppIntentsInfo {
             case 2: "requiresLocalDeviceAuthentication"
             default: nil
             }
-            m.actions.append(Action(id: a["identifier"] as? String ?? id, name: loc(a["title"]), summary: loc(desc?["descriptionText"]),
-                                    kind: "appIntent", visibilityFlags: nil, discoverable: a["isDiscoverable"] as? Bool,
-                                    openAppWhenRun: a["openAppWhenRun"] as? Bool, authenticationPolicy: auth, parameters: params,
-                                    output: a["outputType"].map { valueType($0) }, source: ""))
+            var action = Action(id: a["identifier"] as? String ?? id, name: loc(a["title"]), summary: loc(desc?["descriptionText"]),
+                                kind: "appIntent", visibilityFlags: nil, discoverable: a["isDiscoverable"] as? Bool,
+                                openAppWhenRun: a["openAppWhenRun"] as? Bool, authenticationPolicy: auth, parameters: params,
+                                output: a["outputType"].map { valueType($0) }, source: "")
+            action.assistantOnly = (a["visibilityMetadata"] as? [String: Any])?["assistantOnly"] as? Bool
+            action.schemas = (a["assistantDefinedSchemas"] as? [[String: Any]] ?? []).compactMap { s in
+                s["publicIdentifier"] as? String ?? (s["domain"] as? String).map { d in d + "." + (s["name"] as? String ?? "") }
+            }
+            // "com.apple.link.systemProtocol.OpenEntity" → "openEntity", the index's spelling.
+            for p in a["systemProtocols"] as? [String] ?? [] {
+                guard let name = p.split(separator: ".").last, let first = name.first else { continue }
+                if name == "AssistantIntent" { action.assistantInvocable = true; continue }
+                let t = first.lowercased() + name.dropFirst()
+                if !action.traits.contains(t) { action.traits.append(t) }
+            }
+            m.actions.append(action)
         }
         for (id, v) in root["entities"] as? [String: Any] ?? [:] {
             guard let e = v as? [String: Any] else { continue }

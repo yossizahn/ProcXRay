@@ -38,7 +38,7 @@ struct AutomationTab: View {
                 HStack(spacing: 8) {
                     TextField("Filter", text: $query).textFieldStyle(.roundedBorder).frame(maxWidth: 260)
                     Toggle("Show hidden", isOn: $showHidden).controlSize(.small)
-                        .help("Commands, classes and actions the app marks hidden: not in Script Editor's dictionary view, or not offered in Shortcuts")
+                        .help("Commands, classes and actions the app marks hidden: not in Script Editor's dictionary view, or offered neither in Shortcuts nor to Siri")
                     Spacer()
                     if l != nil {
                         Button("Reload") { Self.cache.remove(bundle); loaded = nil; reload += 1 }
@@ -279,12 +279,17 @@ private struct IntentsCard: View {
     let showHidden: Bool
 
     var body: some View {
-        let actions = r.actions.filter { (showHidden || !$0.hidden) && matches(query, [$0.name, $0.id, $0.summary] + $0.parameters.map(\.name)) }
+        let actions = r.actions.filter {
+            (showHidden || !$0.hidden) && matches(query, [$0.name, $0.id, $0.summary] + $0.parameters.map(\.name) + $0.schemas + $0.traits)
+        }
         let hiddenCount = r.actions.filter(\.hidden).count
+        let siriOnly = r.actions.filter(\.siriOnly).count
+        let schemas = r.actions.filter { !$0.schemas.isEmpty }.count
         let entities = r.entities.filter { matches(query, [$0.name, $0.id] + $0.members) }
         let shortcuts = r.appShortcuts.filter { matches(query, [$0.title, $0.action] + $0.phrases) }
         Card(title: "Shortcuts actions (App Intents)", systemImage: "square.stack.3d.up",
              trailing: "\(r.actions.count) actions" + (hiddenCount > 0 ? " · \(hiddenCount) hidden" : "")
+                + (siriOnly > 0 ? " · \(siriOnly) Siri only" : "") + (schemas > 0 ? " · \(schemas) Apple Intelligence" : "")
                 + " · \(r.entities.count) types" + (r.appShortcuts.isEmpty ? "" : " · \(r.appShortcuts.count) App Shortcuts")) {
             sources
             if r.actions.isEmpty && r.entities.isEmpty && r.appShortcuts.isEmpty {
@@ -367,7 +372,14 @@ private struct ActionView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Text(a.name).font(.body.weight(.semibold))
-                if a.hidden { Badge(text: "Hidden from Shortcuts (isDiscoverable)") }
+                if a.hidden {
+                    Badge(text: a.visibilityFlags != nil ? "Hidden from Shortcuts and Siri (visibilityFlags)" : "Hidden from Shortcuts (isDiscoverable)")
+                }
+                if a.siriOnly {
+                    Badge(text: "Siri only, not in Shortcuts (\(a.assistantOnly == true ? "assistantOnly" : "visibilityFlags"))", color: .purple)
+                }
+                ForEach(a.schemas, id: \.self) { Badge(text: "Apple Intelligence schema (\($0))", color: .pink) }
+                if a.schemas.isEmpty && a.assistantInvocable { Badge(text: "Siri can call it directly (AssistantIntent)", color: .purple) }
                 if a.kind == "siriIntent" { Badge(text: "SiriKit intent (INIntent)", color: .purple) }
                 if a.openAppWhenRun == true { Badge(text: "Opens the app (openAppWhenRun)", color: .blue) }
                 if let p = a.authenticationPolicy {
@@ -375,9 +387,12 @@ private struct ActionView: View {
                 }
                 if a.source != "index" { Badge(text: "Not in Shortcuts' index", color: .orange) }
             }
-            .help("visibilityFlags \(a.visibilityFlags.map(String.init) ?? "–") · \(a.source == "index" ? "from Shortcuts' index" : a.source)")
+            .help(help)
             Text(verbatim: a.id).font(monoSmall).foregroundStyle(.tertiary)
             if !a.summary.isEmpty { Text(a.summary).font(.callout).foregroundStyle(.secondary) }
+            if !a.traits.isEmpty {
+                Text("Roles: " + a.traits.map(Self.trait).joined(separator: ", ")).font(.callout).foregroundStyle(.secondary)
+            }
             if !a.parameters.isEmpty || a.output != nil {
                 VStack(alignment: .leading, spacing: 1) {
                     ForEach(a.parameters) { p in
@@ -398,6 +413,36 @@ private struct ActionView: View {
             }
         }
         .textSelection(.enabled)
+    }
+
+    private var help: String {
+        var parts: [String] = []
+        if let v = a.visibilityFlags {
+            var bits = [v & 1 != 0 ? "in Shortcuts" : "not in Shortcuts", v & 2 != 0 ? "offered to Siri" : "not offered to Siri"]
+            if v & ~3 != 0 { bits.append("other bits 0x\(String(v & ~3, radix: 16)) not decoded") }
+            parts.append("visibilityFlags \(v): " + bits.joined(separator: ", "))
+        }
+        parts.append(a.source == "index" ? "from Shortcuts' index" : a.source)
+        return parts.joined(separator: " · ")
+    }
+
+    /// The system protocols the index names, as "friendly phrase (term)".
+    private static func trait(_ t: String) -> String {
+        let names = [
+            "openEntity": "opens an item", "deleteEntity": "deletes items", "createEntity": "creates an item",
+            "entityUpdating": "changes an item", "propertyUpdater": "changes an item", "entityGetter": "gets an item",
+            "closeEntity": "closes an item", "putEntityInContainer": "moves an item", "favoriteEntity": "favorites an item",
+            "urlRepresentable": "has a link", "batchable": "runs on many at once", "sideEffect": "changes things",
+            "audioStarting": "starts audio", "audioRecording": "records audio", "sessionStarting": "starts a session",
+            "foregroundContinuable": "can continue in the app", "progressReporting": "reports progress",
+            "widgetConfiguration": "configures a widget", "controlConfiguration": "configures a control",
+            "focusConfiguration": "a Focus filter", "valueSetting": "sets a value", "setValue": "sets a value",
+            "changeBinarySetting": "turns a setting on or off", "search": "searches",
+            "showInAppStringSearchResults": "searches in the app", "undoable": "can be undone",
+            "synthesizedTool": "made by the system", "systemFrameworkIntent": "from a system framework",
+            "requiresMDMChecks": "subject to device management", "longRunning": "runs long",
+        ]
+        return names[t].map { "\($0) (\(t))" } ?? t
     }
 }
 

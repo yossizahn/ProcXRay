@@ -1199,14 +1199,15 @@ extension Bench {
                 }
             }
             let hidden = intents.actions.filter(\.hidden).count
-            print("  intents: \(intents.actions.count) actions (\(hidden) hidden, \(intents.indexedActions) from the index), \(intents.entities.count) types, \(intents.appShortcuts.count) App Shortcuts  [\(Int(t2.timeIntervalSince(t1) * 1000)) ms]")
+            let siriOnly = intents.actions.filter(\.siriOnly).count, schemas = intents.actions.filter { !$0.schemas.isEmpty }.count
+            print("  intents: \(intents.actions.count) actions (\(hidden) hidden, \(siriOnly) Siri only, \(schemas) with schemas, \(intents.indexedActions) from the index), \(intents.entities.count) types, \(intents.appShortcuts.count) App Shortcuts  [\(Int(t2.timeIntervalSince(t1) * 1000)) ms]")
             if let n = intents.indexNote { print("  index: \(n)") }
             for f in intents.metadataFiles { print("  metadata: \(f)") }
             for e in intents.siriKit { print("  SiriKit \((e.path as NSString).lastPathComponent): \(e.supported.joined(separator: ", "))") }
             for f in intents.intentDefinitions { print("  intentdefinition: \(f)") }
             if verbose {
                 for a in intents.actions {
-                    print("    \(a.hidden ? "h" : " ") \(a.kind == "siriIntent" ? "S" : " ") \(a.name)  [\(a.id)] vf=\(a.visibilityFlags.map(String.init) ?? "-") open=\(a.openAppWhenRun.map(String.init) ?? "-") src=\(a.source)")
+                    print("    \(a.hidden ? "h" : " ") \(a.kind == "siriIntent" ? "S" : " ") \(a.name)  [\(a.id)] vf=\(a.visibilityFlags.map(String.init) ?? "-") open=\(a.openAppWhenRun.map(String.init) ?? "-") src=\(a.source)\(a.siriOnly ? " siri-only" : "")\(a.assistantInvocable ? " assistant" : "")\(a.schemas.isEmpty ? "" : " schema=" + a.schemas.joined(separator: ","))\(a.traits.isEmpty ? "" : " traits=" + a.traits.joined(separator: ","))")
                     for p in a.parameters { print("          \(p.key) \(p.name): \(p.type)  \(p.description)") }
                 }
                 for e in intents.entities { print("    \(e.kind) \(e.name) [\(e.id)]: \(e.members.prefix(8).joined(separator: ", "))") }
