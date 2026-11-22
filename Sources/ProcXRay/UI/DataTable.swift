@@ -329,16 +329,10 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
         /// quoted, as CSV wants it; tabs and line breaks become spaces in tab-separated text.
         private func text(_ rows: [Row], header: Bool, separator: String) -> String {
             let cols = visibleColumns
-            func cell(_ s: String) -> String {
-                if separator == "," {
-                    return s.contains(where: { $0 == "," || $0 == "\"" || $0.isNewline }) ? "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\"" : s
-                }
-                return s.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ")
-            }
-            var lines: [String] = []
-            if header { lines.append(cols.map { cell($0.title) }.joined(separator: separator)) }
-            for r in rows { lines.append(cols.map { cell($0.text(r)) }.joined(separator: separator)) }
-            return lines.joined(separator: "\n")
+            var lines: [[String]] = []
+            if header { lines.append(cols.map(\.title)) }
+            for r in rows { lines.append(cols.map { $0.text(r) }) }
+            return DelimitedText.join(lines, separator: separator)
         }
 
         private func put(_ s: String) {
@@ -392,9 +386,9 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
                 if table.selectedRowIndexes.contains(clicked) {
                     rows = selectedRows
                 } else {
+                    // As everywhere on the Mac: the menu is about the row under the pointer (AppKit rings it), and
+                    // the selection stays as it was.
                     rows = [shown[clicked]]
-                    select([shown[clicked].id], in: table)
-                    tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification, object: table))
                 }
             }
             if !rows.isEmpty, let build = parent.menu {
@@ -471,6 +465,22 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
             guard sender.tag < menuActions.count else { return }
             menuActions[sender.tag]()
         }
+    }
+}
+
+/// Rows of cells as text, for the pasteboard and for export.
+enum DelimitedText {
+    /// One line per row, cells joined by `separator`. With a comma, a cell holding a comma, a quote or a line break
+    /// is quoted and its quotes doubled, as CSV wants it; with anything else (a tab), tabs and line breaks inside
+    /// a cell become spaces, so a paste into a spreadsheet keeps its columns.
+    static func join(_ rows: [[String]], separator: String) -> String {
+        func cell(_ s: String) -> String {
+            if separator == "," {
+                return s.contains(where: { $0 == "," || $0 == "\"" || $0.isNewline }) ? "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\"" : s
+            }
+            return String(s.map { $0 == "\t" || $0.isNewline ? " " : $0 })
+        }
+        return rows.map { $0.map(cell).joined(separator: separator) }.joined(separator: "\n")
     }
 }
 
