@@ -6,7 +6,8 @@ import SwiftUI
 /// row with its graph), and a toolbar. In triage mode the list gives way to the top consumers of the chosen
 /// metric and an Ended / Launched / Alerts switch.
 struct MenuBarPopover: View {
-    @State private var monitor = AmbientMonitor.shared
+    /// The monitor's state as of the popover's last time on screen (AmbientShown).
+    @State private var monitor = AmbientMonitor.shared.popover
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
     /// The metric the tiles select: the list's sort and the top consumers.
@@ -45,6 +46,10 @@ struct MenuBarPopover: View {
         .frame(width: Self.width)
         // Opaque: the MenuBarExtra window's own background is a translucent material.
         .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+        .background(WindowVisibility { w, visible in
+            AmbientMonitor.shared.popover.window = w
+            AmbientMonitor.shared.popover.live = visible
+        })
         // The detail tile follows the metric picked in the tiles (or the Sort by menu).
         .onChange(of: metric) { _, m in detail = m }
         .onAppear { detail = metric }
@@ -766,5 +771,48 @@ struct DetailTile: View {
             .frame(width: 110, alignment: .leading)
             MiniGraph(values: history[area] ?? [], maxValue: nil)
         }
+    }
+}
+
+/// Reports whether the window holding it is on screen: true as it becomes key (a MenuBarExtra window does as it
+/// opens, before it's drawn), and checked again as it resigns key, closes or changes occlusion. MenuBarExtra orders
+/// its window out with no notification of its own, so AmbientMonitor also checks the window on every tick.
+struct WindowVisibility: NSViewRepresentable {
+    let changed: (NSWindow?, Bool) -> Void
+
+    func makeNSView(context: Context) -> Watcher { Watcher(changed) }
+    func updateNSView(_ v: Watcher, context: Context) { v.changed = changed }
+
+    final class Watcher: NSView {
+        var changed: (NSWindow?, Bool) -> Void
+        private var observers: [NSObjectProtocol] = []
+        init(_ changed: @escaping (NSWindow?, Bool) -> Void) { self.changed = changed; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = []
+            guard let w = window else { changed(nil, false); return }
+            let nc = NotificationCenter.default
+            observers.append(nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: w, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.changed(w, true) }
+            })
+            for name in [NSWindow.didResignKeyNotification, NSWindow.didChangeOcclusionStateNotification, NSWindow.willCloseNotification] {
+                observers.append(nc.addObserver(forName: name, object: w, queue: .main) { [weak self] n in
+                    let closing = n.name == NSWindow.willCloseNotification
+                    // After the run loop turn that orders the window out.
+                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.report(closing: closing) } }
+                })
+            }
+            report(closing: false)
+        }
+
+        private func report(closing: Bool) {
+            guard let w = window else { return }
+            changed(w, !closing && w.isVisible && (w.occlusionState.contains(.visible) || w.isKeyWindow))
+        }
+
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
     }
 }

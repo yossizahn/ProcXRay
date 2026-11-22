@@ -338,11 +338,20 @@ final class AmbientMonitor {
                 self.cleared = done.cleared
                 self.launched = done.launched
                 self.ended = done.ended
+                // MenuBarExtra orders its window out without a notification: the window's state is what counts.
+                if self.popover.live, self.popover.window?.isVisible != true { self.popover.live = false }
+                if self.popover.live { self.popover.copy(from: self) }
             }
         }
     }
 
-    func clearEnded() { tracker.cleared = []; cleared = [] }
+    func clearEnded() {
+        tracker.cleared = []; cleared = []
+        if popover.live { popover.copy(from: self) }
+    }
+
+    /// What the menu bar popover shows, kept up to date only while it's on screen.
+    @ObservationIgnored let popover = AmbientShown()
 
     // MARK: Sampling (off the main thread)
 
@@ -821,5 +830,44 @@ struct ProcHistory: Sendable {
         case .disk: ring.filled(3)
         case .network: ring.filled(4)
         }
+    }
+}
+
+/// The menu bar popover's copy of the monitor's state, refreshed only while the popover is on screen (`live`).
+/// SwiftUI keeps a MenuBarExtra's content alive after it closes: reading the monitor directly re-rendered the whole
+/// closed popover on every tick, about a tenth of the app's CPU time.
+@MainActor
+@Observable
+final class AmbientShown {
+    fileprivate(set) var system = SystemStats.Rates()
+    fileprivate(set) var systemHistory: [AmbientMetric: [Double]] = [:]
+    fileprivate(set) var procs: [AmbientProc] = []
+    fileprivate(set) var procHistory: [AmbientProc.Key: ProcHistory] = [:]
+    fileprivate(set) var groups: [AmbientGroup] = []
+    fileprivate(set) var topGroups: [AmbientMetric: [AmbientGroup]] = [:]
+    fileprivate(set) var groupHistory: [UInt64: ProcHistory] = [:]
+    fileprivate(set) var alerts: [AmbientAlert] = []
+    fileprivate(set) var conditions: [SystemCondition] = []
+    var attentionCount: Int { alerts.count + conditions.count }
+    fileprivate(set) var cleared: [AmbientAlert] = []
+    fileprivate(set) var launched: [AmbientEvent] = []
+    fileprivate(set) var ended: [AmbientEvent] = []
+
+    /// Whether the popover is on screen. Turning it on catches up with the monitor at once.
+    @ObservationIgnored var live = false {
+        didSet { if live, !oldValue { copy(from: AmbientMonitor.shared) } }
+    }
+
+    /// The popover's window, once it has one.
+    @ObservationIgnored weak var window: NSWindow?
+
+    func clearEnded() { AmbientMonitor.shared.clearEnded() }
+
+    fileprivate func copy(from m: AmbientMonitor) {
+        system = m.system; systemHistory = m.systemHistory
+        procs = m.procs; procHistory = m.procHistory
+        groups = m.groups; topGroups = m.topGroups; groupHistory = m.groupHistory
+        alerts = m.alerts; conditions = m.conditions
+        cleared = m.cleared; launched = m.launched; ended = m.ended
     }
 }
