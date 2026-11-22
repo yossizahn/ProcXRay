@@ -706,6 +706,7 @@ final class Store {
             }
         }
         let reuse = skip.isEmpty ? [:] : procs
+        let giveBack = refreshTick % Self.giveBackEvery == 0
         let oldLS = lsApps, oldJobs = jobs, oldOther = otherJobs
         let btmOwners = btmOwners
         let spec = treeSpec
@@ -779,8 +780,16 @@ final class Store {
                 if Tuning.readsPidDomains { self.fillPidDomains() }
                 self.fillJobParents()
             }
+            // Every refresh builds and drops a few megabytes of short-lived tables (the processes, their samples,
+            // the tree), and the heap keeps the pages they leave free as dirty memory. Handing those back now and
+            // then is what keeps the footprint near what the app really holds.
+            if giveBack { malloc_zone_pressure_relief(nil, 0) }
         }
     }
+
+    /// Free heap pages are given back to the system every this many refreshes (see refresh).
+    private static let giveBackEvery = 15
+
     func benchRecordHistory(_ procs: [pid_t: ProcInfo]) { recordHistory(procs) }
 
     /// Appends this refresh to each process's history and forgets processes that are gone.
