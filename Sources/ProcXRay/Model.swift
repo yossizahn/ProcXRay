@@ -715,7 +715,7 @@ final class Store {
         // A timer refresh asks the helper only for what the app couldn't read last time and what started since
         // (a second's margin for the time the last snapshot took); a full one asks for everything.
         let ask: HelperAsk? = full || prev.isEmpty ? nil
-            : HelperAsk(pids: prev.values.lazy.filter { $0.needsHelper && !skip.contains($0.pid) }.map(\.pid),
+            : HelperAsk(pids: prev.values.lazy.filter { $0.needsHelper && !skip.contains($0.pid) && (recheck || !$0.helperFutile) }.map(\.pid),
                         since: lastRefresh.timeIntervalSince1970 - 1 - Double(refreshMillis) / 1000)
         Task.detached(priority: .userInitiated) {
             let t0 = DispatchTime.now().uptimeNanoseconds
@@ -1269,7 +1269,10 @@ final class Store {
             }
             // The helper answers this once per process (HelperAsk), so its answer is kept from then on.
             else if !p.isZombie { p.sandboxed = Native.sandboxed(pid, start: p.start) ?? priv?[pid]?.sandboxed ?? before?.sandboxed }
-            let sample = Sample(p, at: now)
+            var sample = Sample(p, at: now)
+            if sample.needsHelper, !p.viaHelper {
+                sample.helperFutile = priv?[pid] != nil || (before?.helperFutile == true && !recheck)
+            }
             if let before, now > before.at {
                 let r = Rates(from: before, to: sample)
                 p.cpuPercent = r.cpuPercent
@@ -1539,6 +1542,9 @@ struct Sample: Sendable {
     var pid: pid_t
     /// The app couldn't read this process itself: the next refresh asks the helper for it (HelperAsk).
     var needsHelper: Bool
+    /// The helper was asked and gave no figures either (the caller isn't an admin, or the process is a zombie):
+    /// it isn't asked again until a refresh that rechecks.
+    var helperFutile = false
 
     /// What doesn't change while a process runs the same code (`cdhash`).
     struct Fixed: Sendable {

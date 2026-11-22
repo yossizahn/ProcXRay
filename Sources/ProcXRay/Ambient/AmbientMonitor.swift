@@ -434,6 +434,8 @@ final class AmbientMonitor {
         /// The processes the last reading couldn't read without the helper, and when it was made (HelperAsk).
         var needsHelper: Set<Int32> = []
         var readAt: Double = 0
+        /// Processes the helper was asked about and gave no figures for: not asked about on every reading.
+        var helperFutile: Set<Int32> = []
         var samples: [AmbientProc.Key: Counts] = [:]
         /// GPU time is read every other tick (the IORegistry walk is the costliest read here, ~3.7 ms of CPU);
         /// the rates from the last read stand in between.
@@ -461,7 +463,10 @@ final class AmbientMonitor {
         // Only a reading this monitor hasn't used: two ticks on one reading would have no interval to rate over.
         let recent = HelperClient.shared.recentMetrics(maxAge: 2.5).flatMap { $0.at > tr.helperAt ? $0 : nil }
         // Asked only for the processes this monitor couldn't read itself last time, and whatever started since.
-        let ask = tr.ticks == 0 ? nil : HelperAsk(pids: Array(tr.needsHelper), since: tr.readAt - 1)
+        // Not those the helper gave nothing for (a caller who isn't an admin gets only their own processes'
+        // figures, and a zombie has none): they are asked about again every 30th reading.
+        if tr.ticks % 30 == 0 { tr.helperFutile = [] }
+        let ask = tr.ticks == 0 ? nil : HelperAsk(pids: Array(tr.needsHelper.subtracting(tr.helperFutile)), since: tr.readAt - 1)
         let helped = input.helper ? recent ?? HelperClient.shared.metrics(ask, timeout: 1.5) : nil
         if let helped { tr.helperAt = helped.at }
         var needsHelper: Set<Int32> = []
@@ -513,6 +518,8 @@ final class AmbientMonitor {
                 if let m = priv?[k.pid], let cpu = m.cpuNanos, let at = helped?.at {
                     c = Counts(at: at, cpu: cpu, disk: (m.diskRead ?? 0) &+ (m.diskWrite ?? 0))
                     footprint = m.footprint
+                } else if let m = priv?[k.pid], m.cpuNanos == nil {
+                    tr.helperFutile.insert(k.pid)
                 }
             }
             let app = input.apps[k.pid]
