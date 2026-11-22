@@ -49,6 +49,9 @@ Rules the measurements led to:
 - A background read that can fail for good caches the failure (`.some(nil)`), or it is retried on every refresh. The same goes for what a snapshot finds unset or unreadable: it is asked for again every 30th refresh, not every one.
 - A timer refresh reads a process that used no CPU at its last reading only every Nth time (`Tuning.idleEvery`); the process keeps its figures and its sample in between. Anything a snapshot works out for every process must also be right for one taken over unread (see the `skip` branch in `Store.snapshot`).
 - Tree rows and group-member lists hold processes as `ProcBox` references: a `ProcInfo` is ~1.5 KB with dozens of strings, and copying it per row move was a large part of a tree build.
+- The menu bar monitor reads the processes on every Nth reading while nothing shows them (`Tuning.menuBarProcesses`), and the per-process network reader runs at the pace of whoever shows its figures (`NetPace`), not on a fixed 2 s.
+- A SwiftUI form re-evaluates every control when anything its body reads changes: a value that updates on a timer (the Performance tab's cost readout) goes in a view of its own.
+- Measuring in the Atlas login: its user isn't an admin, so the helper gives it figures for its own processes only, and the helper share measured there is not what an admin user sees (use the VM for that). `PROCXRAY_ASSUME_VISIBLE` keeps the list refreshing but doesn't make the app count as in front. Save panels take no input there, and the menu bar popover closes as soon as it opens under automated clicks.
 - Whole-app numbers move by a point or more with machine load. To compare two builds, measure them in turns (old, new, old, new) or use `ProcXRay --bench` (release build), which gives CPU time per stage: `tick: snapshot…` and `nodes(…)` lines.
 
 ## Shared UI components
