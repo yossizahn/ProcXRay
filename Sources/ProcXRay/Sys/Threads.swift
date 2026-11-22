@@ -114,10 +114,12 @@ enum ThreadReader {
         }
     }
 
-    /// Same user as the caller, or root (the helper) for any process. nil when the list can't be read.
+    /// Same user as the caller, or root (the helper) for any process, kernel_task (pid 0) included: root reads its
+    /// thread list and per-thread info like any other task's (measured in the VM: 192 threads, 169 named), the
+    /// user gets EPERM. nil when the list can't be read.
     /// About 0.35 ms for a 67-thread process with the core counters (0.13 ms for 70 threads without them).
     static func read(_ pid: pid_t) -> ThreadSnapshot? {
-        guard pid > 0 else { return nil }
+        guard pid >= 0 else { return nil }
         // Room for the current thread count plus some growth; read again, larger, if the list filled it.
         var capacity = Int(Native.taskInfo(pid)?.pti_threadnum ?? 0) + 64
         var ids: [UInt64] = []

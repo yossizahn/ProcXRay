@@ -104,7 +104,8 @@ enum HelperDaemon {
         }
 
         func threads(pid: Int32, reply: @escaping (Data?) -> Void) {
-            guard pid > 0, mayInspect(pid), let t = ThreadReader.read(pid) else { reply(nil); return }
+            // pid 0 too: kernel_task's threads (uid 0, so mayInspect allows it for admin callers only).
+            guard pid >= 0, mayInspect(pid), let t = ThreadReader.read(pid) else { reply(nil); return }
             reply(try? JSONEncoder().encode(t))
         }
 

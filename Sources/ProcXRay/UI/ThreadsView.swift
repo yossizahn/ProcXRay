@@ -51,14 +51,25 @@ struct ThreadsView: View {
     @State private var selection = Set<UInt64>()
     @State private var filter = ""
     @AppStorage("threads.busyOnly") private var busyOnly = false
+    @AppStorage("threads.kernelIdle") private var showIdle = false
     @State private var details: ThreadDetails?
     @State private var capturing = false
     @State private var captureTask: Task<Void, Never>?
 
+    /// kernel_task (pid 0): read as root only, no main thread, and `sample` can't attach to it.
+    private var isKernel: Bool { proc.pid == 0 }
+
+    /// kernel_task's per-CPU idle threads ("idle #0" …) hold every idle CPU's time, and with it the interrupts
+    /// taken while idle, so they'd top a CPU sort; hidden, and left out of the totals, unless asked for.
+    private static func isIdle(_ r: Row) -> Bool { r.t.name.hasPrefix("idle #") }
+
+    /// The rows the totals and the table count: all but kernel_task's idle threads when they're hidden.
+    private var counted: [Row] { isKernel && !showIdle ? rows.filter { !Self.isIdle($0) } : rows }
+
     private var shown: [Row] {
         let f = filter.trimmingCharacters(in: .whitespaces)
         let byID = details?.byID ?? [:]
-        return rows.map { r in
+        return counted.map { r in
             var r = r; r.detail = byID[r.id]
             // The stack wins: when the main thread has exited (dispatch_main does that), the first listed one isn't it.
             r.kind = details?.kind(r.id) ?? (r.isMain ? .main : nil)
@@ -92,7 +103,7 @@ struct ThreadsView: View {
         .task(id: "\(proc.key)|\(store.helperState.isRunning)") {
             // Once per process when the pane opens; later captures are on request.
             details = nil
-            if !exited { capture() }
+            if !exited && !isKernel { capture() }
         }
         .onDisappear { captureTask?.cancel() }
     }
@@ -164,7 +175,7 @@ struct ThreadsView: View {
             }.value
             guard !Task.isCancelled else { return }
             if let (snap, helped) = got {
-                rows = Self.rows(snap, prev: prev)
+                rows = Self.rows(snap, prev: prev, kernel: pid == 0)
                 prev = snap; last = snap; viaHelper = helped; failed = false
             } else {
                 failed = rows.isEmpty
@@ -173,11 +184,11 @@ struct ThreadsView: View {
         }
     }
 
-    private static func rows(_ s: ThreadSnapshot, prev: ThreadSnapshot?) -> [Row] {
+    private static func rows(_ s: ThreadSnapshot, prev: ThreadSnapshot?, kernel: Bool) -> [Row] {
         let before = Dictionary((prev?.threads ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let wall = prev.map { Double(s.at &- $0.at) } ?? 0
-        // The task's thread list starts with the thread the process was created with.
-        let main = s.threads.first?.id
+        // The task's thread list starts with the thread the process was created with; kernel_task has no main thread.
+        let main = kernel ? nil : s.threads.first?.id
         return s.threads.map { t in
             var cpu: Double?, power: Double?
             if wall > 0, let b = before[t.id] {
@@ -192,6 +203,7 @@ struct ThreadsView: View {
     // MARK: views
 
     private var header: some View {
+        let rows = counted
         let busy = rows.filter { ($0.cpu ?? 0) > 0 }.count
         let total = rows.compactMap(\.cpu).reduce(0, +)
         return HStack(spacing: 8) {
@@ -209,9 +221,14 @@ struct ThreadsView: View {
             VStack(alignment: .trailing, spacing: 4) {
                 HStack(spacing: 8) {
                     if capturing { ProgressView().controlSize(.small) }
-                    Button(details == nil ? "Capture stacks" : "Recapture stacks") { capture() }
-                        .disabled(capturing || exited)
-                        .help("Take one sample of every thread's stack (sample <pid> 0 1, which suspends the process for an instant) and read dispatch queues and QoS (taskinfo, as root).")
+                    if isKernel {
+                        Toggle("Idle threads", isOn: $showIdle).toggleStyle(.checkbox).font(.caption)
+                            .help("Show the per-CPU idle threads (idle #0 …). They hold all idle CPU time, interrupts taken while idle included, and are left out of the totals while hidden.")
+                    } else {
+                        Button(details == nil ? "Capture stacks" : "Recapture stacks") { capture() }
+                            .disabled(capturing || exited)
+                            .help("Take one sample of every thread's stack (sample <pid> 0 1, which suspends the process for an instant) and read dispatch queues and QoS (taskinfo, as root).")
+                    }
                     Toggle("Only threads using CPU", isOn: $busyOnly).toggleStyle(.checkbox).font(.caption)
                     TextField("filter name or ID", text: $filter).textFieldStyle(.roundedBorder).frame(width: 160)
                 }
@@ -228,6 +245,7 @@ struct ThreadsView: View {
         if exited { return "Exited: the last read is shown." }
         if rows.isEmpty { return "" }
         let live = "Every \(store.interval.formatted()) s · " + (viaHelper ? "as root via helper" : "as \(NSUserName())")
+            + (isKernel ? " · kernel threads have no user-space stacks to sample" : "")
         guard let d = details, d.hasStacks || d.hasQoS else { return live }
         return live + " · stacks at " + d.at.formatted(date: .omitted, time: .standard)
     }
@@ -238,7 +256,9 @@ struct ThreadsView: View {
             if exited {
                 Text(InspectorView.exitedNote).foregroundStyle(.secondary)
             } else if failed {
-                Text(store.helperState.isRunning
+                Text(isKernel && !store.helperState.isRunning
+                     ? "Kernel threads are only readable as root. Install the helper (Settings ▸ Helper) to read them."
+                     : store.helperState.isRunning
                      ? "The threads of \(proc.name) couldn't be read."
                      : "The threads of a process owned by \(proc.user) aren't readable. Install the helper (Settings ▸ Helper) to read them.")
                     .foregroundStyle(.secondary).multilineTextAlignment(.center)
