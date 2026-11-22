@@ -99,7 +99,7 @@ final class AXNode: NSObject {
 
     /// The element's frame in global coordinates (top-left origin), when it has a position and size.
     var frame: CGRect? {
-        func value<T>(_ attr: String, _ type: AXValueType, _ empty: T) -> T? {
+        func value<T: BitwiseCopyable>(_ attr: String, _ type: AXValueType, _ empty: T) -> T? {
             var v: CFTypeRef?
             guard AXUIElementCopyAttributeValue(element, attr as CFString, &v) == .success, let v,
                   CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
