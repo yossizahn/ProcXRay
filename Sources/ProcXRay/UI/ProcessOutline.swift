@@ -455,6 +455,16 @@ struct ProcessOutline: NSViewRepresentable {
             let anchor = topRow >= 0 ? outline.item(atRow: topRow) as? Item : nil
             let anchorOffset = anchor == nil ? 0 : outline.rect(ofRow: topRow).minY - outline.visibleRect.minY
 
+            // Most refreshes change figures, not rows: when every row is where it was, there is nothing to tell the
+            // outline, and an update transaction with nothing in it still made AppKit tear down and rebuild the
+            // header's views (60 % of this function, measured).
+            func unchanged(_ shown: [Item], _ target: [Item]) -> Bool {
+                guard shown.count == target.count else { return false }
+                for (a, b) in zip(shown, target) where a !== b || !unchanged(a.shown, b.children) { return false }
+                return true
+            }
+            if unchanged(shownRoots, roots) { showValues(outline); return }
+
             var inserted: [Item] = []
             NSAnimationContext.beginGrouping()
             NSAnimationContext.current.duration = 0
@@ -515,7 +525,11 @@ struct ProcessOutline: NSViewRepresentable {
                 }
             }
 
-            // Values: update the visible cells in place.
+            showValues(outline)
+        }
+
+        /// Values: updates the visible cells in place.
+        private func showValues(_ outline: NSOutlineView) {
             let visible = outline.rows(in: outline.visibleRect)
             guard visible.length > 0 else { return }
             for row in visible.location..<visible.location + visible.length {
