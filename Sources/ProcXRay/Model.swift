@@ -445,6 +445,8 @@ final class Store {
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var refreshing = false
     @ObservationIgnored private var signing = false
+    /// Signatures by the code's hash (cdhash), so a program is inspected once however many processes run it.
+    @ObservationIgnored private var signByHash: [String: SignInfo] = [:]
     /// Signature lookups set aside because the code read wasn't the code running, by codeKey (fillSignatures).
     @ObservationIgnored private var signSkips: [String: Int] = [:]
     /// The same for command lines (fillCommandLines).
@@ -802,7 +804,14 @@ final class Store {
     /// Code-signing lookups are the slow part; do the missing ones in the background and merge.
     private func fillSignatures() {
         guard !signing else { return }
-        let missing = procs.values.filter { signCache[$0.codeKey] == nil }.map { ($0.codeKey, $0.pid, $0.path, $0.cdhash) }
+        // The same code (cdhash) has the same signature whichever process runs it: a tool started over and over
+        // (launchctl, mdworker, a shell's commands) is inspected once, not once per process.
+        var known: [String: SignInfo] = [:]
+        var missing: [(String, pid_t, String?, String?)] = []
+        for p in procs.values where signCache[p.codeKey] == nil {
+            if let h = p.cdhash, let s = signByHash[h] { known[p.codeKey] = s } else { missing.append((p.codeKey, p.pid, p.path, p.cdhash)) }
+        }
+        if !known.isEmpty { signCache.merge(known) { a, _ in a } }
         guard !missing.isEmpty else { return }
         signing = true
         let skipped = signSkips
@@ -827,6 +836,9 @@ final class Store {
             await MainActor.run {
                 let perfM = PerfStages.begin(); defer { PerfStages.end(.fillMerge, perfM) }
                 self.signSkips = newSkips
+                if self.signByHash.count > 4000 { self.signByHash.removeAll(keepingCapacity: true) }
+                // Only what was read from the running code itself: a file on disk answers for that path alone.
+                for (_, info) in found where info.error == nil { if let h = info.cdHash { self.signByHash[h] = info } }
                 let live = Set(self.procs.values.map(\.codeKey))
                 // Assigned once, and only when something changes: every assignment redraws what shows a signature.
                 var cache = self.signCache
