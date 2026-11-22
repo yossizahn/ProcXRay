@@ -330,6 +330,9 @@ struct SyscallTraceView: View {
                 if let r = selectedStackRecord { Divider(); stackPane(r) }
             }
         }
+        // Filled and pinned to the top: an empty Activity view (as the trace starts) doesn't fill the height,
+        // and the pane would otherwise sit centered until the first calls arrive.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task(id: key) {
             var lastRevision = -1
             repeat {
@@ -346,20 +349,32 @@ struct SyscallTraceView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            if tracer.isActive {
-                Button { tracer.stop() } label: { Label("Stop", systemImage: "stop.fill") }
-                    .disabled(tracer.phase == .stopping)
-            } else {
-                Button { tracer.start(pid: target.pid, start: target.start, stacks: stacks) } label: {
-                    Label(tracer.phase == .idle ? "Trace" : "Trace again", systemImage: "record.circle")
+            // The controls left of the status keep their width as the trace starts and stops, so nothing after
+            // them shifts: the button sits in a slot sized to its widest label, Stacks stays (disabled while
+            // tracing, as it applies at the start), and the spinner's place is kept when it's not shown.
+            ZStack(alignment: .leading) {
+                Button {} label: { Label("Trace again", systemImage: "record.circle") }
+                    .hidden().accessibilityHidden(true)
+                if tracer.isActive {
+                    Button { tracer.stop() } label: { Label("Stop", systemImage: "stop.fill") }
+                        .disabled(tracer.phase == .stopping)
+                } else {
+                    Button { tracer.start(pid: target.pid, start: target.start, stacks: stacks) } label: {
+                        Label(tracer.phase == .idle ? "Trace" : "Trace again", systemImage: "record.circle")
+                    }
+                    .disabled(disabledReason != nil)
+                    .help(disabledReason ?? "Trace this process's BSD syscalls and Mach traps (kdebug, as root via the helper)")
                 }
-                .disabled(disabledReason != nil)
-                .help(disabledReason ?? "Trace this process's BSD syscalls and Mach traps (kdebug, as root via the helper)")
-                Toggle("Stacks", isOn: $stacks).toggleStyle(.checkbox).font(.caption)
-                    .help("Record the user stack of every call (kperf), to see which code made it. The traced process runs up to a third slower.")
             }
-            if tracer.phase == .starting || tracer.phase == .stopping { ProgressView().controlSize(.small) }
+            .fixedSize()   // in a narrow window only the status gives way, not these
+            Toggle("Stacks", isOn: $stacks).toggleStyle(.checkbox).font(.caption).fixedSize()
+                .disabled(tracer.isActive)
+                .help("Record the user stack of every call (kperf), to see which code made it. The traced process runs up to a third slower.")
+            ProgressView().controlSize(.small)
+                .opacity(tracer.phase == .starting || tracer.phase == .stopping ? 1 : 0)
+            // First to give way when the window is narrow, so no control wraps and the header keeps its height.
             Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationHelp(status)
+                .layoutPriority(-1)
             Spacer()
             Picker("", selection: $mode) {
                 Text("Activity").tag("Activity")
@@ -368,10 +383,10 @@ struct SyscallTraceView: View {
             }
             .pickerStyle(.segmented).labelsHidden().fixedSize()
             if mode == "Calls" {
-                Toggle("Names", isOn: $argNames).toggleStyle(.checkbox).font(.caption)
+                Toggle("Names", isOn: $argNames).toggleStyle(.checkbox).font(.caption).fixedSize()
                 .help("Show argument names (as xnu declares them) with the values")
             }
-            Toggle("Errors only", isOn: $errorsOnly).toggleStyle(.checkbox).font(.caption)
+            Toggle("Errors only", isOn: $errorsOnly).toggleStyle(.checkbox).font(.caption).fixedSize()
             TextField("filter", text: $filter).textFieldStyle(.roundedBorder).frame(width: 160)
             Menu {
                 Button("Copy All") { Pasteboard.copy(exportText()) }
