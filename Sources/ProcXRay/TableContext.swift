@@ -201,12 +201,12 @@ enum TreeBuilder {
         var memo: [[pid_t: CellValue]] = []
 
         /// Returns the processes under `nodes`, for the parent's group values.
-        mutating func sort(_ nodes: inout [ProcNode]) -> [ProcInfo] {
-            var allMembers: [ProcInfo] = []
+        mutating func sort(_ nodes: inout [ProcNode]) -> [ProcBox] {
+            var allMembers: [ProcBox] = []
             for i in nodes.indices {
-                var members: [ProcInfo] = []
+                var members: [ProcBox] = []
                 if nodes[i].children != nil { members = sort(&nodes[i].children!) }
-                let proc = nodes[i].proc
+                let proc = nodes[i].box
                 if let p = proc { members.append(p) }
                 allMembers += members
                 if proc == nil {
@@ -229,15 +229,15 @@ enum TreeBuilder {
                 if sort.id == "name" {
                     nodes[i].sortValue = .text(nodes[i].title)
                 } else if let col = sortColumn {
-                    let v = proc.map { col.sortValue($0, ctx) } ?? nodes[i].groupValues[col.id]
+                    let v = proc.map { col.sortValue($0.info, ctx) } ?? nodes[i].groupValues[col.id]
                         ?? col.groupValue(nodes[i], members: members, store: ctx) { col.value($0, ctx) }
                     nodes[i].sortValue = v
                 }
                 let kids = nodes[i].children ?? []
                 if let p = proc {
-                    nodes[i].cpuKey = p.cpuPercent ?? 0
-                    nodes[i].memKey = p.footprint ?? 0
-                    nodes[i].diskKey = ProcNode.disk(p)
+                    nodes[i].cpuKey = p.info.cpuPercent ?? 0
+                    nodes[i].memKey = p.info.footprint ?? 0
+                    nodes[i].diskKey = ProcNode.disk(p.info)
                 } else {
                     nodes[i].cpuKey = kids.reduce(0) { $0 + $1.cpuKey }
                     nodes[i].memKey = kids.reduce(0) { $0 + $1.memKey }

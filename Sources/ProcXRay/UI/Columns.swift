@@ -170,14 +170,16 @@ struct Column: Identifiable {
 
     /// A group row's value. `value` gives a member's value (Store.sorted passes a memo, since one process
     /// is a member of every group row above it).
-    func groupValue(_ n: ProcNode, members: [ProcInfo], store: TableContext, value: (ProcInfo) -> CellValue) -> CellValue {
+    /// `members` are boxes: a process is a member of every group row above it, and gathering copies of the
+    /// processes themselves for each row was a tenth of a tree build.
+    func groupValue(_ n: ProcNode, members: [ProcBox], store: TableContext, value: (ProcInfo) -> CellValue) -> CellValue {
         if unitShowsRoot, n.kind == .unit, let r = n.rootPid.flatMap({ store.procs[$0] }) { return value(r).dimmed }
         switch rule {
         case .blank: return .empty
         case .sum, .approximateSum:
             var total = 0.0, count = 0
             for m in members {
-                if let v = amount.map({ $0(m) }) ?? value(m).number { total += v; count += 1 }
+                if let v = amount.map({ $0(m.info) }) ?? value(m.info).number { total += v; count += 1 }
             }
             guard count > 0 else { return members.isEmpty ? .empty : .unknown }
             if case .approximateSum = rule, count > 1 { return .number(total, "~" + format(total)) }
@@ -186,7 +188,7 @@ struct Column: Identifiable {
             var seen: [String: (value: CellValue, count: Int)] = [:]
             var missing = false
             for m in members {
-                let v = value(m)
+                let v = value(m.info)
                 if v.hasValue { seen[v.display, default: (v, 0)].count += 1 } else { missing = true }
             }
             guard !seen.isEmpty else { return .empty }
@@ -202,9 +204,9 @@ struct Column: Identifiable {
             var lo = Double.infinity, hi = -Double.infinity
             var shown: (lo: String, hi: String) = ("", "")
             for m in members {
-                guard let v = value(m).number, v.isFinite else { continue }
-                if v < lo { lo = v; shown.lo = value(m).display }
-                if v > hi { hi = v; shown.hi = value(m).display }
+                guard let v = value(m.info).number, v.isFinite else { continue }
+                if v < lo { lo = v; shown.lo = value(m.info).display }
+                if v > hi { hi = v; shown.hi = value(m.info).display }
             }
             guard lo <= hi else { return members.isEmpty ? .empty : .unknown }
             return lo == hi ? .number(lo, shown.lo) : .number(lo, "\(shown.lo)–\(shown.hi)", .secondary)
@@ -212,12 +214,12 @@ struct Column: Identifiable {
             let newest = n.kind == .category
             var best: CellValue = .empty
             for m in members {
-                let v = value(m)
+                let v = value(m.info)
                 if let d = v.date, best.date.map({ newest ? d > $0 : d < $0 }) ?? true { best = v }
             }
             return best
         case .custom(let f):
-            return f(members, store)
+            return f(members.map(\.info), store)
         }
     }
 

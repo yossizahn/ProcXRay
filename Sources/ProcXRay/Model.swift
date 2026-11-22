@@ -231,6 +231,14 @@ enum Grouping: String, CaseIterable, Identifiable, Codable {
 }
 
 /// A row in the process table: a real process, or a synthetic group (dead responsible app / coalition).
+/// A process as a tree row holds it: by reference. A ProcInfo is some 1.5 KB of fields, dozens of them strings,
+/// and a tree build moves its rows many times (grouping, pruning, sorting, handing the tree to the outline):
+/// each move copied all of that and retained every string. Never changed once made.
+final class ProcBox: Sendable {
+    let info: ProcInfo
+    init(_ info: ProcInfo) { self.info = info }
+}
+
 struct ProcNode: Identifiable, Sendable {
     enum Kind: UInt8, Sendable {
         case process
@@ -241,7 +249,12 @@ struct ProcNode: Identifiable, Sendable {
     }
 
     var id: Int
-    var proc: ProcInfo?
+    /// The row's process, nil for a group row. Held in a ProcBox, so a row is cheap to copy.
+    var proc: ProcInfo? {
+        get { box?.info }
+        set { box = newValue.map(ProcBox.init) }
+    }
+    private(set) var box: ProcBox?
     var title: String
     var subtitle: String = ""
     var isGhost = false
@@ -276,6 +289,24 @@ struct ProcNode: Identifiable, Sendable {
     /// -1 when neither counter could be read (anywhere in the subtree, for group rows), so unknown
     /// sorts apart from (and below) a real zero.
     var diskKey: Int64 = -1
+
+    init(id: Int, proc: ProcInfo?, title: String, subtitle: String = "", isGhost: Bool = false, children: [ProcNode]? = nil,
+         kind: Kind = .process, category: ProcCategory? = nil, rootPid: pid_t? = nil, fixedOrder: Int? = nil,
+         extensionPointShownAbove: Bool = false, startsCollapsed: Bool = false) {
+        self.id = id
+        box = proc.map(ProcBox.init)
+        self.title = title
+        self.subtitle = subtitle
+        self.isGhost = isGhost
+        self.children = children
+        self.kind = kind
+        self.category = category
+        self.rootPid = rootPid
+        self.fixedOrder = fixedOrder
+        self.extensionPointShownAbove = extensionPointShownAbove
+        self.startsCollapsed = startsCollapsed
+    }
+
     static func disk(_ p: ProcInfo) -> Int64 {
         guard p.diskRead != nil || p.diskWrite != nil else { return -1 }
         return Int64(clamping: (p.diskRead ?? 0) &+ (p.diskWrite ?? 0))
@@ -1373,12 +1404,54 @@ enum Fmt {
     static func bytes(_ v: UInt64?) -> String {
         guard let v else { return "—" }
         if v == 0 { return "0" }
-        return byteFormatter.string(fromByteCount: Int64(clamping: v))
+        return plainBytes ? bytesText(v) : systemBytes(v)
     }
-    /// One formatter: the class method sets one up per call (a quarter slower).
+
+    /// ByteCountFormatter's text (memory style: "1,023 bytes", "12 KB", "5.1 MB", "10.05 GB").
+    static func systemBytes(_ v: UInt64) -> String { byteFormatter.string(fromByteCount: Int64(clamping: v)) }
     nonisolated(unsafe) private static let byteFormatter: ByteCountFormatter = {
         let f = ByteCountFormatter(); f.countStyle = .memory; return f
     }()
+
+    /// The same text worked out here. ByteCountFormatter looks its unit up in a bundle on every call, which made
+    /// it a twelfth of a table rebuild (it formats every group row's sums); the tests hold this to its output.
+    /// Only where numbers are written the English way: elsewhere the system's formatter decides.
+    static func bytesText(_ v: UInt64) -> String {
+        if v < 1024 { return v == 1 ? "1 byte" : grouped(v) + " bytes" }
+        // Whole KB, one decimal of MB, two from GB up; a value that rounds to 1,024 moves to the next unit.
+        var x = Double(v) / 1024
+        var unit = 0
+        while true {
+            let scale: Double = unit == 0 ? 1 : unit == 1 ? 10 : 100
+            let r = (x * scale).rounded()
+            if r >= 1024 * scale, unit < byteUnits.count - 1 { x /= 1024; unit += 1; continue }
+            let whole = UInt64(r / scale), frac = Int(r - Double(whole) * scale)
+            var s = grouped(whole)
+            if frac > 0 {
+                // Trailing zeros dropped: 1.50 → 1.5.
+                s += unit == 1 ? ".\(frac)" : frac % 10 == 0 ? ".\(frac / 10)" : frac < 10 ? ".0\(frac)" : ".\(frac)"
+            }
+            return s + byteUnits[unit]
+        }
+    }
+    private static let byteUnits = [" KB", " MB", " GB", " TB", " PB", " EB"]
+    private static let plainBytes: Bool = {
+        let l = Locale.current
+        return l.language.languageCode?.identifier == "en" && l.decimalSeparator == "." && l.groupingSeparator == ","
+    }()
+    /// 1234567 → "1,234,567".
+    private static func grouped(_ v: UInt64) -> String {
+        if v < 1000 { return String(v) }
+        var digits = Array(String(v)), out: [Character] = []
+        out.reserveCapacity(digits.count + digits.count / 3)
+        let lead = digits.count % 3
+        for (i, c) in digits.enumerated() {
+            if i > 0, (i - lead) % 3 == 0 { out.append(",") }
+            out.append(c)
+        }
+        digits.removeAll()
+        return String(out)
+    }
     /// A count with thousands separators, or "—".
     static func count<T: BinaryInteger>(_ v: T?) -> String {
         guard let v else { return "—" }
