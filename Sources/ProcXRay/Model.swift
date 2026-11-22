@@ -614,6 +614,7 @@ final class Store {
         timer = nil
         probeTimer?.invalidate()
         probeTimer = nil
+        defer { NetPace.window = timer == nil ? nil : interval }
         guard onScreen else { return }
         // Its own timer, which Pause doesn't stop: a frozen table must not hide that the helper went away.
         let pt = Timer(timeInterval: 10, repeats: true) { [weak self] _ in

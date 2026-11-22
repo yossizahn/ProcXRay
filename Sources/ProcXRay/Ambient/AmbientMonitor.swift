@@ -272,6 +272,7 @@ final class AmbientMonitor {
     @ObservationIgnored private var viewers = 0
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var busy = false
+    @ObservationIgnored private var tickCount = 0
     @ObservationIgnored private var tuningObserver: NSObjectProtocol?
     @ObservationIgnored private var tracker = Tracker()
 
@@ -289,6 +290,7 @@ final class AmbientMonitor {
             }
         }
         let interval = Tuning.menuBarIntervalNow
+        defer { NetPace.update() }
         if want, let t = timer, t.timeInterval == interval { return }
         timer?.invalidate()
         timer = nil
@@ -306,11 +308,16 @@ final class AmbientMonitor {
     func tick() {
         guard !busy else { return }
         busy = true
+        // While nothing shows the processes, only every Nth reading reads them.
+        tickCount &+= 1
+        let light = !popover.live && viewers == 0 && tracker.lastOutput != nil && tickCount % Tuning.menuBarProcessEvery != 0
         var apps: [pid_t: AppInfo] = [:]
-        for a in NSWorkspace.shared.runningApplications where a.activationPolicy != .prohibited {
-            apps[a.processIdentifier] = AppInfo(name: a.localizedName, regular: a.activationPolicy == .regular)
+        if !light {
+            for a in NSWorkspace.shared.runningApplications where a.activationPolicy != .prohibited {
+                apps[a.processIdentifier] = AppInfo(name: a.localizedName, regular: a.activationPolicy == .regular)
+            }
         }
-        let input = Input(apps: apps, helper: helperRunning, settings: .current)
+        let input = Input(apps: apps, helper: helperRunning, settings: .current, light: light)
         var tr = tracker
         Task.detached(priority: .utility) {
             let t0 = DispatchTime.now().uptimeNanoseconds
@@ -326,6 +333,11 @@ final class AmbientMonitor {
                 self.system = out.system
                 self.systemHistory = done.systemHistory
                 self.ioHistory = done.ioHistory
+                if light {
+                    // Nothing else changed.
+                    if self.conditions != out.conditions { self.conditions = out.conditions }
+                    return
+                }
                 self.procs = out.procs
                 self.procHistory = done.history
                 self.top = out.top
@@ -395,6 +407,8 @@ final class AmbientMonitor {
         var apps: [pid_t: AppInfo]
         var helper: Bool
         var settings: Settings
+        /// The system's totals only (sampleSystem).
+        var light = false
     }
 
     struct Output: Sendable {
@@ -429,6 +443,8 @@ final class AmbientMonitor {
     struct Counts: Sendable { var at: UInt64; var cpu: UInt64; var disk: UInt64 }
 
     struct Tracker: Sendable {
+        /// The last full reading, which a light one (sampleSystem) hands on.
+        var lastOutput: Output?
         /// When the helper reading last used was read (HelperClient.recentMetrics).
         var helperAt: UInt64 = 0
         /// The processes the last reading couldn't read without the helper, and when it was made (HelperAsk).
@@ -456,7 +472,65 @@ final class AmbientMonitor {
         var ticks = 0
     }
 
+    /// Works out the system's rates since the last reading and adds them to the histories the menu bar graphs draw.
+    nonisolated private static func recordSystem(_ tr: inout Tracker, _ sys: SystemStats) -> SystemStats.Rates {
+        var sysRates = SystemStats.Rates(gpuPercent: sys.gpuPercent, gpu: sys.gpu, memory: sys.memory, thermal: sys.thermal)
+        if let last = tr.lastSystem { sysRates = sys.rates(since: last) }
+        tr.lastSystem = sys
+        if tr.ticks > 0 {
+            func push(_ m: AmbientMetric, _ v: Double?) {
+                guard let v else { return }
+                var h = tr.systemHistory[m] ?? []
+                h.append(v)
+                if h.count > historyLength { h.removeFirst(h.count - historyLength) }
+                tr.systemHistory[m] = h
+            }
+            push(.cpu, sysRates.cpuPercent); push(.gpu, sysRates.gpuPercent)
+            push(.memory, sysRates.memory.map { $0.usedFraction * 100 })
+            push(.disk, sysRates.disk); push(.network, sysRates.net)
+            func push(_ k: IOSeries, _ v: Double?) {
+                guard let v else { return }
+                var h = tr.ioHistory[k] ?? []
+                h.append(v)
+                if h.count > historyLength { h.removeFirst(h.count - historyLength) }
+                tr.ioHistory[k] = h
+            }
+            push(.diskRead, sysRates.diskRead); push(.diskWrite, sysRates.diskWrite)
+            push(.netIn, sysRates.netIn); push(.netOut, sysRates.netOut)
+        }
+        return sysRates
+    }
+
+    /// Thermal and memory pressure: shown from the first reading at that level until it drops back.
+    nonisolated private static func systemConditions(_ tr: inout Tracker, _ sysRates: SystemStats.Rates, _ s: Settings, _ date: Date) -> [SystemCondition] {
+        var conditions: [SystemCondition] = []
+        for kind in [SystemCondition.Kind.thermal, .memory] {
+            guard s.alertsOn, s.system, let level = SystemCondition.level(kind, in: sysRates) else { tr.conditions[kind] = nil; continue }
+            var c = tr.conditions[kind] ?? SystemCondition(kind: kind, level: level, peak: level, since: date)
+            c.level = level
+            c.peak = max(c.peak, level)
+            tr.conditions[kind] = c
+            conditions.append(c)
+        }
+        return conditions
+    }
+
+    /// A light reading: the system's totals only, for the menu bar's widgets and the pressure conditions. The
+    /// processes, groups and alerts stay as the last full reading left them (`last`). A full reading costs ~11 ms
+    /// of CPU for ~1,100 processes and this one a fraction of that, so while nothing shows the per-process
+    /// figures (the popover is closed, Triage isn't open) only every Nth reading is a full one
+    /// (Tuning.menuBarProcessEvery).
+    nonisolated static func sampleSystem(_ tr: inout Tracker, _ input: Input, _ last: Output) -> Output {
+        let sys = SystemStats.read()
+        let sysRates = recordSystem(&tr, sys)
+        var out = last
+        out.system = sysRates
+        out.conditions = systemConditions(&tr, sysRates, input.settings, Date())
+        return out
+    }
+
     nonisolated static func sample(_ tr: inout Tracker, _ input: Input) -> Output? {
+        if input.light, let last = tr.lastOutput { return sampleSystem(&tr, input, last) }
         guard case .success(let list) = Native.listProcesses() else { return nil }
         // The process list's reading when it refreshed lately (the helper's answer costs ~40 ms of its CPU); counts
         // from it are dated when it was read, so rates stay right.
@@ -550,30 +624,7 @@ final class AmbientMonitor {
         let groups = AmbientGroups.group(&procs)
 
         // System totals and their history.
-        var sysRates = SystemStats.Rates(gpuPercent: sys.gpuPercent, gpu: sys.gpu, memory: sys.memory, thermal: sys.thermal)
-        if let last = tr.lastSystem { sysRates = sys.rates(since: last) }
-        tr.lastSystem = sys
-        if tr.ticks > 0 {
-            func push(_ m: AmbientMetric, _ v: Double?) {
-                guard let v else { return }
-                var h = tr.systemHistory[m] ?? []
-                h.append(v)
-                if h.count > historyLength { h.removeFirst(h.count - historyLength) }
-                tr.systemHistory[m] = h
-            }
-            push(.cpu, sysRates.cpuPercent); push(.gpu, sysRates.gpuPercent)
-            push(.memory, sysRates.memory.map { $0.usedFraction * 100 })
-            push(.disk, sysRates.disk); push(.network, sysRates.net)
-            func push(_ k: IOSeries, _ v: Double?) {
-                guard let v else { return }
-                var h = tr.ioHistory[k] ?? []
-                h.append(v)
-                if h.count > historyLength { h.removeFirst(h.count - historyLength) }
-                tr.ioHistory[k] = h
-            }
-            push(.diskRead, sysRates.diskRead); push(.diskWrite, sysRates.diskWrite)
-            push(.netIn, sysRates.netIn); push(.netOut, sysRates.netOut)
-        }
+        let sysRates = recordSystem(&tr, sys)
 
         // Top consumers per metric.
         var top: [AmbientMetric: [AmbientProc]] = [:]
@@ -654,16 +705,7 @@ final class AmbientMonitor {
         tr.cleared = Array(tr.cleared.filter { ($0.until ?? date) > horizon }.prefix(50))
         live.sort { ($0.kind == .notResponding ? 0 : 1, $0.since) < ($1.kind == .notResponding ? 0 : 1, $1.since) }
 
-        // Thermal and memory pressure: shown from the first reading at that level until it drops back.
-        var conditions: [SystemCondition] = []
-        for kind in [SystemCondition.Kind.thermal, .memory] {
-            guard s.alertsOn, s.system, let level = SystemCondition.level(kind, in: sysRates) else { tr.conditions[kind] = nil; continue }
-            var c = tr.conditions[kind] ?? SystemCondition(kind: kind, level: level, peak: level, since: date)
-            c.level = level
-            c.peak = max(c.peak, level)
-            tr.conditions[kind] = c
-            conditions.append(c)
-        }
+        let conditions = systemConditions(&tr, sysRates, s, date)
 
         tr.samples = samples
         tr.stable = stable
@@ -685,7 +727,9 @@ final class AmbientMonitor {
         }
         tr.groupHistory = ghist
         tr.ticks += 1
-        return Output(system: sysRates, procs: procs, top: top, groups: groups, topGroups: topGroups, alerts: live, conditions: conditions)
+        let out = Output(system: sysRates, procs: procs, top: top, groups: groups, topGroups: topGroups, alerts: live, conditions: conditions)
+        tr.lastOutput = out
+        return out
     }
 }
 
@@ -862,7 +906,13 @@ final class AmbientShown {
 
     /// Whether the popover is on screen. Turning it on catches up with the monitor at once.
     @ObservationIgnored var live = false {
-        didSet { if live, !oldValue { copy(from: AmbientMonitor.shared) } }
+        didSet {
+            if live != oldValue { NetPace.update() }
+            guard live, !oldValue else { return }
+            copy(from: AmbientMonitor.shared)
+            // The processes may be a few readings old (light readings while it was closed): read them now.
+            AmbientMonitor.shared.tick()
+        }
     }
 
     /// The popover's window, once it has one.

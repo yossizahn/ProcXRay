@@ -131,8 +131,8 @@ final class HelperClient: @unchecked Sendable {
     }
 
     /// The helper's network reading (HelperProtocol.netRates); nil when it didn't answer or can't read.
-    func netRates(timeout: Double = 3) -> NetRatesReply? {
-        guard let data = call({ p, done in p.netRates { done($0) } }, timeout: timeout) as Data? else { return nil }
+    func netRates(every: Double, timeout: Double = 3) -> NetRatesReply? {
+        guard let data = call({ p, done in p.netRates(every: every) { done($0) } }, timeout: timeout) as Data? else { return nil }
         return try? JSONDecoder().decode(NetRatesReply.self, from: data)
     }
 

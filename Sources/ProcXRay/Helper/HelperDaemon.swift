@@ -214,6 +214,11 @@ enum HelperDaemon {
             reply(HelperNetStats.reply().flatMap { try? JSONEncoder().encode($0) } ?? Data())
         }
 
+        func netRates(every: Double, reply: @escaping (Data) -> Void) {
+            HelperNetStats.setInterval(min(60, max(2, every)))
+            netRates(reply: reply)
+        }
+
         /// No admin check: TCP's totals and the kernel zones' sizes are system-wide figures with nothing of
         /// any user's in them, and the call takes no input.
         func systemCounters(reply: @escaping (Data) -> Void) {
@@ -379,6 +384,11 @@ enum HelperNetStats {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var reader: NativeNetStats?
     nonisolated(unsafe) private static var latest: NativeNetStats.Rates?
+
+    static func setInterval(_ seconds: Double) {
+        lock.lock(); defer { lock.unlock() }
+        reader?.setInterval(seconds)
+    }
 
     /// nil when the framework can't be read.
     static func reply() -> NetRatesReply? {

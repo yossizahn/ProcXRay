@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 25  // 25: metrics (asked-for processes only), 24: taskDetail, PrivMetrics.suspendCount, 23: PrivMetrics.asid, 22: launch, launched, 21: traceThreads (names), dyld, trace-string and MIG events, 20: traceThreadOwners, scheduler events in the trace, 19: machPortKinds, 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
+    static let protocolVersion = 25  // 25: metrics (asked-for processes only), netRates(every:), 24: taskDetail, PrivMetrics.suspendCount, 23: PrivMetrics.asid, 22: launch, launched, 21: traceThreads (names), dyld, trace-string and MIG events, 20: traceThreadOwners, scheduler events in the trace, 19: machPortKinds, 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
 }
 
 /// Read-only surface, but for `launch`: no other call accepts a path, a command or free-form arguments. `launch`
@@ -109,6 +109,9 @@ enum HelperConfig {
     /// started by the first call and kept for the helper's life. As root it sees every user's sockets and the
     /// user-space (Network.framework) flows, which the kernel keeps from an unprivileged reader. JSON NetRatesReply.
     func netRates(reply: @escaping (Data) -> Void)
+    /// netRates, and from now on the helper's reader reads every `every` seconds (the pace of whoever shows the
+    /// figures: NetSampler.setPace).
+    func netRates(every: Double, reply: @escaping (Data) -> Void)
 
     /// System counters only root reads: the allowlisted sysctls (HelperCounters.sysctlAllowlist, fixed names) and
     /// the kernel's zones. Takes no input. JSON HelperCounters.

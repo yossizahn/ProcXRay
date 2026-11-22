@@ -183,18 +183,31 @@ final class NetSampler: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard on, poll == nil else { return }
         startLocal()
-        // Asks the helper every 2 s, as often as its reader reads; one source, so ticks never overlap.
+        // Asks the helper as often as its reader reads; one source, so ticks never overlap.
         let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-        t.schedule(deadline: .now(), repeating: 2, leeway: .milliseconds(400))
+        t.schedule(deadline: .now(), repeating: pace, leeway: .milliseconds(Int(pace * 200)))
         t.setEventHandler { [weak self] in self?.pollHelper() }
         t.resume()
         poll = t
     }
 
+    /// Seconds between readings, here and in the helper: the pace of whoever shows the figures (NetPace). It was
+    /// a fixed 2 s from launch to quit, which was two wake-ups a second and most of the helper's CPU time while
+    /// only the menu bar item was up.
+    private var pace: Double = 2
+    func setPace(_ seconds: Double) {
+        let s = min(60, max(2, seconds))
+        lock.lock(); defer { lock.unlock() }
+        guard s != pace else { return }
+        pace = s
+        poll?.schedule(deadline: .now() + s, repeating: s, leeway: .milliseconds(Int(s * 200)))
+        native?.setInterval(s)
+    }
+
     /// The app's own reader, while the helper's readings aren't in use. Under `lock`.
     private func startLocal() {
         guard native == nil else { return }
-        native = NativeNetStats { [weak self] r in
+        native = NativeNetStats(interval: pace) { [weak self] r in
             guard let self else { return }
             self.lock.lock(); defer { self.lock.unlock() }
             guard self.helperSince == nil else { return }
@@ -203,8 +216,8 @@ final class NetSampler: @unchecked Sendable {
     }
 
     private func pollHelper() {
-        lock.lock(); let up = helperUp; lock.unlock()
-        let reply = up ? HelperClient.shared.netRates() : nil
+        lock.lock(); let up = helperUp, every = pace; lock.unlock()
+        let reply = up ? HelperClient.shared.netRates(every: every) : nil
         lock.lock(); defer { lock.unlock() }
         if let reply, let entries = reply.rates {
             rates = Dictionary(entries.map { ($0.pid, Rate(inPerSec: $0.inPerSec, outPerSec: $0.outPerSec, inTotal: $0.inTotal, outTotal: $0.outTotal)) },

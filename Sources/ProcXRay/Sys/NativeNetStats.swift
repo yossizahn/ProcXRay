@@ -83,6 +83,7 @@ final class NativeNetStats: @unchecked Sendable {
             _ = api.addUDP(m, 0, 0)
             let t = DispatchSource.makeTimerSource(queue: q)
             t.schedule(deadline: .now(), repeating: interval, leeway: .milliseconds(Int(interval * 200)))
+            self.interval = interval
             t.setEventHandler { [weak self] in self?.tick() }
             t.resume()
             timer = t
@@ -90,6 +91,17 @@ final class NativeNetStats: @unchecked Sendable {
         }
         if !ok { return nil }
     }
+
+    /// Reads every `seconds` from now on. Nothing is lost at a slower pace: counts are cumulative, and a socket
+    /// that closes reports its last ones.
+    func setInterval(_ seconds: Double) {
+        q.async { [self] in
+            guard let t = timer, seconds != interval else { return }
+            interval = seconds
+            t.schedule(deadline: .now() + seconds, repeating: seconds, leeway: .milliseconds(Int(seconds * 200)))
+        }
+    }
+    private var interval: Double = 2
 
     func stop() {
         q.async { [self] in

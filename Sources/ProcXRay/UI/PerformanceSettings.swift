@@ -73,6 +73,7 @@ struct PerformanceSettings: View {
     @AppStorage(Tuning.pidDomains) private var pidDomains = true
     @AppStorage(Tuning.historyMinutes) private var historyMinutes = 4.0
     @AppStorage(Tuning.idleEvery) private var idleEvery = 2.0
+    @AppStorage(Tuning.menuBarProcesses) private var menuBarProcesses = 2.0
 
     /// Recomputed with the body: any of the values above changing redraws it.
     private var preset: Tuning.Preset { Tuning.preset }
@@ -94,6 +95,12 @@ struct PerformanceSettings: View {
                 Picker("Menu bar and alerts", selection: $menuBarInterval) {
                     ForEach([1.0, 2, 3, 5, 10], id: \.self) { Text("every \(Int($0)) s").tag($0) }
                 }
+                Picker("Menu bar, popover closed: processes", selection: $menuBarProcesses) {
+                    Text("every reading").tag(1.0)
+                    Text("every 2nd reading").tag(2.0)
+                    Text("every 4th reading").tag(4.0)
+                }
+                Hint("The widgets' totals are read every time. The processes behind the alerts and the popover's list are read this often while the popover is closed, and at once when it opens.")
                 Picker("While another app is in front", selection: $inactive) {
                     ForEach(Tuning.Inactive.allCases) { Text($0.title).tag($0) }
                 }
@@ -125,7 +132,7 @@ struct PerformanceSettings: View {
         // Taller than a small screen otherwise: the form scrolls.
         .frame(height: 600)
         .formStyle(.grouped)
-        .onChange(of: [windowInterval, menuBarInterval, registryEvery, historyMinutes, idleEvery]) { _, _ in Tuning.changed() }
+        .onChange(of: [windowInterval, menuBarInterval, registryEvery, historyMinutes, idleEvery, menuBarProcesses]) { _, _ in Tuning.changed() }
         .onChange(of: inactive) { _, _ in Tuning.changed() }
         .onChange(of: savePower) { _, _ in Tuning.changed() }
         .onChange(of: signatures) { _, _ in Tuning.changed() }

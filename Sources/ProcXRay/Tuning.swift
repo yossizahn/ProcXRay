@@ -21,6 +21,7 @@ enum Tuning {
     static let pidDomains = "perf.pidDomains"                // read launchd pid domains (one launchctl per process)
     static let historyMinutes = "perf.historyMinutes"        // graph history kept per process; 0: none
     static let idleEvery = "perf.idleEvery"                  // a process using no CPU is read every Nth refresh
+    static let menuBarProcesses = "perf.menuBarProcesses"    // popover closed: processes are read every Nth reading
 
     /// What the process window does while another app is in front.
     enum Inactive: String, CaseIterable, Identifiable, Sendable {
@@ -61,13 +62,13 @@ enum Tuning {
             switch self {
             case .efficient:
                 [windowInterval: 5.0, menuBarInterval: 5.0, inactive: Inactive.slow.rawValue, savePower: true,
-                 registryEvery: 60.0, signatures: true, pidDomains: false, historyMinutes: 2.0, idleEvery: 4.0]
+                 registryEvery: 60.0, signatures: true, pidDomains: false, historyMinutes: 2.0, idleEvery: 4.0, menuBarProcesses: 4.0]
             case .balanced:
                 [windowInterval: 2.0, menuBarInterval: 3.0, inactive: Inactive.half.rawValue, savePower: true,
-                 registryEvery: 10.0, signatures: true, pidDomains: true, historyMinutes: 4.0, idleEvery: 2.0]
+                 registryEvery: 10.0, signatures: true, pidDomains: true, historyMinutes: 4.0, idleEvery: 2.0, menuBarProcesses: 2.0]
             case .live:
                 [windowInterval: 1.0, menuBarInterval: 2.0, inactive: Inactive.same.rawValue, savePower: false,
-                 registryEvery: 5.0, signatures: true, pidDomains: true, historyMinutes: 10.0, idleEvery: 1.0]
+                 registryEvery: 5.0, signatures: true, pidDomains: true, historyMinutes: 10.0, idleEvery: 1.0, menuBarProcesses: 1.0]
             case .custom: nil
             }
         }
@@ -100,6 +101,9 @@ enum Tuning {
     static var inactiveMode: Inactive { Inactive(rawValue: d.string(forKey: inactive) ?? "") ?? .half }
     /// A process that used no CPU at its last reading is read again every this many refreshes (1: every one).
     static var idleReadEvery: Int { min(8, max(1, Int(d.double(forKey: idleEvery)))) }
+    /// While the popover is closed and Triage isn't showing, the menu bar monitor reads the processes on every
+    /// this many readings and only the system's totals on the others.
+    static var menuBarProcessEvery: Int { min(8, max(1, Int(d.double(forKey: menuBarProcesses)))) }
 
     /// Readings kept per process for the graphs, at the window's own interval. 0: none are kept.
     static var historyLength: Int {
@@ -137,6 +141,24 @@ enum Tuning {
     /// Posted when a value here or the power state changes: the samplers reschedule.
     static let didChange = Notification.Name("ProcXRay.tuningChanged")
     static func changed() { NotificationCenter.default.post(name: didChange, object: nil) }
+}
+
+/// How often per-process network traffic is read: as often as the fastest thing showing it. The process window
+/// while it refreshes, else the menu bar monitor's readings of the processes, else once a minute to keep the
+/// totals moving.
+@MainActor
+enum NetPace {
+    /// Seconds between the process window's refreshes while it refreshes, nil while it doesn't (Store.schedule).
+    static var window: Double? { didSet { update() } }
+
+    /// Call when what decides the pace changes: the window's refreshing, the monitor's interval, the popover.
+    static func update() {
+        let m = AmbientMonitor.shared
+        var pace = 60.0
+        if m.running { pace = min(pace, Tuning.menuBarIntervalNow * Double(m.popover.live ? 1 : Tuning.menuBarProcessEvery)) }
+        if let w = window, w > 0 { pace = min(pace, w) }
+        NetSampler.shared.setPace(pace)
+    }
 }
 
 /// Whether the Mac is on battery or in Low Power Mode, kept up to date by notifications (no polling).
