@@ -32,6 +32,30 @@ To turn SIP off in a fresh clone: `tart run --recovery <vm>`, open Terminal from
 - `ProcXRay --explore <pid> [depth]` walks an app's AppleScript objects (the Automation tab's explorer) without the UI. TCC charges Apple Events sent from an SSH session to `sshd-session`, not the app, so in the VM run it through `open -W -n --stdout /tmp/x --stderr /tmp/x "/Applications/Proc X-Ray Dev.app" --args --explore <pid>`, after inserting a `kTCCServiceAppleEvents` row for `local.procxray.dev` (with the target's bundle id as `indirect_object_identifier`) into the user TCC.db (path: `sudo lsof -c tccd`) and `killall tccd`. `PROCXRAY_EXPLORE=<pid>` opens the explorer window at launch, and `PROCXRAY_EXPLORE_PNG=<file>` then expands a little and captures the window to a PNG with ScreenCaptureKit (`screencapture` over SSH can't, and `cacheDisplay` doesn't draw SwiftUI). That needs a `kTCCServiceScreenCapture` row for `local.procxray.dev` in the system TCC.db (`/Library/Application Support/com.apple.TCC/TCC.db`).
 - `PROCXRAY_APPLE_TOOLS=1` in the environment of the process doing the reading forces Apple's tools instead of the native readers (`NativeTools.swift`), for comparing the two in the VM.
 
+## Resource budgets
+
+The app is held to budgets for what it costs to run, measured on the running bundle, its helper and the tools they start:
+
+- `swiftc -O tools/perf.swift -o build/perf && build/perf [--dev | --release] [--after 60] [--seconds 60] [--budget open|menubar]` prints total CPU, wake-ups, tools spawned and footprint against the budget, and exits 1 when one is over. `open`: main window in front. `menubar`: every window closed. `--after` leaves the launch out. It reads the app's rusage, so it runs as the app's user (in the Atlas helper: copy it in and `atlas run -- pxr-perf …`; in the VM: `scp` it over).
+- `PROCXRAY_PERF=<file>` in the app's environment appends each refresh stage's CPU time to the file every 30 s (`PerfStages`): which stage is over, and whether it ran on the main thread.
+- `ProcXRay --helper-call metrics` (signed bundle, helper running) compares what a timer refresh asks the helper for with the full reading, and gives the helper's CPU per call for each.
+- `PROCXRAY_SETTINGS=<tab>` (`general`, `performance`, `helper`, `menuBar`, `alerts`) opens Settings on that tab at launch, for a screenshot without a click.
+
+Rules the measurements led to:
+
+- Anything that costs CPU, memory or energy to keep up to date has a setting in `Tuning.swift` (Settings ▸ Performance), not a constant where it is used. The samplers ask `Tuning` how often to run.
+- The refresh's background task builds everything, the table's tree included (`TreeBuilder`, from a `TableContext`): the main thread swaps results in. Column values and the tree read a `TableContext`, never the `Store`.
+- A timer refresh starts no tool. launchd's jobs come from ServiceManagement in-process; `lsappinfo` and `launchctl print` run only when something changed (see `Store.refresh` and `fillPidDomains`).
+- A background read that can fail for good caches the failure (`.some(nil)`), or it is retried on every refresh.
+
+## Shared UI components
+
+- Rows of data go in `DataTable` (AppKit, `UI/DataTable.swift`): selection, keyboard navigation, type-to-jump, sort, column show/hide, ⌘C, copy cell / rows / with headers and CSV/TSV export come with it. Row actions go in its context menu and on double-click (`onOpen`), not in buttons inside cells. Still on SwiftUI `Table`: the syscall trace's two tables, open files and the log list, whose cells hold controls.
+- Small graphs of recent readings are `SeriesGraphView` (`MiniGraph`, `MirrorGraph` wrap it). Only the menu bar label, which is rendered to an image, draws its own.
+- Histories are `SeriesRing`s (`History`, `ProcHistory`).
+- A setting's explanation is a `Hint`.
+- New and timer-updated UI is AppKit, wrapped where a SwiftUI screen hosts it.
+
 ## Profiling refresh ticks
 
 - `ProcXRay --bench` times each stage of a refresh: the snapshot's per-process reads, a steady-state timer tick (`tick:` lines), and the table's tree build per grouping and column set (`nodes(…)`). Run the release build (`swift build -c release`, `.build/release/ProcXRay --bench`).
