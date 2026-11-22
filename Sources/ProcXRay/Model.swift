@@ -722,13 +722,15 @@ final class Store {
     private func recordHistory(_ procs: [pid_t: ProcInfo]) {
         // Taken out of the old table, so each series is uniquely owned and the append is in place: a copy left
         // in `history` made every append copy all five arrays of every process.
+        let capacity = Tuning.historyLength
+        guard capacity > 0 else { if !history.isEmpty { history = [:] }; return }
         var old = history
         history = [:]
         var next: [String: History] = [:]
         next.reserveCapacity(procs.count)
         for p in procs.values {
-            var h = old.removeValue(forKey: p.key) ?? History()
-            h.append(p)
+            var h = old.removeValue(forKey: p.key) ?? History(capacity: capacity)
+            h.append(p, capacity: capacity)
             next[p.key] = h
         }
         history = next
@@ -1475,25 +1477,30 @@ struct Rates: Hashable, Sendable {
     }
 }
 
-/// The last few minutes of one process, for sparklines: one entry per refresh, oldest first.
+/// The last few minutes of one process, for the graphs: one entry per refresh, oldest first. How many are kept
+/// is a setting (Tuning.historyLength).
 struct History: Sendable {
-    static let capacity = 120             // four minutes at the 2 s refresh
-    var cpu: [Double?] = []               // percent of one core
-    var memory: [Double?] = []            // footprint, bytes
-    var disk: [Double?] = []              // read + written, bytes per second
-    var power: [Double?] = []             // watts
-    var network: [Double?] = []           // received + sent, bytes per second; nil while not read
+    private var ring: SeriesRing
 
-    mutating func append(_ p: ProcInfo) {
+    init(capacity: Int) { ring = SeriesRing(lanes: 5, capacity: capacity) }
+
+    var cpu: [Double?] { ring.values(0) }       // percent of one core
+    var memory: [Double?] { ring.values(1) }    // footprint, bytes
+    var disk: [Double?] { ring.values(2) }      // read + written, bytes per second
+    var power: [Double?] { ring.values(3) }     // watts
+    var network: [Double?] { ring.values(4) }   // received + sent, bytes per second; nil while not read
+
+    mutating func append(_ p: ProcInfo, capacity: Int) {
+        if ring.capacity != capacity { ring.resize(capacity) }
         let r = p.rates
-        func push(_ a: inout [Double?], _ v: Double?) {
-            a.append(v)
-            if a.count > Self.capacity { a.removeFirst(a.count - Self.capacity) }
+        ring.push { lane in
+            switch lane {
+            case 0: r?.cpuPercent
+            case 1: p.footprint.map { Double($0) }
+            case 2: r.flatMap { r in r.diskRead.flatMap { a in r.diskWrite.map { a + $0 } } }
+            case 3: r?.watts
+            default: p.netIn.flatMap { i in p.netOut.map { i + $0 } }
+            }
         }
-        push(&cpu, r?.cpuPercent)
-        push(&memory, p.footprint.map { Double($0) })
-        push(&disk, r.flatMap { r in r.diskRead.flatMap { a in r.diskWrite.map { a + $0 } } })
-        push(&power, r?.watts)
-        push(&network, p.netIn.flatMap { i in p.netOut.map { i + $0 } })
     }
 }

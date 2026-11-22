@@ -790,10 +790,10 @@ extension AmbientMonitor {
     }
 }
 
-/// A process's last readings, oldest first; Float to keep ~650 processes × 5 series small.
+/// A process's last readings for the popover's row graphs, oldest first.
 struct ProcHistory: Sendable {
     static let length = 30
-    var cpu: [Float] = [], gpu: [Float] = [], memory: [Float] = [], disk: [Float] = [], network: [Float] = []
+    private var ring = SeriesRing(lanes: 5, capacity: ProcHistory.length)
 
     mutating func append(_ p: AmbientProc) {
         push(p.cpu, p.gpu, p.footprint.map { Double($0) }, p.disk, p.net)
@@ -802,22 +802,24 @@ struct ProcHistory: Sendable {
     mutating func append(_ s: AmbientSums) { push(s.cpu, s.gpu, s.memory, s.disk, s.net) }
 
     private mutating func push(_ c: Double?, _ g: Double?, _ m: Double?, _ d: Double?, _ n: Double?) {
-        func push(_ a: inout [Float], _ v: Double?) {
-            a.append(Float(v ?? 0))
-            if a.count > Self.length { a.removeFirst(a.count - Self.length) }
+        ring.push { lane in
+            switch lane {
+            case 0: c
+            case 1: g
+            case 2: m
+            case 3: d
+            default: n
+            }
         }
-        push(&cpu, c); push(&gpu, g); push(&memory, m); push(&disk, d); push(&network, n)
     }
 
     func values(_ m: AmbientMetric) -> [Double] {
-        let a: [Float]
         switch m {
-        case .cpu: a = cpu
-        case .gpu: a = gpu
-        case .memory: a = memory
-        case .disk: a = disk
-        case .network: a = network
+        case .cpu: ring.filled(0)
+        case .gpu: ring.filled(1)
+        case .memory: ring.filled(2)
+        case .disk: ring.filled(3)
+        case .network: ring.filled(4)
         }
-        return a.map { Double($0) }
     }
 }

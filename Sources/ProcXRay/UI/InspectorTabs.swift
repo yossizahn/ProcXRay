@@ -415,7 +415,7 @@ private struct ReadsWhileShown: ViewModifier {
 
 // MARK: - Sparklines
 
-/// A line of the last `History.capacity` values, newest at the right edge. Rates are scaled from zero to
+/// A line of the last values a History keeps (Tuning.historyLength), newest at the right edge. Rates are scaled from zero to
 /// their maximum; a level such as memory (`fromZero` false) between its minimum and maximum, or it would
 /// be a flat line at the top. Gaps (no reading for that refresh) break the line. Hovering marks the
 /// nearest sample and shows its value (through `format`) and how long ago it was read.
@@ -427,7 +427,7 @@ struct Sparkline: View {
     @Environment(Store.self) private var store: Store?
     @State private var hover: CGPoint?
 
-    private func step(_ width: CGFloat) -> CGFloat { width / CGFloat(History.capacity - 1) }
+    private func step(_ width: CGFloat) -> CGFloat { width / CGFloat(max(2, values.count, Tuning.historyLength) - 1) }
     private func x(_ i: Int, _ width: CGFloat) -> CGFloat { width - CGFloat(values.count - 1 - i) * step(width) }
     /// The sample under `x`, or nil left of the oldest one.
     private func index(at x: CGFloat, _ width: CGFloat) -> Int? {
