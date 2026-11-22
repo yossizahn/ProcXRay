@@ -226,13 +226,16 @@ struct ProcXRayApp: App {
             exit(0)
         }
         if let i = CommandLine.arguments.firstIndex(of: "--trace") {
-            // As root: --trace <pid> <seconds> [--ktrace] [--activity] [out.tsv]. One syscall trace in-process, through
-            // the kdebug reader (or ktrace) and the app's decoder; records written as tab-separated text for diffing the
-            // two. --activity prints the Activity view's grouping, with Mach message destinations.
-            let a = Array(CommandLine.arguments[(i + 1)...]).filter { $0 != "--ktrace" && $0 != "--activity" }
-            guard a.count >= 2, let pid = Int32(a[0]), let secs = Double(a[1]) else { print("usage: --trace <pid> <seconds> [--ktrace] [--activity] [out.tsv]"); exit(2) }
+            // As root: --trace <pid> <seconds> [--ktrace] [--activity] [--stacks] [--lost] [out.tsv]. One syscall trace
+            // in-process, through the kdebug reader (or ktrace) and the app's decoder; records written as tab-separated
+            // text for diffing the two. --activity prints the Activity view's grouping, with Mach message destinations;
+            // --stacks takes kperf user stacks; --lost prints where the kernel marked lost events.
+            let flags: Set<String> = ["--ktrace", "--activity", "--stacks", "--lost"]
+            let a = Array(CommandLine.arguments[(i + 1)...]).filter { !flags.contains($0) }
+            guard a.count >= 2, let pid = Int32(a[0]), let secs = Double(a[1]) else { print("usage: --trace <pid> <seconds> [--ktrace] [--activity] [--stacks] [--lost] [out.tsv]"); exit(2) }
             Bench.trace(pid: pid, seconds: secs, ktrace: CommandLine.arguments.contains("--ktrace"),
-                        activity: CommandLine.arguments.contains("--activity"), out: a.count > 2 ? a[2] : nil)
+                        activity: CommandLine.arguments.contains("--activity"), stacks: CommandLine.arguments.contains("--stacks"),
+                        lost: CommandLine.arguments.contains("--lost"), out: a.count > 2 ? a[2] : nil)
             exit(0)
         }
         if let i = CommandLine.arguments.firstIndex(of: "--log-live") {
