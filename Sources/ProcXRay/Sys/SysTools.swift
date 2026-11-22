@@ -209,6 +209,25 @@ enum BTM {
         return out
     }
 
+    /// The records that are themselves something launchd runs (agents, daemons, login items), keyed
+    /// "label:<job label>" and, when the record gives an absolute one, "path:<executable>". SMAppService records
+    /// give paths relative to their app ("Contents/MacOS/…"), so they match on the label only: the identifier
+    /// less its type number ("4.2BUA8C4S2C.com.1password.browser-helper" runs as job
+    /// "2BUA8C4S2C.com.1password.browser-helper"). A key can have a record in more than one user's list.
+    static func itemIndex(_ items: [BTMItem]) -> [String: [BTMItem]] {
+        var out: [String: [BTMItem]] = [:]
+        for i in items {
+            let t = i.type
+            guard t.hasPrefix("daemon") || t.hasPrefix("agent") || t.hasPrefix("legacy daemon")
+                    || t.hasPrefix("legacy agent") || t.hasPrefix("login item") else { continue }
+            if i.executable.hasPrefix("/") { out["path:" + i.executable, default: []].append(i) }
+            if let dot = i.identifier.firstIndex(of: "."), i.identifier[..<dot].allSatisfy(\.isNumber) {
+                out["label:" + i.identifier[i.identifier.index(after: dot)...], default: []].append(i)
+            }
+        }
+        return out
+    }
+
     static func parse(_ text: String) -> [BTMItem] {
         var items: [BTMItem] = []
         var uid = "?"

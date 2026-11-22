@@ -287,9 +287,13 @@ final class Store {
     var jobs: [LaunchdJob] = []
     /// Running jobs of the system and user domains; they only label processes.
     @ObservationIgnored var otherJobs: [LaunchdJob] = []
-    var btm: [BTMItem] = [] { didSet { btmOwners = BTM.ownerIndex(btm); dataGen &+= 1 } }
+    var btm: [BTMItem] = [] {
+        didSet { btmOwners = BTM.ownerIndex(btm); btmItems = BTM.itemIndex(btm); dataGen &+= 1 }
+    }
     /// BTM.ownerIndex of btm, for the Smart tree.
     @ObservationIgnored private(set) var btmOwners: [String: [String]] = [:]
+    /// BTM.itemIndex of btm, for the Name column's registration glyphs.
+    @ObservationIgnored private(set) var btmItems: [String: [BTMItem]] = [:]
     var btmLoading = false
     /// Set once a load finished and produced a record list (possibly empty), so "nothing loaded yet",
     /// "loaded, no records" and "failed" (btmError) look different.

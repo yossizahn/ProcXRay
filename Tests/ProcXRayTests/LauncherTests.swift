@@ -48,6 +48,10 @@ final class LauncherTests: XCTestCase {
 
     func testAppleAppIsKilledForCodeSigning() throws {
         // With SIP on, Apple's apps have launch constraints that kill a direct spawn before its first instruction.
+        // Each run leaves a "Chess quit unexpectedly" crash report, so it runs only when asked for.
+        guard ProcessInfo.processInfo.environment["PROCXRAY_TEST_LAUNCH_CONSTRAINTS"] != nil else {
+            throw XCTSkip("Set PROCXRAY_TEST_LAUNCH_CONSTRAINTS=1 to run: it leaves a Chess crash report")
+        }
         let child = try Launcher.spawnSuspended("/System/Applications/Chess.app/Contents/MacOS/Chess", arguments: [], name: "Chess").get()
         Launcher.resume(child.pid)
         guard let exit = waitForExit(child.pid) else {

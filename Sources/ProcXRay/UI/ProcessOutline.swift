@@ -635,6 +635,9 @@ struct ProcessOutline: NSViewRepresentable {
                 b.action = c.id == "name" ? #selector(KeyOutlineView.infoClicked(_:)) : #selector(KeyOutlineView.revealClicked(_:))
                 cell.showsHoverButton = k.showsHoverButton(for: it, column: c.id)
             }
+            if let k = o as? KeyOutlineView {
+                for b in cell.glyphViews { b.target = k; b.action = #selector(KeyOutlineView.glyphClicked(_:)) }
+            }
             if let k = o as? KeyOutlineView, let b = cell.inspectButton {
                 b.target = k
                 if c.id == "name" {
@@ -952,6 +955,15 @@ struct ProcessOutline: NSViewRepresentable {
             Reveal.reveal([path])
         }
 
+        /// A registration glyph in a Name cell: its bubble (the registry, then what it has on record).
+        @objc func glyphClicked(_ sender: NSButton) {
+            guard let cell = sender.superview as? Cell, cell.registrations.indices.contains(sender.tag) else { return }
+            let r = cell.registrations[sender.tag]
+            let sections = [InfoBubble.Section(title: r.title, value: r.about)]
+                + r.facts.map { InfoBubble.Section(title: $0.label, value: $0.value, mono: $0.mono, reveal: $0.reveal) }
+            bubble.toggle(sender, sections: sections, from: sender)
+        }
+
         @objc func infoClicked(_ sender: NSButton) {
             let r = row(for: sender)
             guard r >= 0, let item = item(atRow: r), let s = bubbleContent?(item), !s.isEmpty else { return }
@@ -1024,6 +1036,12 @@ struct ProcessOutline: NSViewRepresentable {
         private(set) var hoverButton: NSButton?
         /// The second button, left of the first: the Path cell's Inspect, a group row's footprint button in Name.
         private(set) var inspectButton: NSButton?
+        /// The Name cell's registration glyphs (Registrations), right after the name's text; a click opens
+        /// the registration's bubble (KeyOutlineView.glyphClicked).
+        private(set) var glyphViews: [NSButton] = []
+        private(set) var registrations: [Registration] = []
+        private static let glyphSize: CGFloat = 13, glyphStep: CGFloat = 15
+        private static let glyphConfig = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
         var showsInspectButton: Bool {
             get { inspectButton.map { !$0.isHidden } ?? false }
             set {
@@ -1061,14 +1079,28 @@ struct ProcessOutline: NSViewRepresentable {
                 b.frame = NSRect(x: bounds.width - right - 18, y: (h - 16) / 2, width: 16, height: 16)
                 right += 20
             }
-            label.frame = NSRect(x: x, y: (h - lh) / 2, width: max(0, bounds.width - x - right), height: lh)
+            var width = max(0, bounds.width - x - right)
+            if !glyphViews.isEmpty {
+                // The glyphs follow the text, and the text gives way to them when the column is narrow.
+                let strip = CGFloat(glyphViews.count) * Self.glyphStep + 3
+                width = max(0, min(naturalWidth, width - strip))
+                var gx = x + width + 3
+                for g in glyphViews {
+                    g.frame = NSRect(x: gx, y: (h - Self.glyphSize) / 2, width: Self.glyphSize, height: Self.glyphSize)
+                    gx += Self.glyphStep
+                }
+            }
+            label.frame = NSRect(x: x, y: (h - lh) / 2, width: width, height: lh)
             updateTip()
+        }
+
+        private var naturalWidth: CGFloat {
+            label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: .greatestFiniteMagnitude, height: label.frame.height)).width ?? 0
         }
 
         /// The full text as the label's tooltip, only while the label is too narrow to show all of it.
         private func updateTip() {
-            let need = label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: .greatestFiniteMagnitude, height: label.frame.height)).width ?? 0
-            let whole = need <= label.frame.width + 0.5
+            let whole = naturalWidth <= label.frame.width + 0.5
             let tip = whole ? nil : label.stringValue
             if label.toolTip != tip { label.toolTip = tip }
         }
@@ -1076,6 +1108,34 @@ struct ProcessOutline: NSViewRepresentable {
         /// Width this cell needs to show its content untruncated.
         var fittingWidth: CGFloat {
             (hasIcon ? 22 : 2) + ceil(label.attributedStringValue.size().width) + 6
+                + (glyphViews.isEmpty ? 0 : CGFloat(glyphViews.count) * Self.glyphStep + 3)
+        }
+
+        /// Assign only on change, like the text.
+        private func set(registrations r: [Registration]) {
+            guard r != registrations else { return }
+            registrations = r
+            while glyphViews.count > r.count { glyphViews.removeLast().removeFromSuperview() }
+            while glyphViews.count < r.count {
+                let b = NSButton(image: NSImage(), target: nil, action: nil)
+                b.isBordered = false
+                b.imageScaling = .scaleProportionallyDown
+                b.tag = glyphViews.count
+                addSubview(b)
+                glyphViews.append(b)
+            }
+            for (b, g) in zip(glyphViews, r) {
+                b.image = Self.symbol(g.symbol)?.withSymbolConfiguration(Self.glyphConfig)
+                b.setAccessibilityLabel(g.title)
+            }
+            tintGlyphs()
+            needsLayout = true
+        }
+        private func tintGlyphs() {
+            let selected = backgroundStyle == .emphasized
+            for (v, g) in zip(glyphViews, registrations) {
+                v.contentTintColor = selected ? .alternateSelectedControlTextColor : g.warning ? .systemOrange : .secondaryLabelColor
+            }
         }
 
         // Assign only on change, so unchanged cells cause no redraw at all.
@@ -1091,7 +1151,11 @@ struct ProcessOutline: NSViewRepresentable {
         /// textColor, so the cell does that itself.
         private var styled: NSAttributedString?
         override var backgroundStyle: NSView.BackgroundStyle {
-            didSet { if backgroundStyle != oldValue, styled != nil { showStyled() } }
+            didSet {
+                guard backgroundStyle != oldValue else { return }
+                if styled != nil { showStyled() }
+                if !glyphViews.isEmpty { tintGlyphs() }
+            }
         }
         private func showStyled() {
             guard let v = styled else { return }
@@ -1118,6 +1182,8 @@ struct ProcessOutline: NSViewRepresentable {
             switch c.id {
             case "name":
                 showName(n, procs: store.procs)
+                let p = n.proc ?? (n.kind == .unit ? n.rootPid.flatMap { store.procs[$0] } : nil)
+                set(registrations: p.map { Registrations.of($0, btm: store.btmItems) } ?? [])
             case "context":
                 set(Self.context(n))
                 set(color: .secondaryLabelColor)
