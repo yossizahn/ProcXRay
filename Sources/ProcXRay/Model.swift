@@ -445,6 +445,11 @@ final class Store {
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var refreshing = false
     @ObservationIgnored private var signing = false
+    /// A background read brought something back, or what they read from changed (the helper came up, a setting):
+    /// they run after the next refresh. See refresh.
+    @ObservationIgnored private var fillsDirty = true
+    @ObservationIgnored private var fillsDueAt = Date.distantPast
+    private static let fillsEvery: TimeInterval = 12
     /// Signatures by the code's hash (cdhash), so a program is inspected once however many processes run it.
     @ObservationIgnored private var signByHash: [String: SignInfo] = [:]
     /// Signature lookups set aside because the code read wasn't the code running, by codeKey (fillSignatures).
@@ -576,6 +581,7 @@ final class Store {
                     if s.isRunning {
                         self.argvCache = self.argvCache.filter { $0.value != nil }
                         self.domainReads = self.domainReads.filter { $0.value != nil }
+                        self.fillsDirty = true
                     }
                     self.helperState = s
                     // As root, sfltool doesn't prompt, so Background Items can be read up front instead of on request.
@@ -776,10 +782,19 @@ final class Store {
                 self.lastRefresh = Date()
                 self.refreshMillis = ms
                 self.refreshing = false
-                if Tuning.checksSignatures { self.fillSignatures() }
-                self.fillCommandLines()
-                if Tuning.readsPidDomains { self.fillPidDomains() }
-                self.fillJobParents()
+                // The background reads each go through every process to find what they haven't looked up. Most
+                // refreshes there is nothing: they run when a process started or exec'd, when one of them brought
+                // something back (it may have more to do), and otherwise every fillsEvery seconds, for what
+                // becomes due with time (a process is given 10 s to settle before its domain is read).
+                let due = Date()
+                if snap.fresh || full || self.fillsDirty || due >= self.fillsDueAt {
+                    self.fillsDirty = false
+                    self.fillsDueAt = due.addingTimeInterval(Self.fillsEvery)
+                    if Tuning.checksSignatures { self.fillSignatures() }
+                    self.fillCommandLines()
+                    if Tuning.readsPidDomains { self.fillPidDomains() }
+                    self.fillJobParents()
+                }
             }
             // Every refresh builds and drops a few megabytes of short-lived tables (the processes, their samples,
             // the tree), and the heap keeps the pages they leave free as dirty memory. Handing those back now and
@@ -846,6 +861,7 @@ final class Store {
             await MainActor.run {
                 let perfM = PerfStages.begin(); defer { PerfStages.end(.fillMerge, perfM) }
                 self.signSkips = newSkips
+                self.fillsDirty = true
                 if self.signByHash.count > 4000 { self.signByHash.removeAll(keepingCapacity: true) }
                 // Only what was read from the running code itself: a file on disk answers for that path alone.
                 for (_, info) in found where info.error == nil { if let h = info.cdHash { self.signByHash[h] = info } }
@@ -910,6 +926,7 @@ final class Store {
             await MainActor.run {
                 let perfM = PerfStages.begin(); defer { PerfStages.end(.fillMerge, perfM) }
                 self.argvSkips = newSkips
+                self.fillsDirty = true
                 self.argvCache.merge(found) { a, _ in a }
                 let live = Set(self.procs.values.map(\.codeKey))
                 self.argvCache = self.argvCache.filter { live.contains($0.key) }
@@ -994,6 +1011,7 @@ final class Store {
             await MainActor.run {
                 let perfM = PerfStages.begin(); defer { PerfStages.end(.fillMerge, perfM) }
                 self.domainReads.merge(found) { _, b in b }
+                self.fillsDirty = true   // the rest of the backlog, two programs a refresh
                 let live = Set(self.procs.values.map(\.key))
                 self.domainReads = self.domainReads.filter { live.contains($0.key) }
                 self.domainAsked = self.domainAsked.filter(live.contains)
@@ -1052,6 +1070,7 @@ final class Store {
             await MainActor.run {
                 let perfM = PerfStages.begin(); defer { PerfStages.end(.fillMerge, perfM) }
                 self.jobParentCache.merge(result) { _, b in b }
+                self.fillsDirty = true
                 guard self.publishFill(result.count) else { self.readingJobParents = false; return }
                 var procs = self.procs
                 var changed = false
@@ -1123,6 +1142,9 @@ final class Store {
         var samples: [String: Sample]
         /// Set when the process list couldn't be read; `procs` is then empty and must not be published.
         var error: String?
+        /// A process started or exec'd since the last refresh: there is something for the background reads
+        /// (signature, command line, pid domain, job parent) to look up.
+        var fresh = false
     }
 
     /// `ls` / `jobs`: reuse these instead of re-reading LaunchServices / launchd (nil = read them now).
@@ -1180,6 +1202,7 @@ final class Store {
         samples.reserveCapacity(list.count)
         // Indices of `built` taken over from the last refresh as they were (`skip`).
         var reused: Set<Int> = []
+        var fresh = false
         for k in list where k.pid >= 0 {
             // A process that used no CPU at its last reading isn't read on this refresh (Tuning.idleReadEvery):
             // it keeps the last refresh's figures and its sample, so its next reading's rates cover the whole
@@ -1204,6 +1227,7 @@ final class Store {
             // The cdhash is unreadable for some processes (another user's, without the helper); the kernel's name
             // for the process changes on exec too.
             let fixed = prev[p.key]?.fixed.flatMap { $0.cdhash == p.cdhash && $0.comm == k.comm ? $0 : nil }
+            if fixed == nil { fresh = true }
             if let fixed, let path = fixed.path {
                 p.path = path
                 p.extensionPoint = fixed.extensionPoint
@@ -1293,7 +1317,7 @@ final class Store {
         for pid in Responsiveness.unresponsive(out.values.lazy.filter { Responsiveness.isCandidate(lsType: $0.lsType) }.map(\.pid)) {
             out[pid]?.notResponding = true
         }
-        return Snapshot(procs: out, ls: ls, jobs: jobs, otherJobs: otherJobs, samples: samples)
+        return Snapshot(procs: out, ls: ls, jobs: jobs, otherJobs: otherJobs, samples: samples, fresh: fresh)
     }
 
     // MARK: Derived views
