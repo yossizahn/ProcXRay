@@ -714,6 +714,18 @@ struct StatusLine: View {
                 Text(verbatim: "\(store.procs.count) processes").help("Processes in the last snapshot")
                 Text(verbatim: " · \(store.refreshMillis) ms").help("Time the last snapshot took")
                 Text(verbatim: " · ")
+                // How often the list refreshes now, when that isn't the plain setting: paused, slowed while
+                // another app is in front or on battery. Opens the setting.
+                if let cadence {
+                    Button {
+                        settingsTab = SettingsTab.performance.rawValue
+                        openSettings()
+                        NSApp.activate(ignoringOtherApps: true)
+                    } label: { Text(verbatim: cadence.text) }
+                    .buttonStyle(.plain)
+                    .help(cadence.why + " Click for Settings ▸ Performance.")
+                    Text(verbatim: " · ")
+                }
                 Button {
                     settingsTab = SettingsTab.helper.rawValue
                     openSettings()
@@ -732,6 +744,27 @@ struct StatusLine: View {
                 Text(verbatim: "\(e) — showing the last good list").foregroundStyle(.red).lineLimit(3).help("\(e) — showing the last good list")
             }
         }
+        // PROCXRAY_SETTINGS=<tab>: opens Settings on that tab at launch, for looking at it without a click
+        // (a second login takes no input while the Mac is locked).
+        .task {
+            guard let tab = ProcessInfo.processInfo.environment["PROCXRAY_SETTINGS"], !Self.openedSettings else { return }
+            Self.openedSettings = true
+            settingsTab = tab
+            openSettings()
+        }
+    }
+    private static var openedSettings = false
+
+    /// "paused", "every 4 s": shown only while the list isn't refreshing at the rate set in Settings.
+    private var cadence: (text: String, why: String)? {
+        if store.paused { return ("paused", "Refreshing is paused (the toolbar's pause button).") }
+        let set = UserDefaults.standard.double(forKey: Tuning.windowInterval)
+        if store.interval == 0 { return ("not refreshing", "Another app is in front, and the list is set not to refresh then.") }
+        guard store.interval != set else { return nil }
+        let why = Power.saving && UserDefaults.standard.bool(forKey: Tuning.savePower)
+            ? "Refreshing less often on battery or in Low Power Mode" + (NSApp.isActive ? "." : ", and while another app is in front.")
+            : "Refreshing less often while another app is in front."
+        return ("every \(store.interval.formatted()) s", why)
     }
 
     private var helperText: String {

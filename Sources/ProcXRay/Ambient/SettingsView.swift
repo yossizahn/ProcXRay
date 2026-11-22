@@ -37,7 +37,7 @@ enum AppActivation {
 
 /// Settings' tabs; the selected one is stored so the sidebar's helper status can open Helper.
 enum SettingsTab: String {
-    case general, helper, menuBar, alerts
+    case general, performance, helper, menuBar, alerts
     static let key = "settings.tab"
 }
 
@@ -46,6 +46,7 @@ struct SettingsView: View {
     var body: some View {
         TabView(selection: $tab) {
             GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general.rawValue)
+            PerformanceSettings().tabItem { Label("Performance", systemImage: "gauge.with.dots.needle.33percent") }.tag(SettingsTab.performance.rawValue)
             HelperSettings().tabItem { Label("Helper", systemImage: "lock.shield") }.tag(SettingsTab.helper.rawValue)
             MenuBarSettings().tabItem { Label("Menu Bar", systemImage: "menubar.rectangle") }.tag(SettingsTab.menuBar.rawValue)
             AlertSettings().tabItem { Label("Alerts", systemImage: "exclamationmark.triangle") }.tag(SettingsTab.alerts.rawValue)
@@ -58,7 +59,6 @@ struct SettingsView: View {
 private struct GeneralSettings: View {
     @AppStorage(AmbientPrefs.showIn) private var showIn: AmbientPrefs.ShowIn = .both
     @AppStorage(AmbientPrefs.launchToMenuBar) private var launchToMenuBar = false
-    @AppStorage(AmbientPrefs.interval) private var interval = 3.0
     @State private var loginItem = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
 
@@ -74,8 +74,7 @@ private struct GeneralSettings: View {
                 .font(.caption).foregroundStyle(.secondary)
             Toggle("Start in the menu bar", isOn: $launchToMenuBar)
                 .disabled(showIn == .dock)
-            Text("Open no window at launch. The window opens from the menu bar item, where it was last.")
-                .font(.caption).foregroundStyle(.secondary)
+            Hint("Open no window at launch. The window opens from the menu bar item, where it was last.")
             Toggle("Open at login", isOn: $loginItem)
                 .onChange(of: loginItem) { _, on in
                     do {
@@ -87,12 +86,6 @@ private struct GeneralSettings: View {
                     }
                 }
             if let loginError { Text(loginError).font(.caption).foregroundStyle(.red) }
-            Picker("Menu bar sampling", selection: $interval) {
-                ForEach([1.0, 2, 3, 5, 10], id: \.self) { Text("every \(Int($0)) s").tag($0) }
-            }
-            .onChange(of: interval) { _, _ in AmbientMonitor.shared.update() }
-            Text("How often the menu bar, its popover and the alerts read the system. Each reading costs ~9 ms of CPU (about 0.3 % of one core at every 3 s). The process window refreshes on its own schedule, and only while it's on screen.")
-                .font(.caption).foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
     }
@@ -118,8 +111,7 @@ private struct MenuBarSettings: View {
                 ForEach(AmbientMetric.allCases) { m in Toggle(m.title, isOn: binding(m)) }
                 Toggle("Graphs", isOn: $graphs)
                 Toggle("Colored graphs", isOn: $colors).disabled(!graphs)
-                Text("CPU green, GPU purple, memory blue (orange under memory pressure, red when critical). Disk and network: read and received in blue above the middle, written and sent in red below. Off: one color, like the menu bar's icons.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Hint("CPU green, GPU purple, memory blue (orange under memory pressure, red when critical). Disk and network: read and received in blue above the middle, written and sent in red below. Off: one color, like the menu bar's icons.")
             }
             SwiftUI.Section("Preview") {
                 HStack {
@@ -134,8 +126,7 @@ private struct MenuBarSettings: View {
                     Spacer()
                 }
                 .padding(.vertical, 4)
-                Text("With no widget, the menu bar shows an icon. A warning sign comes first while an alert is live.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Hint("With no widget, the menu bar shows an icon. A warning sign comes first while an alert is live.")
             }
         }
         .formStyle(.grouped)
@@ -159,8 +150,7 @@ private struct AlertSettings: View {
         Form {
             SwiftUI.Section {
                 Toggle("Alert on sustained usage", isOn: $on)
-                Text("A process that stays at or above a threshold for the set time shows under Needs Attention in the menu bar popover and the Triage section, and the menu bar shows a warning sign. One reading below doesn't end an alert; two in a row do.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Hint("A process that stays at or above a threshold for the set time shows under Needs Attention in the menu bar popover and the Triage section, and the menu bar shows a warning sign. One reading below doesn't end an alert; two in a row do.")
             }
             SwiftUI.Section("Thresholds") {
                 number("CPU", $cpu, unit: "% of one core", range: 10...1600, step: 10)
@@ -171,17 +161,14 @@ private struct AlertSettings: View {
                     ForEach([10.0, 20, 30, 60, 120, 300], id: \.self) { Text(duration($0)).tag($0) }
                 }
                 Toggle("Apps that stop responding", isOn: $unresponsive)
-                Text("WindowServer decides when an app is hung (Activity Monitor's \"Not Responding\"), after about 15–20 s without handling events; the alert follows at once.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Hint("WindowServer decides when an app is hung (Activity Monitor's \"Not Responding\"), after about 15–20 s without handling events; the alert follows at once.")
                 Toggle("Thermal and memory pressure", isOn: $system)
-                Text("Shown while macOS throttles the CPU to keep cool (thermal pressure moderate or higher) or memory runs short (memory pressure warning or critical), with no wait.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Hint("Shown while macOS throttles the CPU to keep cool (thermal pressure moderate or higher) or memory runs short (memory pressure warning or critical), with no wait.")
             }
             .disabled(!on)
             SwiftUI.Section("Ignore") {
                 TextField("Process names, comma-separated", text: $ignore, prompt: Text("e.g. Xcode, clang, mds_stores"))
-                Text("Matched without case against the app name or the executable's file name.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Hint("Matched without case against the app name or the executable's file name.")
             }
             .disabled(!on)
             SwiftUI.Section("Lists") {
@@ -189,8 +176,7 @@ private struct AlertSettings: View {
                     ForEach([2.0, 5, 10, 30, 60], id: \.self) { Text("\(Int($0)) min").tag($0) }
                 }
                 Toggle("Just Launched and Recently Ended: third-party processes only", isOn: $thirdPartyOnly)
-                Text("Leaves out Apple's processes (by path: /System, /usr, /bin, /sbin, /Library/Apple), which come and go by the dozen every minute.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Hint("Leaves out Apple's processes (by path: /System, /usr, /bin, /sbin, /Library/Apple), which come and go by the dozen every minute.")
             }
         }
         .formStyle(.grouped)
