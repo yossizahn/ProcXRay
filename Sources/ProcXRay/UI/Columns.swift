@@ -111,7 +111,7 @@ struct Column: Identifiable {
         /// something started at boot).
         case oldest
         /// Worked out from the processes some other way.
-        case custom(@MainActor ([ProcInfo], Store) -> CellValue)
+        case custom(([ProcInfo], TableContext) -> CellValue)
     }
 
     let id: String
@@ -139,17 +139,17 @@ struct Column: Identifiable {
     var format: (Double) -> String = { String(Int($0)) }
     /// The value as a plain number, for columns that add up: sums and sorting use it without
     /// formatting a string per process.
-    var amount: (@MainActor (ProcInfo) -> Double?)? = nil
+    var amount: ((ProcInfo) -> Double?)? = nil
     /// Reads the snapshot makes only while this column is shown.
     var reads: ExtraReads = []
-    let value: @MainActor (ProcInfo, Store) -> CellValue
+    let value: (ProcInfo, TableContext) -> CellValue
 
     /// A column of numbers that add up: the value is `amount`, formatted.
     static func amount(id: String, title: String, help: String, source: String, section: Section, term: String? = nil,
                        needs: String? = nil, minWidth: CGFloat = 50,
                        width: CGFloat = 76, rule: GroupRule = .sum, reads: ExtraReads = [],
                        format: @escaping (Double) -> String,
-                       _ amount: @escaping @MainActor (ProcInfo) -> Double?) -> Column {
+                       _ amount: @escaping (ProcInfo) -> Double?) -> Column {
         Column(id: id, title: title, help: help, source: source, section: section, term: term, needs: needs,
                minWidth: minWidth, width: width, numeric: true,
                rule: rule, format: format, amount: amount, reads: reads) { p, _ in amount(p).map { .number($0, format($0)) } ?? .unknown }
@@ -161,8 +161,7 @@ struct Column: Identifiable {
     }
 
     /// What the row sorts by: the plain number when there is one.
-    @MainActor
-    func sortValue(_ p: ProcInfo, _ store: Store) -> CellValue {
+    func sortValue(_ p: ProcInfo, _ store: TableContext) -> CellValue {
         if let amount { return amount(p).map { .number($0, "") } ?? .unknown }
         return value(p, store)
     }
@@ -171,8 +170,7 @@ struct Column: Identifiable {
 
     /// A group row's value. `value` gives a member's value (Store.sorted passes a memo, since one process
     /// is a member of every group row above it).
-    @MainActor
-    func groupValue(_ n: ProcNode, members: [ProcInfo], store: Store, value: (ProcInfo) -> CellValue) -> CellValue {
+    func groupValue(_ n: ProcNode, members: [ProcInfo], store: TableContext, value: (ProcInfo) -> CellValue) -> CellValue {
         if unitShowsRoot, n.kind == .unit, let r = n.rootPid.flatMap({ store.procs[$0] }) { return value(r).dimmed }
         switch rule {
         case .blank: return .empty
@@ -290,7 +288,7 @@ let siFormat: (Double) -> String = { v in
 private let rateNote = " Over the last refresh; ? for a process's first refresh."
 
 /// "all", "none" or "n of m" over the processes whose answer is known.
-@MainActor private func share(_ members: [ProcInfo], _ test: (ProcInfo) -> Bool?) -> CellValue {
+private func share(_ members: [ProcInfo], _ test: (ProcInfo) -> Bool?) -> CellValue {
     let known = members.compactMap(test)
     guard !known.isEmpty else { return .empty }
     let yes = known.filter { $0 }.count
@@ -305,7 +303,7 @@ private func yesNo(_ b: Bool?) -> CellValue {
 
 /// Hardened runtime, from the code directory's flags (CS_RUNTIME). nil for Apple platform binaries,
 /// which don't set it but are protected as platform code anyway, and for unsigned code.
-@MainActor private func hardened(_ p: ProcInfo, _ s: Store) -> Bool? {
+private func hardened(_ p: ProcInfo, _ s: TableContext) -> Bool? {
     guard let sign = s.signInfo(for: p), !sign.unsigned, !sign.isPlatform else { return nil }
     return sign.staticFlags & 0x0001_0000 != 0
 }
@@ -652,15 +650,10 @@ private let catalogue: [Column] = [
 // MARK: - Store lookups for columns
 
 extension Store {
-    /// "App · XPC service", "Extension · Widgets": the Smart tree's category of the process's unit, then its role.
-    func kind(of p: ProcInfo) -> String? {
-        if kindCache?.gen != dataGen {
-            let k = SmartTree.kinds(.init(procs: procs, lsApps: lsApps, btmOwners: btmOwners))
-            kindCache = (dataGen, k.kinds, k.roots)
-        }
-        return kindCache?.map[p.pid]
-    }
+    func bundleID(of p: ProcInfo) -> String? { context.bundleID(of: p) }
+}
 
+extension TableContext {
     func bundleID(of p: ProcInfo) -> String? {
         if let id = lsApps.first(where: { $0.pid == p.pid })?.bundleID { return id }
         guard let path = p.path, let b = ExtensionInfo.bundle(ofExecutable: path) ?? p.bundlePath else { return nil }
@@ -668,17 +661,32 @@ extension Store {
     }
 }
 
-/// CFBundleIdentifier per bundle path, read once.
-@MainActor
+/// CFBundleIdentifier and version per bundle path, read once. Any thread: the table's tree is built off the
+/// main one.
 enum BundleInfo {
-    private static var cache: [String: String?] = [:]
-    static var versions: [String: String?] = [:]
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var ids: [String: String?] = [:]
+    nonisolated(unsafe) private static var versions: [String: String?] = [:]
+
     static func identifier(_ bundle: String) -> String? {
-        if let hit = cache[bundle] { return hit }
-        let plist = NSDictionary(contentsOfFile: bundle + "/Contents/Info.plist") ?? NSDictionary(contentsOfFile: bundle + "/Info.plist")
-        let id = plist?["CFBundleIdentifier"] as? String
-        cache[bundle] = .some(id)
-        return id
+        lock.lock(); defer { lock.unlock() }
+        if let hit = ids[bundle] { return hit }
+        let v = plist(bundle)?["CFBundleIdentifier"] as? String
+        ids[bundle] = .some(v)
+        return v
+    }
+
+    /// CFBundleShortVersionString.
+    static func version(_ bundle: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        if let hit = versions[bundle] { return hit }
+        let v = plist(bundle)?["CFBundleShortVersionString"] as? String
+        versions[bundle] = .some(v)
+        return v
+    }
+
+    private static func plist(_ bundle: String) -> NSDictionary? {
+        NSDictionary(contentsOfFile: bundle + "/Contents/Info.plist") ?? NSDictionary(contentsOfFile: bundle + "/Info.plist")
     }
 }
 

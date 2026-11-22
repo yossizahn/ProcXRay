@@ -1,4 +1,8 @@
 import Foundation
+import ServiceManagement
+
+/// SMCopyAllJobDictionaries, declared here: the SDK marks it unavailable to Swift.
+@_silgen_name("SMCopyAllJobDictionaries") private func SMAllJobs(_ domain: CFString) -> Unmanaged<CFArray>?
 
 // MARK: - LaunchServices (lsappinfo)
 
@@ -278,11 +282,20 @@ struct LaunchdJob: Identifiable, Hashable, Sendable {
 }
 
 enum Launchd {
-    /// Running jobs of the system and user domains, which `launchctl list` (gui domain only) leaves out.
-    /// Both are readable without root; together the three calls take ~25 ms.
-    static func otherDomains() -> [LaunchdJob] {
-        services("system", domain: "system") + services("user/\(getuid())", domain: "user")
+    /// Running jobs of the system domain, which the login session's own list leaves out. In-process, like list().
+    static func systemJobs() -> [LaunchdJob] {
+        (native(kSMDomainSystemLaunchd, domain: "system") ?? services("system", domain: "system")).filter { $0.pid != nil }
     }
+
+    /// Running jobs of the user domain (agents and XPC services outside the login session, e.g. CoreSimulator's).
+    /// launchd's in-process listing doesn't reach this domain, so this runs `launchctl print`: the refresh reads it
+    /// on the registries' slow schedule, not with the jobs.
+    static func userDomainJobs() -> [LaunchdJob] {
+        services("user/\(getuid())", domain: "user")
+    }
+
+    /// Both, for callers outside the refresh.
+    static func otherDomains() -> [LaunchdJob] { systemJobs() + userDomainJobs() }
 
     /// The `services = { … }` block of `launchctl print <target>`: `<pid> <last exit> <label>` per line,
     /// pid 0 when not running. Only running jobs are returned: the result labels processes.
@@ -303,7 +316,14 @@ enum Launchd {
         return out
     }
 
+    /// The jobs of the login session (the gui domain), as `launchctl list` prints them. Asked of launchd
+    /// in-process (ServiceManagement, ~4 ms for ~600 jobs), so a refresh starts no tool for it; `launchctl list`
+    /// only if that ever fails.
     static func list() -> [LaunchdJob] {
+        native(kSMDomainUserLaunchd, domain: "gui") ?? listByTool()
+    }
+
+    static func listByTool() -> [LaunchdJob] {
         Shell.run("/bin/launchctl", ["list"], mergeStderr: false, timeout: 10)
             .split(separator: "\n").dropFirst().compactMap { line in
                 let p = line.split(separator: "\t", maxSplits: 2).map(String.init)
@@ -312,6 +332,22 @@ enum Launchd {
             }
     }
 
+    /// launchd's job list for a ServiceManagement domain: label, pid and last exit status of every job. The call
+    /// is deprecated but is still what answers; nil when it gives nothing, so the caller can fall back.
+    static func native(_ smDomain: CFString?, domain: String) -> [LaunchdJob]? {
+        guard let smDomain, let all = SMAllJobs(smDomain)?.takeRetainedValue() as? [[String: Any]], !all.isEmpty else { return nil }
+        return all.compactMap { j in
+            guard let label = j["Label"] as? String else { return nil }
+            return LaunchdJob(label: label, pid: (j["PID"] as? Int).map { pid_t($0) },
+                              lastExit: exitText(j["LastExitStatus"] as? Int), domain: domain)
+        }
+    }
+
+    /// A wait status as `launchctl list` shows it: the exit code, or minus the signal that ended the job.
+    static func exitText(_ status: Int?) -> String {
+        guard let s = status else { return "-" }
+        return s & 0x7f == 0 ? String((s >> 8) & 0xff) : "-\(s & 0x7f)"
+    }
     /// launchd's `parent bundle identifier` for a job: set only for jobs an app registered through
     /// SMAppService. `domain` is LaunchdJob.domain ("gui", "system" or "user").
     static func parentBundle(_ label: String, domain: String) -> String? {

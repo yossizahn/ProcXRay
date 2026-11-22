@@ -272,6 +272,7 @@ final class AmbientMonitor {
     @ObservationIgnored private var viewers = 0
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var busy = false
+    @ObservationIgnored private var tuningObserver: NSObjectProtocol?
     @ObservationIgnored private var tracker = Tracker()
 
     private init() {}
@@ -282,7 +283,12 @@ final class AmbientMonitor {
     /// Starts or stops sampling to match the settings; call after they change.
     func update() {
         let want = AmbientPrefs.menuBarShown || viewers > 0
-        let interval = max(1, UserDefaults.standard.double(forKey: AmbientPrefs.interval))
+        if tuningObserver == nil {
+            tuningObserver = NotificationCenter.default.addObserver(forName: Tuning.didChange, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.update() }
+            }
+        }
+        let interval = Tuning.menuBarIntervalNow
         if want, let t = timer, t.timeInterval == interval { return }
         timer?.invalidate()
         timer = nil
@@ -308,10 +314,11 @@ final class AmbientMonitor {
         var tr = tracker
         Task.detached(priority: .utility) {
             let t0 = DispatchTime.now().uptimeNanoseconds
-            let out = Self.sample(&tr, input)
+            let out = PerfStages.measure(.ambientSample) { Self.sample(&tr, input) }
             let ms = Int((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
             let done = tr
             await MainActor.run {
+                let perfM = PerfStages.begin(); defer { PerfStages.end(.ambientPublish, perfM) }
                 self.tracker = done
                 self.busy = false
                 guard let out else { return }
@@ -413,6 +420,11 @@ final class AmbientMonitor {
     struct Counts: Sendable { var at: UInt64; var cpu: UInt64; var disk: UInt64 }
 
     struct Tracker: Sendable {
+        /// When the helper reading last used was read (HelperClient.recentMetrics).
+        var helperAt: UInt64 = 0
+        /// The processes the last reading couldn't read without the helper, and when it was made (HelperAsk).
+        var needsHelper: Set<Int32> = []
+        var readAt: Double = 0
         var samples: [AmbientProc.Key: Counts] = [:]
         /// GPU time is read every other tick (the IORegistry walk is the costliest read here, ~3.7 ms of CPU);
         /// the rates from the last read stand in between.
@@ -435,7 +447,17 @@ final class AmbientMonitor {
 
     nonisolated static func sample(_ tr: inout Tracker, _ input: Input) -> Output? {
         guard case .success(let list) = Native.listProcesses() else { return nil }
-        let priv = input.helper ? HelperClient.shared.allMetrics(timeout: 1.5) : nil
+        // The process list's reading when it refreshed lately (the helper's answer costs ~40 ms of its CPU); counts
+        // from it are dated when it was read, so rates stay right.
+        // Only a reading this monitor hasn't used: two ticks on one reading would have no interval to rate over.
+        let recent = HelperClient.shared.recentMetrics(maxAge: 2.5).flatMap { $0.at > tr.helperAt ? $0 : nil }
+        // Asked only for the processes this monitor couldn't read itself last time, and whatever started since.
+        let ask = tr.ticks == 0 ? nil : HelperAsk(pids: Array(tr.needsHelper), since: tr.readAt - 1)
+        let helped = input.helper ? recent ?? HelperClient.shared.metrics(ask, timeout: 1.5) : nil
+        if let helped { tr.helperAt = helped.at }
+        var needsHelper: Set<Int32> = []
+        defer { tr.needsHelper = needsHelper; tr.readAt = Date().timeIntervalSince1970 }
+        let priv = helped?.metrics
         if tr.ticks % 2 == 0 {
             let at = DispatchTime.now().uptimeNanoseconds, g = ExtraRead.gpuNanosByPid()
             if let last = tr.gpuLast, at > last.at {
@@ -477,9 +499,12 @@ final class AmbientMonitor {
                 c = Counts(at: now, cpu: Native.machToNanos(ru.ri_user_time &+ ru.ri_system_time),
                            disk: ru.ri_diskio_bytesread &+ ru.ri_diskio_byteswritten)
                 footprint = ru.ri_phys_footprint
-            } else if let m = priv?[k.pid], let cpu = m.cpuNanos {
-                c = Counts(at: now, cpu: cpu, disk: (m.diskRead ?? 0) &+ (m.diskWrite ?? 0))
-                footprint = m.footprint
+            } else {
+                needsHelper.insert(k.pid)
+                if let m = priv?[k.pid], let cpu = m.cpuNanos, let at = helped?.at {
+                    c = Counts(at: at, cpu: cpu, disk: (m.diskRead ?? 0) &+ (m.diskWrite ?? 0))
+                    footprint = m.footprint
+                }
             }
             let app = input.apps[k.pid]
             var a = AmbientProc(key: key, pid: k.pid, start: k.start, name: app?.name ?? st.name, path: st.path)

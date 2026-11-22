@@ -1,12 +1,20 @@
 import Foundation
 import ServiceManagement
 
+/// What a refresh asks the helper for: the processes the app couldn't read itself last time, and whatever
+/// started since then (seconds since 1970). See HelperProtocol.metrics.
+struct HelperAsk: Sendable {
+    var pids: [Int32]
+    var since: Double
+}
+
 /// App-side access to the root helper. Thread-safe; calls are synchronous and meant for background tasks.
 final class HelperClient: @unchecked Sendable {
     static let shared = HelperClient()
 
     private let lock = NSLock()
     private var connection: NSXPCConnection?
+    private var lastMetrics: (at: UInt64, metrics: [Int32: PrivMetrics])?
     /// Called (on an XPC queue) when the shared connection is interrupted or invalidated: the helper
     /// died, was disabled or was replaced, so whoever shows its state should probe again.
     var onConnectionLost: (@Sendable () -> Void)?
@@ -59,9 +67,41 @@ final class HelperClient: @unchecked Sendable {
     }
 
     func allMetrics(extras: ExtraReads = [], timeout: Double = 15) -> [Int32: PrivMetrics]? {
-        guard let data = call({ p, done in p.allMetrics(extras: extras.rawValue) { done($0) } }, timeout: timeout) as Data?,
-              let list = try? JSONDecoder().decode([PrivMetrics].self, from: data) else { return nil }
-        return Dictionary(list.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
+        allMetricsTimed(extras: extras, timeout: timeout)?.metrics
+    }
+
+    /// allMetrics with when it was read (uptime nanoseconds, halfway through the call), for working out rates.
+    func allMetricsTimed(extras: ExtraReads = [], timeout: Double = 15) -> (at: UInt64, metrics: [Int32: PrivMetrics])? {
+        metrics(HelperAsk?.none, extras: extras, timeout: timeout)
+    }
+
+    /// The helper's reading of the processes in `ask` (nil: of every process), with when it was read.
+    func metrics(_ ask: HelperAsk?, extras: ExtraReads = [], timeout: Double = 15) -> (at: UInt64, metrics: [Int32: PrivMetrics])? {
+        let sent = DispatchTime.now().uptimeNanoseconds
+        guard let data = PerfStages.measure(.helperCall, {
+            call({ p, done in
+                if let ask {
+                    let pids = ask.pids.withUnsafeBufferPointer { Data(buffer: $0) }
+                    p.metrics(pids: pids, since: ask.since, extras: extras.rawValue) { done($0) }
+                } else {
+                    p.allMetrics(extras: extras.rawValue) { done($0) }
+                }
+            }, timeout: timeout) as Data?
+        }) else { return nil }
+        let at = sent + (DispatchTime.now().uptimeNanoseconds - sent) / 2
+        guard let list = PerfStages.measure(.helperDecode, { try? JSONDecoder().decode([PrivMetrics].self, from: data) })
+        else { return nil }
+        let out = (at: at, metrics: Dictionary(list.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a }))
+        lock.lock(); lastMetrics = out; lock.unlock()
+        return out
+    }
+
+    /// The last allMetrics reply when it's at most `maxAge` seconds old: the menu bar monitor reuses the process
+    /// list's instead of asking the helper again (each reply costs the helper ~40 ms of CPU, billed to the app).
+    func recentMetrics(maxAge: Double) -> (at: UInt64, metrics: [Int32: PrivMetrics])? {
+        lock.lock(); defer { lock.unlock() }
+        guard let m = lastMetrics, DispatchTime.now().uptimeNanoseconds &- m.at <= UInt64(maxAge * 1e9) else { return nil }
+        return m
     }
 
     func argsEnv(_ pid: Int32) -> PrivArgsEnv? {

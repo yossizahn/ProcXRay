@@ -68,21 +68,38 @@ enum HelperDaemon {
         func version(reply: @escaping (Int, Int32) -> Void) { reply(HelperConfig.protocolVersion, getpid()) }
 
         func allMetrics(extras: Int, reply: @escaping (Data) -> Void) {
+            reply(collect(known: nil, since: 0, extras: extras))
+        }
+
+        func metrics(pids: Data, since: Double, extras: Int, reply: @escaping (Data) -> Void) {
+            let known = pids.withUnsafeBytes { Set($0.bindMemory(to: Int32.self)) }
+            reply(collect(known: known, since: since, extras: extras))
+        }
+
+        /// `known` nil: every process, with everything. Otherwise the metrics of the processes in it, and
+        /// everything for those started after `since`: what doesn't change while a process runs (who is
+        /// responsible for it, its login session, whether it is sandboxed) the caller keeps from the first time.
+        private func collect(known: Set<Int32>?, since: Double, extras: Int) -> Data {
             let extras = ExtraReads(rawValue: extras).intersection(.viaHelper)
             var out: [PrivMetrics] = []
             let jetsam = extras.contains(.jetsam) ? Jetsam.all() : nil
             for k in Native.allProcesses() where k.pid > 0 {
+                let new = known == nil || k.start.timeIntervalSince1970 > since
+                guard new || known?.contains(k.pid) == true else { continue }
                 // Usage of another user's process is root-only in the kernel (proc_pid_rusage checks
                 // same-user): a standard user gets it for their own processes only, as without the helper.
-                var m = mayInspect(k.pid) ? PrivMetrics.read(k.pid) : PrivMetrics(pid: k.pid)
-                if mayInspect(k.pid) { m.readExtras(extras); m.jetsam = jetsam?[k.pid] }
-                m.responsible = Native.responsible(k.pid)
-                m.sandboxed = Native.sandboxed(k.pid, start: k.start)
-                // Which login a process belongs to is no secret (`who` lists the logins): for every caller.
-                m.asid = LoginSessions.asid(k.pid)
+                let may = mayInspect(k.pid)
+                var m = may ? PrivMetrics.read(k.pid) : PrivMetrics(pid: k.pid)
+                if may { m.readExtras(extras); m.jetsam = jetsam?[k.pid] }
+                if new {
+                    m.responsible = Native.responsible(k.pid)
+                    m.sandboxed = Native.sandboxed(k.pid, start: k.start)
+                    // Which login a process belongs to is no secret (`who` lists the logins): for every caller.
+                    m.asid = LoginSessions.asid(k.pid)
+                }
                 out.append(m)
             }
-            reply((try? JSONEncoder().encode(out)) ?? Data())
+            return (try? JSONEncoder().encode(out)) ?? Data()
         }
 
         func argsEnv(pid: Int32, reply: @escaping (Data?) -> Void) {

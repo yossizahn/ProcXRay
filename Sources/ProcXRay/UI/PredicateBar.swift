@@ -175,7 +175,7 @@ struct PredicateBar: View {
 
     private func check(_ s: String) {
         do {
-            _ = try PredicateFields.compile(s, store: store)
+            _ = try PredicateFields.compile(s, context: store.context)
             error = nil
             applied = s.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch let e as PredicateError {

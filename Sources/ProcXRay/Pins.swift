@@ -31,6 +31,8 @@ final class Pins {
     /// Where a pinned key sorts among pinned rows (lower first); nil when it isn't pinned.
     func rank(_ key: String?) -> Int? { key.flatMap { rankOf[$0] } }
     func isPinned(_ key: String?) -> Bool { rank(key) != nil }
+    /// The pins as a value, for building a tree off the main thread (TreeBuilder).
+    var ranks: PinRanks { PinRanks(version: version, rankOf: rankOf) }
 
     func toggle(_ key: String) {
         if rankOf[key] != nil { set(keys.filter { $0 != key }) } else { set(keys + [key]) }
@@ -56,14 +58,14 @@ final class Pins {
 
     // MARK: Keys
 
-    private static func micros(_ d: Date) -> Int64 { Int64((d.timeIntervalSince1970 * 1e6).rounded()) }
-    static func process(pid: pid_t, start: Date) -> String { "p\(pid)@\(micros(start))" }
-    static func process(_ p: ProcInfo) -> String { process(pid: p.pid, start: p.start) }
+    nonisolated private static func micros(_ d: Date) -> Int64 { Int64((d.timeIntervalSince1970 * 1e6).rounded()) }
+    nonisolated static func process(pid: pid_t, start: Date) -> String { "p\(pid)@\(micros(start))" }
+    nonisolated static func process(_ p: ProcInfo) -> String { process(pid: p.pid, start: p.start) }
     static func process(_ p: AmbientProc) -> String { process(pid: p.pid, start: p.start) }
     static func group(leader p: AmbientProc) -> String { "u\(p.pid)@\(micros(p.start))" }
 
     /// A main-window row's key: a process row's process, an app row's main process, else the row's id.
-    static func row(_ n: ProcNode, procs: [pid_t: ProcInfo]) -> String {
+    nonisolated static func row(_ n: ProcNode, procs: [pid_t: ProcInfo]) -> String {
         if let p = n.proc { return process(p) }
         if n.kind == .unit, let r = n.rootPid.flatMap({ procs[$0] }) { return "u\(r.pid)@\(micros(r.start))" }
         return "r\(n.id)"

@@ -1,7 +1,6 @@
 import Foundation
 
 /// The process list's filter fields: every column, by id or title, plus a few process facts no column shows.
-@MainActor
 enum PredicateFields {
     typealias Field = PredicateField<ProcInfo>
     typealias Compiled = Predicate<ProcInfo>
@@ -52,25 +51,26 @@ enum PredicateFields {
     /// Every name the filter takes, for suggestions.
     static let names: [String] = Column.all.filter { $0.id != "context" }.map(\.id) + extras.map(\.name)
 
-    static func resolve(_ typed: String, store: Store) -> (name: String, field: Field)? {
+    static func resolve(_ typed: String, context: TableContext) -> (name: String, field: Field)? {
         guard let id = lookup[key(typed)] else { return nil }
         if let e = extras.first(where: { $0.name == id }) { return (id, e.field) }
         guard let col = Column.byID[id] else { return nil }
-        let field = Field(unit: unit(id), value: { [weak store] p, now in
-            guard let store else { return .unknown }
-            return switch col.sortValue(p, store) {
+        let field = Field(unit: unit(id), value: { p, now in
+            switch col.sortValue(p, context) {
             case .empty: .empty
             case .unknown: .unknown
             case .text(let s, _): .text(s)
             case .number(let v, _, _): .number(v)
             case .date(let d, _): .age(now.timeIntervalSince(d))
             }
-        }, display: { [weak store] p in store.map { col.value(p, $0).display } })
+        }, display: { p in col.value(p, context).display })
         return (id, field)
     }
 
-    static func compile(_ source: String, store: Store) throws -> Compiled? {
-        try PredicateCompiler.compile(source, resolve: { resolve($0, store: store) }, names: names)
+    /// The fields read the columns' values from `context`, so a compiled filter belongs to that one picture of
+    /// the data: the store compiles again when the data changes (parsing a filter takes microseconds).
+    static func compile(_ source: String, context: TableContext) throws -> Compiled? {
+        try PredicateCompiler.compile(source, resolve: { resolve($0, context: context) }, names: names)
     }
 
     /// The extra reads the fields a filter uses need, as if their columns were shown.
@@ -85,9 +85,10 @@ extension Store {
     /// change what refreshes read.
     func compiledPredicate(_ source: String) -> PredicateFields.Compiled? {
         let src = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ctx = context   // drops the filters compiled for older data
         if let c = compiledPredicates[src] { return c }
         if compiledPredicates.count > 100 { compiledPredicates.removeAll() }
-        let compiled = try? PredicateFields.compile(src, store: self)
+        let compiled = try? PredicateFields.compile(src, context: ctx)
         compiledPredicates[src] = compiled
         return compiled
     }

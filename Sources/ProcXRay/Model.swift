@@ -300,6 +300,7 @@ final class Store {
     var btmLoaded = false
     var btmError: String?
     var paused = false
+    /// Seconds between timer refreshes now (Tuning.windowIntervalNow); 0 while they are stopped.
     var interval: Double = 2
     var lastRefresh = Date()
     /// Bumped by each full refresh (Refresh button, coming back on screen), not by timer ticks: views
@@ -311,12 +312,25 @@ final class Store {
 
     /// Bumped whenever an input of nodes() changes, so the table's tree is only rebuilt when needed.
     @ObservationIgnored private(set) var dataGen = 0
-    /// The Kind column's labels, rebuilt when the data changes (see `kind(of:)`).
-    @ObservationIgnored var kindCache: (gen: Int, map: [pid_t: String], roots: [pid_t: pid_t])?
+    /// How many processes each filter chip's predicate matches (FilterChip), by its source: counted by each
+    /// refresh in the background, and assigned only when a count changed.
+    private(set) var chipCounts: [String: Int] = [:]
+    nonisolated static func chipCounts(_ ctx: TableContext) -> [String: Int] {
+        let now = Date()
+        var out: [String: Int] = [:]
+        for c in FilterChip.allCases {
+            guard let p = try? PredicateFields.compile(c.source, context: ctx) else { continue }
+            out[c.source] = ctx.procs.values.reduce(0) { $0 + (p.test($1, now) ? 1 : 0) }
+        }
+        return out
+    }
+    /// The data as the columns read it (see `context`), for the data generation it was made from.
+    @ObservationIgnored private var contextCache: (gen: Int, ctx: TableContext)?
     /// Bumps each time nodes() actually rebuilds, so views can skip work when it returned the cached tree.
     @ObservationIgnored private(set) var nodesVersion = 0
-    @ObservationIgnored private var nodesCache: (gen: Int, pins: Int, grouping: Grouping, filter: String,
-                                                 predicate: String, sort: ColumnSort, columns: Set<String>, nodes: [ProcNode])?
+    @ObservationIgnored private var nodesCache: (gen: Int, pins: Int, spec: TreeSpec, nodes: [ProcNode])?
+    /// The tree the table last asked for: each refresh builds it for the new data in its background task.
+    @ObservationIgnored private var treeSpec: TreeSpec?
     /// Filter predicates compiled so far, by trimmed source (nil: doesn't parse). See predicate(_:).
     @ObservationIgnored var compiledPredicates: [String: PredicateFields.Compiled?] = [:]
     /// The extra reads the filter predicate's fields need, read as if their columns were shown.
@@ -337,6 +351,27 @@ final class Store {
     /// Inverse of domainReads: child key → host key. Applied by every snapshot.
     @ObservationIgnored private var domainHostOf: [String: String] = [:]
     @ObservationIgnored private var readingDomains = false
+    /// When the domains that host services were last read again (fillPidDomains).
+    @ObservationIgnored private var hostsReadAt = Date.distantPast
+    /// Services whose host was looked for already, by key: asked about once.
+    @ObservationIgnored private var domainAsked: Set<String> = []
+    /// Programs whose domain hosted services in this or an earlier run, by executable path: read first.
+    @ObservationIgnored private var domainHostPaths = Set(UserDefaults.standard.stringArray(forKey: Store.domainHostPathsKey) ?? [])
+    private static let domainHostPathsKey = "pidDomain.hostPaths"
+    /// Programs whose domain was read and hosted nothing: not read again in later runs, unless a service points
+    /// at them.
+    @ObservationIgnored private var domainEmptyPaths = Set(UserDefaults.standard.stringArray(forKey: Store.domainEmptyPathsKey) ?? [])
+    @ObservationIgnored private var domainEmptyUnsaved = 0
+    private static let domainEmptyPathsKey = "pidDomain.emptyPaths"
+    private func saveDomainEmptyPaths() {
+        domainEmptyUnsaved = 0
+        UserDefaults.standard.set(Array(domainEmptyPaths.prefix(4000)), forKey: Self.domainEmptyPathsKey)
+    }
+    /// A process's domain is read once it has run this long: most of what launchd starts (mdworker_shared and
+    /// the like) is gone within seconds, and reading each cost a launchctl run, several a second.
+    private static let domainSettle: TimeInterval = 10
+    /// Hosts' domains are read again at most this often, however many launchd children appear.
+    private static let hostRereadEvery: TimeInterval = 15
     /// The extra reads the shown columns need (see Column.reads); set by the process table.
     @ObservationIgnored var extraReads: ExtraReads = []
     /// Inspector pages showing network usage (Resources, the group page): while any is, refreshes read the
@@ -364,6 +399,10 @@ final class Store {
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var refreshing = false
     @ObservationIgnored private var signing = false
+    /// Signature lookups set aside because the code read wasn't the code running, by codeKey (fillSignatures).
+    @ObservationIgnored private var signSkips: [String: Int] = [:]
+    /// The same for command lines (fillCommandLines).
+    @ObservationIgnored private var argvSkips: [String: Int] = [:]
     var helperState: HelperClient.State = .notInstalled
     var helperError: String?
     @ObservationIgnored private var probeTimer: Timer?
@@ -378,16 +417,32 @@ final class Store {
         HelperClient.shared.onConnectionLost = { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.probeAfterConnectionLoss() } }
         }
+        Power.install()
+        watchRegistries()
         probeHelper()
         refresh()
         schedule()
+        // The cadence follows the settings, the power source and whether the app is in front.
+        for name in [Tuning.didChange, NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification] {
+            visibilityObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] n in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let was = self.interval
+                    self.schedule()
+                    // Coming to the front after a slower stretch: show fresh figures at once.
+                    if n.name == NSApplication.didBecomeActiveNotification, self.onScreen, !self.paused, self.interval != was {
+                        self.refresh(full: false)
+                    }
+                }
+            })
+        }
         let names: [Notification.Name] = [
             NSWindow.didChangeOcclusionStateNotification, NSWindow.willCloseNotification,
             NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
             NSApplication.didHideNotification, NSApplication.didUnhideNotification,
             NSApplication.didChangeOcclusionStateNotification,
         ]
-        visibilityObservers = names.map { name in
+        visibilityObservers += names.map { name in
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 // Let a closing/miniaturizing window finish changing state before reading it.
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.visibilityChanged() } }
@@ -504,6 +559,8 @@ final class Store {
         probeHelper()
     }
 
+    /// Starts the timers that fit the app's state now: none off screen, and the refresh timer at the cadence the
+    /// settings give for an app in front or behind, on mains or battery (Tuning.windowIntervalNow).
     func schedule() {
         timer?.invalidate()
         timer = nil
@@ -517,22 +574,54 @@ final class Store {
         pt.tolerance = 2
         RunLoop.main.add(pt, forMode: .common)
         probeTimer = pt
-        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+        guard let every = Tuning.windowIntervalNow(active: NSApp.isActive || Self.assumeVisible) else {
+            if interval != 0 { interval = 0 }
+            return
+        }
+        if interval != every { interval = every }
+        let t = Timer(timeInterval: every, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, !self.paused else { return }
                 self.refresh(full: false)
             }
         }
-        t.tolerance = interval * 0.2   // lets the system coalesce our wakeups with others
+        t.tolerance = every * 0.2   // lets the system coalesce our wakeups with others
         RunLoop.main.add(t, forMode: .default)   // as before: no refreshes mid-scroll or while a menu is open
         timer = t
     }
 
-    /// LaunchServices and launchd state changes rarely and costs two subprocess spawns to read
-    /// (`lsappinfo` alone is ~25 ms of CPU plus work in launchservicesd), so timer ticks re-read it only
-    /// every `slowEvery` ticks. Manual refreshes and coming back on screen always read everything.
-    private static let slowEvery = 5
-    @ObservationIgnored private var ticksSinceSlow = 0
+    /// The registries a snapshot labels processes from, and when each is read again.
+    ///
+    /// launchd's jobs (the login session's and the system's) are asked of launchd in-process, ~8 ms, so they are
+    /// read again whenever a process came or went, at most every Tuning.registrySpacing seconds. LaunchServices
+    /// (`lsappinfo`) and launchd's user domain (`launchctl print`) each start a tool, so they wait for a reason:
+    /// LaunchServices' list of running apps changed (background-only ones included), or an app came forward or
+    /// hid. Failing that they are read every lsFallback seconds, for what changes without either (a job loaded
+    /// into the user domain). A manual refresh and coming back on screen read everything.
+    @ObservationIgnored private var lsDirty = true
+    private static let lsFallback: TimeInterval = 300
+    @ObservationIgnored private var runningAppsObservation: NSKeyValueObservation?
+    @ObservationIgnored private var jobsDirty = true
+    @ObservationIgnored private var lsReadAt = Date.distantPast
+    @ObservationIgnored private var jobsReadAt = Date.distantPast
+    @ObservationIgnored private var workspaceObservers: [NSObjectProtocol] = []
+
+    private func watchRegistries() {
+        // Every app LaunchServices knows, the ones without a Dock icon or any UI too.
+        runningAppsObservation = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.lsDirty = true } }
+        }
+        let nc = NSWorkspace.shared.notificationCenter
+        let names: [Notification.Name] = [
+            NSWorkspace.didActivateApplicationNotification, NSWorkspace.didHideApplicationNotification,
+            NSWorkspace.didUnhideApplicationNotification,
+        ]
+        workspaceObservers = names.map { name in
+            nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.lsDirty = true }
+            }
+        }
+    }
 
     func refresh(full: Bool = true) {
         guard !refreshing else { return }
@@ -545,35 +634,74 @@ final class Store {
         let extras = extraReads.union(predicateReads).union(viewerReads)
             .union(networkViewers > 0 ? .network : []).union(jetsamViewers > 0 ? .jetsam : [])
         let useHelper = helperState.isRunning
-        let readSlow = full || ticksSinceSlow + 1 >= Self.slowEvery || lsApps.isEmpty
-        ticksSinceSlow = readSlow ? 0 : ticksSinceSlow + 1
-        let ls = readSlow ? nil : lsApps
-        let jobs = readSlow ? nil : self.jobs
-        let otherJobs = readSlow ? nil : self.otherJobs
+        let now = Date()
+        let spacing = Tuning.registrySpacing
+        let readLS = full || lsApps.isEmpty
+            || (lsDirty && now.timeIntervalSince(lsReadAt) >= spacing)
+            || now.timeIntervalSince(lsReadAt) >= Self.lsFallback
+        let readJobs = full || readLS || jobs.isEmpty || (jobsDirty && now.timeIntervalSince(jobsReadAt) >= spacing)
+        if readLS { lsDirty = false; lsReadAt = now }
+        if readJobs { jobsDirty = false; jobsReadAt = now }
+        let oldLS = lsApps, oldJobs = jobs, oldOther = otherJobs
+        let btmOwners = btmOwners
+        let spec = treeSpec
+        let pins = Pins.shared.ranks
+        let genAtStart = dataGen
+        // A timer refresh asks the helper only for what the app couldn't read last time and what started since
+        // (a second's margin for the time the last snapshot took); a full one asks for everything.
+        let ask: HelperAsk? = full || prev.isEmpty ? nil
+            : HelperAsk(pids: prev.values.lazy.filter(\.needsHelper).map(\.pid), since: lastRefresh.timeIntervalSince1970 - 1 - Double(refreshMillis) / 1000)
         Task.detached(priority: .userInitiated) {
             let t0 = DispatchTime.now().uptimeNanoseconds
             // Ask the helper first, but collect local data while it answers; the snapshot waits for the
             // helper only after that, and never longer than helperBudget (it normally takes ~10 ms).
-            let priv = useHelper ? Pending { HelperClient.shared.allMetrics(extras: extras, timeout: Self.helperBudget) } : nil
+            let priv = useHelper ? Pending { HelperClient.shared.metrics(ask, extras: extras, timeout: Self.helperBudget)?.metrics } : nil
+            let perfR = PerfStages.begin()
+            let ls = readLS ? LSAppInfo.list() : oldLS
+            let jobs = readJobs ? Launchd.list() : oldJobs
+            let other = readLS ? Launchd.otherDomains()
+                : readJobs ? Launchd.systemJobs() + oldOther.filter { $0.domain == "user" } : oldOther
+            PerfStages.end(.registries, perfR)
+            let perfS = PerfStages.begin()
             var marked = Self.snapshot(prev: prev, signCache: cache, argvCache: argv, jobParents: jobParents, domainHosts: hosts, extras: extras, priv: { priv?.wait() },
-                                       ls: ls, jobs: jobs, otherJobs: otherJobs)
+                                       ls: ls, jobs: jobs, otherJobs: other)
             Self.markLeftBehind(&marked.procs, lsApps: marked.ls)
+            PerfStages.end(.snapshot, perfS)
             let snap = marked
+            // The table's tree for the new data, built here so the main thread only swaps it in.
+            let ctx = TableContext(procs: snap.procs, lsApps: snap.ls, btmOwners: btmOwners, signs: cache)
+            let tree = snap.error == nil ? spec.map { s in PerfStages.measure(.treeBuildBackground) { TreeBuilder.build(s, ctx, pins: pins) } } : nil
+            let chips = snap.error == nil ? Self.chipCounts(ctx) : [:]
             let ms = Int((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
             await MainActor.run {
+                let perfM = PerfStages.begin(); defer { PerfStages.end(.publish, perfM) }
                 self.refreshError = snap.error
                 guard snap.error == nil else {
                     // Keep showing the last good snapshot rather than an empty table.
                     self.refreshing = false
                     return
                 }
+                // A process came or went: launchd's jobs may have changed with it.
+                if snap.procs.count != self.procs.count || snap.procs.contains(where: { self.procs[$0.key]?.start != $0.value.start }) {
+                    self.jobsDirty = true
+                }
+                // The tree fits only if nothing it was built from changed meanwhile: the view, a pin, or data a
+                // background read or Background Items merged in while the snapshot was being taken.
+                let treeFits = spec == self.treeSpec && self.dataGen == genAtStart
                 self.procs = snap.procs
                 Pins.shared.prune()
-                if readSlow {
-                    self.lsApps = snap.ls
+                if readLS { self.lsApps = snap.ls }
+                if readJobs || readLS {
                     self.jobs = snap.jobs
                     self.otherJobs = snap.otherJobs
                 }
+                if treeFits, let tree, let spec, pins.version == Pins.shared.version {   // prune() may have dropped a pin
+                    self.contextCache = (self.dataGen, ctx)
+                    self.compiledPredicates.removeAll()
+                    self.nodesCache = (self.dataGen, pins.version, spec, tree)
+                    self.nodesVersion &+= 1
+                }
+                if chips != self.chipCounts { self.chipCounts = chips }
                 self.prevSamples = snap.samples
                 self.recordHistory(snap.procs)
                 if full { self.fullRefreshGen &+= 1 }
@@ -581,14 +709,13 @@ final class Store {
                 self.lastRefresh = Date()
                 self.refreshMillis = ms
                 self.refreshing = false
-                self.fillSignatures()
+                if Tuning.checksSignatures { self.fillSignatures() }
                 self.fillCommandLines()
-                self.fillPidDomains()
+                if Tuning.readsPidDomains { self.fillPidDomains() }
                 self.fillJobParents()
             }
         }
     }
-
     func benchRecordHistory(_ procs: [pid_t: ProcInfo]) { recordHistory(procs) }
 
     /// Appends this refresh to each process's history and forgets processes that are gone.
@@ -613,20 +740,34 @@ final class Store {
         let missing = procs.values.filter { signCache[$0.codeKey] == nil }.map { ($0.codeKey, $0.pid, $0.path, $0.cdhash) }
         guard !missing.isEmpty else { return }
         signing = true
+        let skipped = signSkips
         Task.detached(priority: .utility) {
+            let perf0 = PerfStages.begin()
             var acc: [String: SignInfo] = [:]
+            var skips: [String: Int] = [:]
             for (k, pid, path, expected) in missing {
-                let info = CodeSign.inspect(pid: pid, path: path)
+                var info = CodeSign.inspect(pid: pid, path: path)
                 // An exec between the snapshot and this lookup: the details belong to other code. Skip;
                 // the next snapshot carries the new cdhash and asks again.
-                if let e = expected, let got = info.cdHash, e != got { continue }
+                if let e = expected, let got = info.cdHash, e != got {
+                    // Still different on the third look: no exec, the file on disk was replaced since the
+                    // process started. Asking again on every refresh, for good, was a signature check per tick.
+                    guard (skipped[k] ?? 0) >= 2 else { skips[k] = (skipped[k] ?? 0) + 1; continue }
+                    info.error = "Read from the file on disk, which is not the code that is running (replaced since launch?)."
+                }
                 acc[k] = info
             }
-            let found = acc
+            let found = acc, newSkips = skips
+            PerfStages.end(.fillSignatures, perf0)
             await MainActor.run {
-                self.signCache.merge(found) { a, _ in a }
+                let perfM = PerfStages.begin(); defer { PerfStages.end(.fillMerge, perfM) }
+                self.signSkips = newSkips
                 let live = Set(self.procs.values.map(\.codeKey))
-                self.signCache = self.signCache.filter { live.contains($0.key) }
+                // Assigned once, and only when something changes: every assignment redraws what shows a signature.
+                var cache = self.signCache
+                cache.merge(found) { a, _ in a }
+                if cache.count != live.count || !found.isEmpty { cache = cache.filter { live.contains($0.key) } }
+                if !found.isEmpty || cache.count != self.signCache.count { self.signCache = cache }
                 // snapshot() already applied every older cache entry; patch only the processes that were
                 // just inspected, on a local copy, and publish once. Writing self.procs[pid] in a loop
                 // copied the whole dictionary per write and invalidated the table ~700 times.
@@ -657,21 +798,31 @@ final class Store {
         guard !missing.isEmpty else { return }
         readingArgv = true
         let helper = helperState.isRunning
+        let skipped = argvSkips
         Task.detached(priority: .utility) {
+            let perf0 = PerfStages.begin()
             var acc: [String: String?] = [:]
+            var skips: [String: Int] = [:]
             var buf: [UInt8] = []
             for (k, pid, start, expected) in missing {
                 let args = Native.argsEnv(pid, buffer: &buf)?.args
                     ?? (helper ? HelperClient.shared.argsEnv(pid)?.args : nil)
                 // Read from another process (the pid was reused) or other code (it exec'd since the
-                // snapshot): leave it for the next refresh, whose key matches what's running.
-                guard Native.isSame(pid, start: start), Native.cdhash(pid) == expected else { continue }
+                // snapshot): leave it for the next refresh, whose key matches what's running. A process this
+                // keeps happening to (the check itself can't read it) is given up on after the third time.
+                guard Native.isSame(pid, start: start), Native.cdhash(pid) == expected else {
+                    if (skipped[k] ?? 0) >= 2 { acc[k] = .some(nil) } else { skips[k] = (skipped[k] ?? 0) + 1 }
+                    continue
+                }
                 // .some: assigning the bare optional (inferred as String??) removed the key for unreadable argv,
                 // so every unreadable process was read again on every refresh.
                 acc[k] = .some(args.map(Self.joinArgs))
             }
-            let found = acc
+            let found = acc, newSkips = skips
+            PerfStages.end(.fillArgv, perf0)
             await MainActor.run {
+                let perfM = PerfStages.begin(); defer { PerfStages.end(.fillMerge, perfM) }
+                self.argvSkips = newSkips
                 self.argvCache.merge(found) { a, _ in a }
                 let live = Set(self.procs.values.map(\.codeKey))
                 self.argvCache = self.argvCache.filter { live.contains($0.key) }
@@ -689,38 +840,91 @@ final class Store {
         }
     }
 
-    /// Reads the launchd pid domain of every process not read yet, in the background. A process that appears
-    /// may have been launched into a domain read earlier, so every domain that listed services is read again
-    /// when a new process is a child of launchd; most domains are empty (54 hosts among ~480 processes measured).
+    /// Reads launchd pid domains in the background, to name the process that hosts each extension and XPC service.
+    /// Each read is a `launchctl print` (through the helper for other users' processes), and only ~1 process in 20
+    /// hosts anything, so the reads are rationed rather than made for every process at once (a thousand tool runs
+    /// at launch, measured):
+    /// - first the processes a new service points at (its responsible process), then those running a program that
+    ///   hosted something before (remembered across launches), a few per refresh;
+    /// - every other process once it has run domainSettle seconds, two per refresh, unless its program was read
+    ///   in an earlier run and hosted nothing (remembered too): after the first run's sweep, a launch reads the
+    ///   few dozen known hosts and then starts nothing more;
+    /// - domains that listed services are read again only after a new extension or XPC service appears, at most
+    ///   every hostRereadEvery seconds: only such a process can have joined one.
     private func fillPidDomains() {
         guard !readingDomains else { return }
         // Not this app's own children (launchctl, lsappinfo): they host no domain, and reading one spawns
         // launchctl, which the next refresh would find as a new process to read, every refresh.
         let me = getpid()
-        let missing = procs.values.filter { $0.pid > 0 && !$0.isZombie && $0.ppid != me && domainReads[$0.key] == nil }
-        guard !missing.isEmpty else { return }
-        // launchd starts what runs in a pid domain, so only a new child of launchd can be in one read before.
-        let hostKeys = missing.contains { $0.ppid == 1 }
-            ? Set(domainReads.compactMap { k, v in (v?.isEmpty == false) ? k : nil }) : []
-        let targets = missing + procs.values.filter { hostKeys.contains($0.key) }
-        let jobs = targets.map { ($0.pid, $0.start, $0.key, $0.uid == getuid()) }
+        let now = Date()
+        let settled = procs.values.filter {
+            $0.pid > 0 && !$0.isZombie && $0.ppid != me && now.timeIntervalSince($0.start) >= Self.domainSettle
+        }
+        // Services launchd started that have no host yet and haven't been looked into.
+        let orphans = settled.filter {
+            $0.ppid == 1 && domainHostOf[$0.key] == nil && !domainAsked.contains($0.key)
+                && (SmartTree.isExtension($0) || Registrations.isXPCService($0.path))
+        }
+        let pointedAt = Set(orphans.compactMap { o in o.responsible.flatMap { $0 != o.pid ? $0 : nil } })
+        // A process a new service points at is read even if it was read before: the service is new.
+        let first = settled.filter { pointedAt.contains($0.pid) }
+        var known: [ProcInfo] = [], rest: [ProcInfo] = []
+        for p in settled where domainReads[p.key] == nil && !pointedAt.contains(p.pid) {
+            if p.path.map(domainHostPaths.contains) == true { known.append(p) }
+            else if p.path.map(domainEmptyPaths.contains) == true { domainReads[p.key] = .some([]) }   // as last time
+            else { rest.append(p) }
+        }
+        for o in orphans where o.responsible.map(pointedAt.contains) == true { domainAsked.insert(o.key) }
+        var targets = Array(first.prefix(16)) + known.prefix(8) + rest.prefix(2)
+        let rereadHosts = !orphans.isEmpty && now.timeIntervalSince(hostsReadAt) >= Self.hostRereadEvery
+        if rereadHosts {
+            hostsReadAt = now
+            let hostKeys = Set(domainReads.compactMap { k, v in (v?.isEmpty == false) ? k : nil })
+            targets += procs.values.filter { hostKeys.contains($0.key) }
+            // Asked about now: the hosts' domains read next either list them or they have none.
+            for o in orphans { domainAsked.insert(o.key) }
+        }
+        guard !targets.isEmpty else { return }
+        let jobs = targets.map { ($0.pid, $0.start, $0.key, $0.uid == getuid(), $0.path) }
         let keyOf = procs.mapValues(\.key)
         readingDomains = true
         let helper = helperState.isRunning
         Task.detached(priority: .utility) {
+            let perf0 = PerfStages.begin()
             var acc: [String: [String]?] = [:]
-            for (pid, start, key, own) in jobs {
+            var hostPaths: Set<String> = [], emptyPaths: Set<String> = []
+            for (pid, start, key, own, path) in jobs {
                 let kids = PidDomain.read(pid, ownedByUser: own, viaHelper: helper)
                 // The pid was reused while reading: the domain belongs to someone else; the next pass asks again.
                 guard Native.isSame(pid, start: start) else { continue }
                 // .some keeps "couldn't be read" (nil) cached, as for argv.
-                acc[key] = .some(kids.map { $0.compactMap { keyOf[$0] }.filter { $0 != key } })
+                let services = kids.map { $0.compactMap { keyOf[$0] }.filter { $0 != key } }
+                acc[key] = .some(services)
+                if let path, let services { if services.isEmpty { emptyPaths.insert(path) } else { hostPaths.insert(path) } }
             }
-            let found = acc
+            let found = acc, paths = hostPaths, empties = emptyPaths.subtracting(hostPaths)
+            PerfStages.end(.fillDomains, perf0)
             await MainActor.run {
+                let perfM = PerfStages.begin(); defer { PerfStages.end(.fillMerge, perfM) }
                 self.domainReads.merge(found) { _, b in b }
                 let live = Set(self.procs.values.map(\.key))
                 self.domainReads = self.domainReads.filter { live.contains($0.key) }
+                self.domainAsked = self.domainAsked.filter(live.contains)
+                if !paths.isSubset(of: self.domainHostPaths) {
+                    self.domainHostPaths.formUnion(paths)
+                    UserDefaults.standard.set(Array(self.domainHostPaths.prefix(400)).sorted(), forKey: Self.domainHostPathsKey)
+                }
+                let newEmpties = empties.subtracting(self.domainHostPaths)
+                let stale = self.domainEmptyPaths.intersection(paths)
+                if !newEmpties.isSubset(of: self.domainEmptyPaths) || !stale.isEmpty {
+                    self.domainEmptyPaths.formUnion(newEmpties)
+                    self.domainEmptyPaths.subtract(paths)
+                    // Written every so often, not per read: the sweep adds one path per refresh.
+                    self.domainEmptyUnsaved += 1
+                    if self.domainEmptyUnsaved >= 30 || !stale.isEmpty { self.saveDomainEmptyPaths() }
+                } else if self.domainEmptyUnsaved > 0, found.count > 0 {
+                    self.saveDomainEmptyPaths()
+                }
                 var hostOf: [String: String] = [:]
                 for (host, kids) in self.domainReads { for k in kids ?? [] { hostOf[k] = host } }
                 let changed = hostOf != self.domainHostOf
@@ -749,12 +953,17 @@ final class Store {
         guard !todo.isEmpty else { return }
         readingJobParents = true
         Task.detached(priority: .utility) {
+            let perf0 = PerfStages.begin()
             var found: [String: String?] = [:]
             for (_, key, label, domain) in todo {
-                found[key] = Launchd.parentBundle(label, domain: domain)
+                // .some keeps "has none" (nil) cached, as for argv: the bare optional removed the key, so every
+                // such job was asked about again on every refresh, one launchctl each.
+                found[key] = .some(Launchd.parentBundle(label, domain: domain))
             }
             let result = found
+            PerfStages.end(.fillJobParents, perf0)
             await MainActor.run {
+                let perfM = PerfStages.begin(); defer { PerfStages.end(.fillMerge, perfM) }
                 self.jobParentCache.merge(result) { _, b in b }
                 guard self.publishFill(result.count) else { self.readingJobParents = false; return }
                 var procs = self.procs
@@ -938,7 +1147,8 @@ final class Store {
             // sandbox check is cheap but noisy for zombies. A process can enter a sandbox but never leave it, so
             // one seen sandboxed isn't asked again: confirming a "yes" costs a sysctl (Native.isSame).
             if before?.sandboxed == true { p.sandboxed = true }
-            else if !p.isZombie { p.sandboxed = Native.sandboxed(pid, start: p.start) ?? priv?[pid]?.sandboxed }
+            // The helper answers this once per process (HelperAsk), so its answer is kept from then on.
+            else if !p.isZombie { p.sandboxed = Native.sandboxed(pid, start: p.start) ?? priv?[pid]?.sandboxed ?? before?.sandboxed }
             let sample = Sample(p, at: now)
             if let before, now > before.at {
                 let r = Rates(from: before, to: sample)
@@ -1043,205 +1253,33 @@ final class Store {
 
     /// `columns`: the shown columns, whose group-row values are worked out (the others cost nothing).
     /// `predicate`: a filter in the PredicateCompiler language; one that doesn't parse filters nothing.
+    ///
+    /// A timer refresh has already built this tree in the background (see refresh), so this returns it; the tree is
+    /// built here, on the main thread, only when the view itself changed (sort, filter, columns, a pin) or a
+    /// background read patched the data between refreshes.
     func nodes(grouping: Grouping, filter: String, predicate: String = "", sort: ColumnSort,
                columns: Set<String> = []) -> [ProcNode] {
-        let pins = Pins.shared.version
-        if let c = nodesCache, c.gen == dataGen, c.pins == pins, c.grouping == grouping, c.filter == filter,
-           c.predicate == predicate, c.sort == sort, c.columns == columns { return c.nodes }
-        let out = buildNodes(grouping: grouping, filter: filter, predicate: self.predicate(predicate),
-                             sort: sort, columns: columns)
-        nodesCache = (dataGen, pins, grouping, filter, predicate, sort, columns, out)
+        let spec = TreeSpec(grouping: grouping, filter: filter, predicate: predicate, sort: sort, columns: columns)
+        let pins = Pins.shared.ranks
+        if let c = nodesCache, c.gen == dataGen, c.pins == pins.version, c.spec == spec { return c.nodes }
+        // Keeps predicateReads in step with the filter in force.
+        _ = self.predicate(predicate)
+        let ctx = context
+        let out = PerfStages.measure(.treeBuild) { TreeBuilder.build(spec, ctx, pins: pins) }
+        nodesCache = (dataGen, pins.version, spec, out)
         nodesVersion &+= 1
+        treeSpec = spec
         return out
     }
 
-    private func buildNodes(grouping: Grouping, filter: String,
-                            predicate: PredicateFields.Compiled?, sort: ColumnSort, columns: Set<String>) -> [ProcNode] {
-        let all = Array(procs.values)
-        var roots: [ProcNode]
-        switch grouping {
-        case .smart:
-            roots = SmartTree.build(.init(procs: procs, lsApps: lsApps, btmOwners: btmOwners))
-        case .flat:
-            roots = all.map { ProcNode(id: Int($0.pid), proc: $0, title: $0.name) }
-        case .responsible:
-            let lsByPid = Dictionary(lsApps.compactMap { a in a.pid.map { ($0, a) } }, uniquingKeysWith: { a, _ in a })
-            var ghostIDs: [pid_t: Int] = [:]
-            var leftGroups: [Int: String] = [:]   // Left Behind group id -> title
-            var up: [pid_t: Int] = [:]
-            for p in all {
-                if let g = p.leftBehindGroup, let t = p.leftBehindText {
-                    leftGroups[g] = t
-                    up[p.pid] = g
-                } else if let r = p.responsible, r != p.pid {
-                    if self.procs[r] != nil { up[p.pid] = Int(r) } else {
-                        ghostIDs[r] = -Int(r) - 1
-                        up[p.pid] = -Int(r) - 1
-                    }
-                } else if p.ppid > 1, p.ppid != p.pid, self.procs[p.ppid] != nil {
-                    // No responsible process of its own (or it's its own): its parent, as the Parent tree had
-                    // it. launchd (1) and kernel_task (0) parent nearly everything, so their children stay roots.
-                    up[p.pid] = Int(p.ppid)
-                }
-            }
-            // Mixing the two links can close a loop (A responsible for B, B the parent of A), and a process
-            // on a loop would never be reached from a root. Cut each loop at the process where it's found.
-            for p in all {
-                var seen: Set<pid_t> = [p.pid]
-                var cur = p.pid
-                while let u = up[cur], u > 0 {
-                    let next = pid_t(u)
-                    if !seen.insert(next).inserted { up[cur] = nil; break }
-                    cur = next
-                }
-            }
-            roots = tree(all) { up[$0.pid] }
-            // tree() put orphans-of-ghosts under synthetic ids; materialize those groups.
-            var extra: [ProcNode] = []
-            let byParent = Dictionary(grouping: roots.filter { $0.id < 0 }, by: \.id)
-            roots.removeAll { $0.id < 0 }
-            for (dead, gid) in ghostIDs where leftGroups[gid] == nil {
-                let kids = byParent[gid]?.flatMap { $0.children ?? [] } ?? []
-                let name = lsByPid[dead]?.name ?? "?"
-                extra.append(ProcNode(id: gid, proc: nil, title: "\(name) (exited, pid \(dead))",
-                                      subtitle: "responsible process is gone", isGhost: true, children: kids))
-            }
-            for (gid, text) in leftGroups {
-                let kids = byParent[gid]?.flatMap { $0.children ?? [] } ?? []
-                extra.append(ProcNode(id: gid, proc: nil, title: "\(text) (exited)",
-                                      subtitle: "app is gone; these outlived it", isGhost: true, children: kids))
-            }
-            roots += extra
-        case .bySigner, .byUser, .bySession, .byDomain, .bySandbox, .byArch:
-            roots = TreeExtras.pivot(grouping, all)
-        }
-        if grouping != .flat { TreeExtras.collapseIdentical(&roots) }
-        // Every pass works on the tree in place: each copy of it copied every node's ProcInfo.
-        let pruning = !filter.isEmpty || predicate != nil
-        if pruning {
-            Self.count(&roots)
-            let now = Date()
-            roots = TreeExtras.prune(roots, text: filter, keep: predicate.map { p in { p.test($0, now) } })
-        }
-        let shown = Column.all.filter { columns.contains($0.id) && $0.id != "name" && $0.id != "context" }
-        // Unpruned, the totals are the shown counts, which the sort pass works out anyway.
-        _ = sorted(&roots, sort, shown: shown, sortColumn: Column.byID[sort.id], memo: ColumnMemo(), totals: !pruning)
-        return roots
+    /// The data as the columns read it, made once per change of the data.
+    var context: TableContext {
+        if let c = contextCache, c.gen == dataGen { return c.ctx }
+        let ctx = TableContext(procs: procs, lsApps: lsApps, btmOwners: btmOwners, signs: signCache)
+        contextCache = (dataGen, ctx)
+        compiledPredicates.removeAll()
+        return ctx
     }
-
-    /// Sets totalCount (processes in the subtree) before the search filter prunes anything.
-    private static func count(_ nodes: inout [ProcNode]) {
-        for i in nodes.indices {
-            var total = nodes[i].proc == nil ? 0 : 1
-            if nodes[i].children != nil {
-                count(&nodes[i].children!)
-                total += nodes[i].children!.reduce(0) { $0 + $1.totalCount }
-            }
-            nodes[i].totalCount = total
-        }
-    }
-
-    /// Build a forest using `parentOf`; unknown parents (negative ids) become temporary placeholder roots.
-    private func tree(_ all: [ProcInfo], parentOf: (ProcInfo) -> Int?) -> [ProcNode] {
-        var kids: [Int: [ProcInfo]] = [:]
-        var roots: [ProcInfo] = []
-        var placeholders: [Int: [ProcInfo]] = [:]
-        for p in all {
-            if let par = parentOf(p) {
-                if par < 0 { placeholders[par, default: []].append(p) } else { kids[par, default: []].append(p) }
-            } else { roots.append(p) }
-        }
-        func build(_ p: ProcInfo, depth: Int) -> ProcNode {
-            let c = depth < 64 ? (kids[Int(p.pid)] ?? []).map { build($0, depth: depth + 1) } : []
-            return ProcNode(id: Int(p.pid), proc: p, title: p.name, children: c.isEmpty ? nil : c)
-        }
-        var out = roots.map { build($0, depth: 0) }
-        for (gid, ps) in placeholders {
-            out.append(ProcNode(id: gid, proc: nil, title: "", children: ps.map { build($0, depth: 1) }))
-        }
-        return out
-    }
-
-    /// Ties are broken by row id. Without that, rows that tie (every group row has the same pidKey)
-    /// kept Dictionary iteration order, which reshuffles whenever a process comes or goes; the table then
-    /// saw hundreds of moved rows per refresh and spent seconds rebuilding and re-measuring row views.
-    /// Children are sorted first so each node's cpuKey/memKey (subtree totals) is set before it is compared.
-    /// Also fills each group row's value for every shown column (by the column's group rule) and each
-    /// row's value in the sort column. Returns the processes under `nodes`, for the parent's group values.
-    /// `totals`: also set totalCount (nothing was pruned, so it equals shownCount).
-    private func sorted(_ nodes: inout [ProcNode], _ sort: ColumnSort, shown: [Column], sortColumn: Column?,
-                        memo: ColumnMemo, totals: Bool) -> [ProcInfo] {
-        var allMembers: [ProcInfo] = []
-        let pins = Pins.shared
-        for i in nodes.indices {
-            var members: [ProcInfo] = []
-            if nodes[i].children != nil {
-                members = sorted(&nodes[i].children!, sort, shown: shown, sortColumn: sortColumn, memo: memo, totals: totals)
-            }
-            let proc = nodes[i].proc
-            if let p = proc { members.append(p) }
-            allMembers += members
-            if proc == nil {
-                for (c, col) in shown.enumerated() {
-                    let v = col.groupValue(nodes[i], members: members, store: self) { memo.value(c, col, $0, self) }
-                    nodes[i].groupValues[col.id] = v
-                }
-            }
-            if sort.id == "name" {
-                nodes[i].sortValue = .text(nodes[i].title)
-            } else if let col = sortColumn {
-                let v = proc.map { col.sortValue($0, self) } ?? nodes[i].groupValues[col.id]
-                    ?? col.groupValue(nodes[i], members: members, store: self) { col.value($0, self) }
-                nodes[i].sortValue = v
-            }
-            let kids = nodes[i].children ?? []
-            if let p = proc {
-                nodes[i].cpuKey = p.cpuPercent ?? 0
-                nodes[i].memKey = p.footprint ?? 0
-                nodes[i].diskKey = ProcNode.disk(p)
-            } else {
-                nodes[i].cpuKey = kids.reduce(0) { $0 + $1.cpuKey }
-                nodes[i].memKey = kids.reduce(0) { $0 + $1.memKey }
-                let known = kids.map(\.diskKey).filter { $0 >= 0 }
-                nodes[i].diskKey = known.isEmpty ? -1 : known.reduce(0, &+)
-            }
-            nodes[i].shownCount = (proc == nil ? 0 : 1) + kids.reduce(0) { $0 + $1.shownCount }
-            if totals { nodes[i].totalCount = nodes[i].shownCount }
-            nodes[i].unitCount = kids.reduce(0) { $0 + ($1.kind == .group ? $1.unitCount : 1) }
-            if !pins.isEmpty {
-                let own = pins.rank(Pins.row(nodes[i], procs: procs))
-                nodes[i].pinned = own != nil
-                nodes[i].pinRank = ([own] + kids.map(\.pinRank)).compactMap { $0 }.min()
-            }
-        }
-        // Sorts positions by small keys, then places each node once: sorting the nodes themselves moved whole
-        // ProcNodes (a ProcInfo each) at every comparison step, which was most of a rebuild.
-        struct Key { var pin: Int?; var fixed: Int?; var value: CellValue; var has: Bool; var id: Int }
-        let keys = nodes.map { Key(pin: $0.pinRank, fixed: $0.fixedOrder, value: $0.sortValue, has: $0.sortValue.hasValue, id: $0.id) }
-        let order = keys.withUnsafeBufferPointer { k in
-            k.indices.sorted { i, j in
-                let a = k[i], b = k[j]
-                // Pinned rows (and groups holding one) first, in the order they were pinned.
-                if a.pin != b.pin { return (a.pin ?? .max) < (b.pin ?? .max) }
-                if a.fixed != nil || b.fixed != nil, a.fixed != b.fixed {
-                    return (a.fixed ?? .max) < (b.fixed ?? .max)
-                }
-                // Rows without a value go last, whichever way the column is sorted.
-                if a.has != b.has { return a.has }
-                if a.has {
-                    switch CellValue.compare(a.value, b.value) {
-                    case .orderedAscending: return sort.ascending
-                    case .orderedDescending: return !sort.ascending
-                    case .orderedSame: break
-                    }
-                }
-                return a.id < b.id
-            }
-        }
-        if !order.elementsEqual(order.indices) { nodes = order.map { nodes[$0] } }
-        return allMembers
-    }
-
     // MARK: Actions
 
     /// Signals `p` only if its pid still belongs to the same process (same start time): the pid may have
@@ -1267,8 +1305,12 @@ enum Fmt {
     static func bytes(_ v: UInt64?) -> String {
         guard let v else { return "—" }
         if v == 0 { return "0" }
-        return ByteCountFormatter.string(fromByteCount: Int64(clamping: v), countStyle: .memory)
+        return byteFormatter.string(fromByteCount: Int64(clamping: v))
     }
+    /// One formatter: the class method sets one up per call (a quarter slower).
+    nonisolated(unsafe) private static let byteFormatter: ByteCountFormatter = {
+        let f = ByteCountFormatter(); f.countStyle = .memory; return f
+    }()
     /// A count with thousands separators, or "—".
     static func count<T: BinaryInteger>(_ v: T?) -> String {
         guard let v else { return "—" }
@@ -1301,11 +1343,15 @@ enum Fmt {
     /// Nothing ran before boot, so for display such a start is the boot time. The raw value stays in
     /// ProcInfo.start: it is part of the process's identity and must not move when boot time does.
     static func shownStart(_ d: Date) -> Date {
-        if bootCache == nil || Date().timeIntervalSince(bootCache!.at) > 5 { bootCache = (Date(), Native.bootTime()) }
-        guard let boot = bootCache?.boot, d < boot else { return d }
+        // Called for every process under every group row of a Started column: plain statics and the uptime clock,
+        // not an optional tuple and Date() per call (4 % of a table rebuild).
+        let now = DispatchTime.now().uptimeNanoseconds
+        if bootReadAt == 0 || now &- bootReadAt > 5_000_000_000 { bootTime = Native.bootTime(); bootReadAt = now }
+        guard let boot = bootTime, d < boot else { return d }
         return boot
     }
-    nonisolated(unsafe) private static var bootCache: (at: Date, boot: Date?)?
+    nonisolated(unsafe) private static var bootTime: Date?
+    nonisolated(unsafe) private static var bootReadAt: UInt64 = 0
 
     static func age(_ d: Date) -> String {
         // A start time after now (the clock was set back since) is shown as just started, not negative.
@@ -1314,20 +1360,6 @@ enum Fmt {
         if s < 3600 { return "\(s / 60)m" }
         if s < 86400 { return "\(s / 3600)h \(s % 3600 / 60)m" }
         return "\(s / 86400)d \(s % 86400 / 3600)h"
-    }
-}
-
-/// Each process's value per shown column, worked out once per tree build: a process is a member of
-/// every group row above it.
-@MainActor
-final class ColumnMemo {
-    private var values: [[pid_t: CellValue]] = []
-    func value(_ i: Int, _ col: Column, _ p: ProcInfo, _ store: Store) -> CellValue {
-        while values.count <= i { values.append([:]) }
-        if let v = values[i][p.pid] { return v }
-        let v = col.value(p, store)
-        values[i][p.pid] = v
-        return v
     }
 }
 
@@ -1341,6 +1373,9 @@ struct Sample: Sendable {
     /// Carried to the next refresh, which reuses it instead of reading it again (see Store.snapshot).
     var fixed: Fixed?
     var sandboxed: Bool?
+    var pid: pid_t
+    /// The app couldn't read this process itself: the next refresh asks the helper for it (HelperAsk).
+    var needsHelper: Bool
 
     /// What doesn't change while a process runs the same code (`cdhash`).
     struct Fixed: Sendable {
@@ -1356,6 +1391,8 @@ struct Sample: Sendable {
 
     init(_ p: ProcInfo, at: UInt64) {
         self.at = at
+        pid = p.pid
+        needsHelper = p.viaHelper || !p.isInspectable
         fixed = Fixed(cdhash: p.cdhash, comm: p.comm, path: p.path, extensionPoint: p.extensionPoint, responsible: p.responsible,
                       coalition: p.coalition, jetsamCoalition: p.jetsamCoalition, asid: p.asid)
         sandboxed = p.sandboxed

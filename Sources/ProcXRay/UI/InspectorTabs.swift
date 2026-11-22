@@ -354,7 +354,7 @@ struct InfoTab: View {
         }
     }
 
-    private func col(_ id: String, _ p: ProcInfo) -> String { Column.byID[id]!.value(p, store).display }
+    private func col(_ id: String, _ p: ProcInfo) -> String { Column.byID[id]!.value(p, store.context).display }
 
     /// The Identity columns (name and pid are in the header, the command line has its own card).
 
@@ -1420,19 +1420,10 @@ enum EntitlementInfo {
 
 extension Store {
     /// The process at the top of `p`'s group in the Smart tree (its app or job), from the same pass.
-    func unitRoot(of p: ProcInfo) -> pid_t? {
-        if kindCache?.gen != dataGen { _ = kind(of: p) }
-        return kindCache?.roots[p.pid]
-    }
+    func unitRoot(of p: ProcInfo) -> pid_t? { context.unitRoots[p.pid] }
+
+    /// "App · XPC service", "Extension · Widgets": the Smart tree's category of the process's unit, then its role.
+    func kind(of p: ProcInfo) -> String? { context.kind(of: p) }
 }
 
-extension BundleInfo {
-    /// CFBundleShortVersionString, read once per bundle.
-    static func version(_ bundle: String) -> String? {
-        if let hit = versions[bundle] { return hit }
-        let plist = NSDictionary(contentsOfFile: bundle + "/Contents/Info.plist") ?? NSDictionary(contentsOfFile: bundle + "/Info.plist")
-        let v = plist?["CFBundleShortVersionString"] as? String
-        versions[bundle] = .some(v)
-        return v
-    }
-}
+

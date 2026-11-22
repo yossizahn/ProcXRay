@@ -279,6 +279,37 @@ enum Bench {
             print(String(decoding: (try? e.encode(d)) ?? Data(), as: UTF8.self))
             return
         }
+        if what == "metrics" {
+            // metrics: what a timer refresh asks for (the processes this user can't read, and whatever started in
+            // the last few seconds) against the full reading: sizes, the helper's own CPU for each, and whether the
+            // figures agree for the processes asked for.
+            let unreadable = Native.allProcesses().filter { $0.pid > 0 && Native.rusage($0.pid) == nil }.map(\.pid)
+            func helperCPU() -> Double {
+                // The helper's CPU time, as it reports it for its own pid.
+                guard case .running(let pid) = HelperClient.shared.probe(), let m = c.metrics(HelperAsk(pids: [pid], since: Date().timeIntervalSince1970 + 60)) else { return 0 }
+                return Double(m.metrics[pid]?.cpuNanos ?? 0) / 1e6
+            }
+            let runs = 20
+            var c0 = helperCPU()
+            var full: [Int32: PrivMetrics] = [:]
+            for _ in 0..<runs { full = c.allMetrics() ?? [:] }
+            let fullMs = (helperCPU() - c0) / Double(runs)
+            c0 = helperCPU()
+            var asked: [Int32: PrivMetrics] = [:]
+            let since = Date().timeIntervalSince1970 - 3
+            for _ in 0..<runs { asked = c.metrics(HelperAsk(pids: unreadable, since: since))?.metrics ?? [:] }
+            let askedMs = (helperCPU() - c0) / Double(runs)
+            let missing = unreadable.filter { asked[$0] == nil && full[$0] != nil }
+            let disagree = unreadable.filter { p in
+                guard let a = asked[p], let f = full[p] else { return false }
+                return a.footprint == nil && f.footprint != nil || a.threads != f.threads && a.threads == nil
+            }
+            print(String(format: "all: %d processes, %.1f ms of helper CPU per call", full.count, fullMs))
+            print(String(format: "asked: %d unreadable here, reply %d processes, %.1f ms of helper CPU per call", unreadable.count, asked.count, askedMs))
+            print("asked for but missing: \(missing.count); without figures the full reading has: \(disagree.count)")
+            print("extra (started in the last 3 s): \(asked.keys.filter { !unreadable.contains($0) }.count)")
+            return
+        }
         if what == "sessions" {
             // sessions: every process's login session (asid) from the helper, counted per session, with how many
             // of them the app reads itself.
@@ -709,6 +740,16 @@ enum Bench {
         let owned = procs.values.filter { $0.domainOwner != nil }
         let ext = procs.values.filter(SmartTree.isExtension)
         print("with a host: \(owned.count); extensions \(ext.filter { $0.domainOwner != nil }.count) of \(ext.count)")
+        // What the refresh goes by to find a service's host without reading every process's domain (Store.fillPidDomains):
+        // a service in a pid domain is a child of launchd whose responsible process, or its coalition's, is the host.
+        let byResponsible = owned.filter { $0.responsible == $0.domainOwner }
+        let byCoalition = owned.filter { c in c.responsible != c.domainOwner && c.coalition != nil && c.coalition == c.domainOwner.flatMap { procs[$0]?.coalition } }
+        let neither = owned.filter { c in !byResponsible.contains { $0.pid == c.pid } && !byCoalition.contains { $0.pid == c.pid } }
+        print("hosted services: \(owned.filter { $0.ppid == 1 }.count) of \(owned.count) are children of launchd; host is the responsible process for \(byResponsible.count), only shares its coalition for \(byCoalition.count), neither for \(neither.count)")
+        for c in neither.prefix(12) {
+            let h = c.domainOwner.flatMap { procs[$0] }
+            print("  neither: \(c.name) (\(c.pid)) host \(h?.name ?? "?") (\(c.domainOwner ?? 0)); responsible \(c.responsible.map(String.init) ?? "?"), coalition \(c.coalition.map(String.init) ?? "?") vs \(h?.coalition.map(String.init) ?? "?")")
+        }
         let after = SmartTree.unitRoots(.init(procs: procs, lsApps: ls))
         let units = { (r: [pid_t: pid_t]) in Set(r.values).count }
         let moved = procs.keys.filter { before[$0] != after[$0] }
@@ -830,7 +871,7 @@ enum Bench {
     @MainActor static func filter(_ source: String) -> Bool {
         let store = Store()
         let p: PredicateFields.Compiled?
-        do { p = try PredicateFields.compile(source, store: store) } catch let e as PredicateError {
+        do { p = try PredicateFields.compile(source, context: store.context) } catch let e as PredicateError {
             print("error at \(e.offset + 1): \(e.message)")
             return false
         } catch { return false }

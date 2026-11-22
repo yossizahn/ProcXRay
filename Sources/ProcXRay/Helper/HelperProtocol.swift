@@ -44,7 +44,7 @@ enum HelperConfig {
         return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
-    static let protocolVersion = 24  // 24: taskDetail, PrivMetrics.suspendCount, 23: PrivMetrics.asid, 22: launch, launched, 21: traceThreads (names), dyld, trace-string and MIG events, 20: traceThreadOwners, scheduler events in the trace, 19: machPortKinds, 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
+    static let protocolVersion = 25  // 25: metrics (asked-for processes only), 24: taskDetail, PrivMetrics.suspendCount, 23: PrivMetrics.asid, 22: launch, launched, 21: traceThreads (names), dyld, trace-string and MIG events, 20: traceThreadOwners, scheduler events in the trace, 19: machPortKinds, 5: MachSnapshot.counts, 6: exceptionRoutes, 7: MachLink notes, 8: machPortDetail, 9: threads, 10: stacks tool, 11: thread core counters, 12: bankLedger, 13: securityConfig, 14: securityConfig replies SecurityDetail, 15: vmmap lists every region, 16: groupFootprint, 17: netRates, 18: systemCounters
 }
 
 /// Read-only surface, but for `launch`: no other call accepts a path, a command or free-form arguments. `launch`
@@ -54,6 +54,10 @@ enum HelperConfig {
     func version(reply: @escaping (Int, Int32) -> Void)                 // (protocolVersion, helper pid)
     /// `extras`: ExtraReads raw value; only the per-process ones the helper can do (ExtraReads.viaHelper).
     func allMetrics(extras: Int, reply: @escaping (Data) -> Void)       // JSON [PrivMetrics]
+    /// allMetrics for the processes the caller can't read itself: those in `pids` (packed Int32s) get their
+    /// metrics only, and every process started after `since` (seconds since 1970) gets everything, as allMetrics
+    /// gives it. Reading and encoding every process on every refresh was most of the helper's CPU time.
+    func metrics(pids: Data, since: Double, extras: Int, reply: @escaping (Data) -> Void)   // JSON [PrivMetrics]
     func argsEnv(pid: Int32, reply: @escaping (Data?) -> Void)          // JSON PrivArgsEnv
     /// Every thread of one process (ThreadReader), for processes the app can't read itself. JSON ThreadSnapshot.
     func threads(pid: Int32, reply: @escaping (Data?) -> Void)

@@ -48,6 +48,7 @@ enum Entry {
         // In milliseconds; 0 counts as unset, so 1. Registered, not set: a user default still wins.
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 1])
         AmbientPrefs.register()
+        Tuning.register()
         // Inspector windows keep no state: restorationBehavior(.disabled) neither reopens them nor applies a saved
         // frame (each opens at the default size), but AppKit still writes one; cleared here.
         for k in UserDefaults.standard.dictionaryRepresentation().keys

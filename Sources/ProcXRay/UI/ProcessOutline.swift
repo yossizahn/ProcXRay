@@ -369,6 +369,7 @@ struct ProcessOutline: NSViewRepresentable {
 
         func apply() {
             guard let outline else { return }
+            let perf0 = PerfStages.begin(); defer { PerfStages.end(.tableApply, perf0) }
             updating = true
             defer { updating = false }
             syncSortIndicators(outline)
@@ -1189,7 +1190,7 @@ struct ProcessOutline: NSViewRepresentable {
                 set(color: .secondaryLabelColor)
             default:
                 // Processes: the column's own value. Group rows: what Store.sorted worked out for them.
-                let v = n.proc.map { c.value($0, store) } ?? n.groupValues[c.id] ?? .empty
+                let v = n.proc.map { c.value($0, store.context) } ?? n.groupValues[c.id] ?? .empty
                 set(v.display)
                 set(color: Self.color(v.tint))
                 // "?": say why it couldn't be read.

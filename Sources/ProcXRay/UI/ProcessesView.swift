@@ -339,13 +339,14 @@ struct FilterChipBar: View {
     @Binding var savedPredicates: String
 
     var body: some View {
-        let now = Date()
-        let procs = Array(store.procs.values)
+        // The counts come with each refresh, worked out in its background task (Store.chipCounts): this view reads
+        // nothing else of the store, so it redraws when a count changes, not on every refresh.
+        let counts = store.chipCounts
         let filters = SavedPredicate.parse(savedPredicates)
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(FilterChip.allCases) { c in
-                    let count = store.compiledPredicate(c.source).map { p in procs.reduce(0) { $0 + (p.test($1, now) ? 1 : 0) } }
+                    let count = counts[c.source]
                     chip(c.title, icon: nil, clause: c.source, count: count,
                          help: c.help + " Adds “\(c.source)” to the predicate; chips combine with “and”.")
                 }
