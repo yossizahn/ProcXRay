@@ -574,7 +574,9 @@ final class Store {
         pt.tolerance = 2
         RunLoop.main.add(pt, forMode: .common)
         probeTimer = pt
-        guard let every = Tuning.windowIntervalNow(active: NSApp.isActive || Self.assumeVisible) else {
+        // No app object in the command-line modes (--bench, --dump), which make a Store too.
+        let active = (NSApp as NSApplication?)?.isActive ?? true
+        guard let every = Tuning.windowIntervalNow(active: active || Self.assumeVisible) else {
             if interval != 0 { interval = 0 }
             return
         }
