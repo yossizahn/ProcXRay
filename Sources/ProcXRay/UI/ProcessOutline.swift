@@ -26,6 +26,9 @@ struct ProcessOutline: NSViewRepresentable {
     let onOpen: (ProcInfo) -> Void
     let onSignal: (ProcInfo, ProcSignal) -> Void
 
+    /// View ▸ Expand All: opens every row of the outline in the key window.
+    static let expandAll = Notification.Name("ProcXRay.expandAllRows")
+
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -134,6 +137,9 @@ struct ProcessOutline: NSViewRepresentable {
                 },
                 nc.addObserver(forName: ColumnPrefs.reset, object: nil, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { if let self, self.isInKeyWindow { self.resetColumns() } }
+                },
+                nc.addObserver(forName: ProcessOutline.expandAll, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { if let self, self.isInKeyWindow { self.expandAll() } }
                 },
                 // A layout from the column manager or a saved set: every window, not just the key one.
                 nc.addObserver(forName: ColumnPrefs.layoutChanged, object: nil, queue: .main) { [weak self] _ in
@@ -538,6 +544,22 @@ struct ProcessOutline: NSViewRepresentable {
             }
         }
 
+        /// Opens `items` (nil: every root) and every row below them, rows the user collapsed and ones that
+        /// start collapsed included; they stay open across refreshes and when a search is cleared.
+        func expandAll(under items: [Item]? = nil) {
+            guard let o = outline else { return }
+            func open(_ its: [Item]) {
+                for it in its where !it.shown.isEmpty {
+                    collapsed.remove(it.id); defaultCollapsed.remove(it.id)
+                    o.expandItem(it)
+                    open(it.shown)
+                }
+            }
+            o.beginUpdates()
+            open(items ?? shownRoots)
+            o.endUpdates()
+        }
+
         private func syncSelection(_ outline: NSOutlineView) {
             let current = outline.selectedRow >= 0 ? (outline.item(atRow: outline.selectedRow) as? Item)?.id : nil
             guard current != parent.selection else { return }
@@ -670,7 +692,8 @@ struct ProcessOutline: NSViewRepresentable {
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
             if menu === headerMenu { buildHeaderMenu(menu); return }
-            guard let o = outline, o.clickedRow >= 0, let n = (o.item(atRow: o.clickedRow) as? Item)?.node else { return }
+            guard let o = outline, o.clickedRow >= 0, let it = o.item(atRow: o.clickedRow) as? Item else { return }
+            let n = it.node
             let parent = self.parent!
             func add(_ title: String, _ action: @escaping () -> Void) {
                 let mi = NSMenuItem(title: title, action: #selector(MenuAction.fire), keyEquivalent: "")
@@ -684,6 +707,7 @@ struct ProcessOutline: NSViewRepresentable {
             if let p { add("Inspect") { parent.onOpen(p) } }
             let pin = Pins.row(n, procs: procs)
             add(Pins.shared.isPinned(pin) ? "Unpin" : "Pin to Top") { Pins.shared.toggle(pin) }
+            if !it.shown.isEmpty { add("Expand All Below") { [weak self] in self?.expandAll(under: [it]) } }
             guard let p else { return }
             menu.addItem(.separator())
             // No signals for kernel_task (pid 0): kill(0, …) would hit ProcXRay's own process group.

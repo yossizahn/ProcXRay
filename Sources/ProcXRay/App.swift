@@ -402,6 +402,7 @@ struct ProcXRayApp: App {
                 Button(store.paused ? "Resume Updates" : "Pause Updates") { store.paused.toggle() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Toggle("Keep Groups When Sorting", isOn: $sortKeepsGroups)
+                Button("Expand All Rows") { NotificationCenter.default.post(name: ProcessOutline.expandAll, object: nil) }
             }
         }
 
