@@ -35,8 +35,13 @@ struct InspectorView: View {
                 case .usage: UsageTab(proc: proc, exited: exited)
                 case .threads: ThreadsView(proc: proc, exited: exited)
                 case .memory:
-                    toolTab(.vmmap, auto: false, title: "vmmap -w \(proc.pid)",
-                            parse: { VmmapParser.parse($0) }, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
+                    MemoryTab {
+                        toolTab(.vmmap, auto: false, title: "vmmap -w \(proc.pid)",
+                                parse: { VmmapParser.parse($0) }, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
+                    } heap: {
+                        toolTab(.heap, auto: false, title: "heap \(proc.pid)",
+                                parse: { HeapParser.parse($0) }, isEmpty: \.isEmpty) { HeapView(r: $0, filter: $1) }
+                    }
                 case .filesPorts:
                     toolTab(.lsof, auto: true, title: "lsof -n -P -p \(proc.pid)",
                             parse: { LsofParser.parse($0) }, isEmpty: \.isEmpty) { [pid = proc.pid] in LsofView(entries: $0, filter: $1, pid: pid) }
@@ -216,6 +221,32 @@ extension Store {
 
 extension String {
     func ifEmpty(_ s: String) -> String { isEmpty ? s : self }
+}
+
+// MARK: - Memory
+
+/// The Memory tab: the address space (vmmap) or the malloc heap by type (heap). Both stay alive while the other
+/// shows, so switching doesn't throw away a run.
+struct MemoryTab<Regions: View, Heap: View>: View {
+    enum Mode: String, CaseIterable { case regions = "Regions (vmmap)", heap = "Heap Objects (heap)" }
+    @SceneStorage("memoryTabMode") private var mode = Mode.regions
+    @ViewBuilder let regions: () -> Regions
+    @ViewBuilder let heap: () -> Heap
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $mode) { ForEach(Mode.allCases, id: \.self) { Text($0.rawValue) } }
+                .pickerStyle(.segmented).labelsHidden().fixedSize().controlSize(.small)
+                .padding(.vertical, 5)
+            Divider()
+            ZStack {
+                regions().opacity(mode == .regions ? 1 : 0).allowsHitTesting(mode == .regions)
+                    .accessibilityHidden(mode != .regions)
+                heap().opacity(mode == .heap ? 1 : 0).allowsHitTesting(mode == .heap)
+                    .accessibilityHidden(mode != .heap)
+            }
+        }
+    }
 }
 
 // MARK: - Shell-backed tabs

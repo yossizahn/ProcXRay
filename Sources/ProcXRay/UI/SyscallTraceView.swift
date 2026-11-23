@@ -284,6 +284,10 @@ struct SyscallTraceView: View {
     @AppStorage("syscallTrace.argNames") private var argNames = true
     @State private var filter = ""
     @State private var errorsOnly = false
+    /// The one thread every view follows, nil for all of them.
+    @State private var thread: UInt64?
+    /// Each thread's calls in the whole trace, by thread id: the Thread menu's choices.
+    @State private var threadCounts: [(tid: UInt64, calls: Int)] = []
     /// The Calls table's order; the rows are sorted by it off the main thread (recompute).
     @State private var sort = DataSort(column: "time", ascending: false)
     @State private var shown: [SyscallRecord] = []
@@ -302,7 +306,7 @@ struct SyscallTraceView: View {
     }
 
     private var key: String {
-        "\(tracer.phase)\u{0}\(filter)\u{0}\(errorsOnly)\u{0}\(mode)\u{0}\(sort.column)\(sort.ascending)"
+        "\(tracer.phase)\u{0}\(filter)\u{0}\(errorsOnly)\u{0}\(thread.map(String.init) ?? "")\u{0}\(mode)\u{0}\(sort.column)\(sort.ascending)"
     }
 
     var body: some View {
@@ -321,7 +325,8 @@ struct SyscallTraceView: View {
                 placeholder
             } else if mode == "Activity" {
                 SyscallActivityView(groups: activities, threadNames: tracer.context.threadNames,
-                                    filtered: !filter.isEmpty || errorsOnly, selection: $activitySelection)
+                                    filtered: !filter.isEmpty || errorsOnly || thread != nil, selection: $activitySelection,
+                                    followed: thread, follow: { thread = $0 })
                 if let r = selectedActivityStackRecord { Divider(); stackPane(r) }
             } else if mode == "Summary" {
                 summaryTable
@@ -330,6 +335,9 @@ struct SyscallTraceView: View {
                 if let r = selectedStackRecord { Divider(); stackPane(r) }
             }
         }
+        // Filled and pinned to the top: an empty Activity view (as the trace starts) doesn't fill the height,
+        // and the pane would otherwise sit centered until the first calls arrive.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task(id: key) {
             var lastRevision = -1
             repeat {
@@ -353,20 +361,32 @@ struct SyscallTraceView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            if tracer.isActive {
-                Button { tracer.stop() } label: { Label("Stop", systemImage: "stop.fill") }
-                    .disabled(tracer.phase == .stopping)
-            } else {
-                Button { tracer.start(pid: target.pid, start: target.start, stacks: stacks) } label: {
-                    Label(tracer.phase == .idle ? "Trace" : "Trace again", systemImage: "record.circle")
+            // The controls left of the status keep their width as the trace starts and stops, so nothing after
+            // them shifts: the button sits in a slot sized to its widest label, Stacks stays (disabled while
+            // tracing, as it applies at the start), and the spinner's place is kept when it's not shown.
+            ZStack(alignment: .leading) {
+                Button {} label: { Label("Trace again", systemImage: "record.circle") }
+                    .hidden().accessibilityHidden(true)
+                if tracer.isActive {
+                    Button { tracer.stop() } label: { Label("Stop", systemImage: "stop.fill") }
+                        .disabled(tracer.phase == .stopping)
+                } else {
+                    Button { tracer.start(pid: target.pid, start: target.start, stacks: stacks) } label: {
+                        Label(tracer.phase == .idle ? "Trace" : "Trace again", systemImage: "record.circle")
+                    }
+                    .disabled(disabledReason != nil)
+                    .help(disabledReason ?? "Trace this process's BSD syscalls and Mach traps (kdebug, as root via the helper)")
                 }
-                .disabled(disabledReason != nil)
-                .help(disabledReason ?? "Trace this process's BSD syscalls and Mach traps (kdebug, as root via the helper)")
-                Toggle("Stacks", isOn: $stacks).toggleStyle(.checkbox).font(.caption)
-                    .help("Record the user stack of every call (kperf), to see which code made it. The traced process runs up to a third slower.")
             }
-            if tracer.phase == .starting || tracer.phase == .stopping { ProgressView().controlSize(.small) }
+            .fixedSize()   // in a narrow window only the status gives way, not these
+            Toggle("Stacks", isOn: $stacks).toggleStyle(.checkbox).font(.caption).fixedSize()
+                .disabled(tracer.isActive)
+                .help("Record the user stack of every call (kperf), to see which code made it. The traced process runs up to a third slower.")
+            ProgressView().controlSize(.small)
+                .opacity(tracer.phase == .starting || tracer.phase == .stopping ? 1 : 0)
+            // First to give way when the window is narrow, so no control wraps and the header keeps its height.
             Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationHelp(status)
+                .layoutPriority(-1)
             Spacer()
             Picker("", selection: $mode) {
                 Text("Activity").tag("Activity")
@@ -375,11 +395,13 @@ struct SyscallTraceView: View {
             }
             .pickerStyle(.segmented).labelsHidden().fixedSize()
             if mode == "Calls" {
-                Toggle("Names", isOn: $argNames).toggleStyle(.checkbox).font(.caption)
+                Toggle("Names", isOn: $argNames).toggleStyle(.checkbox).font(.caption).fixedSize()
                 .help("Show argument names (as xnu declares them) with the values")
             }
-            Toggle("Errors only", isOn: $errorsOnly).toggleStyle(.checkbox).font(.caption)
-            TextField("filter", text: $filter).textFieldStyle(.roundedBorder).frame(width: 160)
+            threadMenu
+            Toggle("Errors only", isOn: $errorsOnly).toggleStyle(.checkbox).font(.caption).fixedSize()
+            TextField("filter", text: $filter).textFieldStyle(.roundedBorder).frame(minWidth: 70, maxWidth: 160)
+                .layoutPriority(-2)   // narrows before the status disappears
             Menu {
                 Button("Copy All") { Pasteboard.copy(exportText()) }
                 Button("Save as Text…") { save() }
@@ -389,10 +411,53 @@ struct SyscallTraceView: View {
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .disabled(tracer.phase == .idle)
             .help("Copy or save the \(mode) view as text, everything the filter shows")
-            Button("Clear") { tracer.clear(); selection = []; summarySelection = []; activitySelection = [] }
+            Button("Clear") { tracer.clear(); thread = nil; selection = []; summarySelection = []; activitySelection = [] }
                 .disabled(tracer.isActive || tracer.phase == .idle)
         }
         .padding(6)
+    }
+
+    /// All threads, or one: every view (Activity, Calls, Summary) then shows only that thread's calls, in order.
+    /// The button says only which (names can be long and the header is full); the items name each thread.
+    private var threadMenu: some View {
+        Menu {
+            Picker("", selection: $thread) {
+                Text("All threads").tag(UInt64?.none)
+                Divider()
+                ForEach(threadChoices, id: \.tid) { c in
+                    Text(threadChoiceTitle(c.tid, c.calls)).tag(Optional(c.tid))
+                }
+            }
+            .pickerStyle(.inline).labelsHidden()
+        } label: {
+            Text(threadMenuTitle)
+        }
+        .menuStyle(.borderlessButton).font(.caption).fixedSize()
+        .disabled(tracer.phase == .idle)
+        .help("Follow one thread: Activity, Calls and Summary show only its calls")
+    }
+
+    private func threadChoiceTitle(_ tid: UInt64, _ calls: Int) -> String {
+        let n: String = calls.formatted()
+        return Self.thread(tid, tracer.context.threadNames) + " · " + n + (calls == 1 ? " call" : " calls")
+    }
+
+    private var threadMenuTitle: String {
+        guard let thread else { return "All threads" }
+        let main = tracer.context.threadNames[thread]?.hasPrefix("main thread") ?? false
+        return main ? "Main thread" : "Thread " + String(thread)
+    }
+
+    /// The trace's threads, and the followed one even when this trace has no calls on it (a trace run again).
+    private var threadChoices: [(tid: UInt64, calls: Int)] {
+        guard let thread, !threadCounts.contains(where: { $0.tid == thread }) else { return threadCounts }
+        return (threadCounts + [(thread, 0)]).sorted { $0.tid < $1.tid }
+    }
+
+    nonisolated static func callsByThread(_ records: [SyscallRecord]) -> [(tid: UInt64, calls: Int)] {
+        var n: [UInt64: Int] = [:]
+        for r in records { n[r.thread, default: 0] += 1 }
+        return n.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
 
     private var status: String {
@@ -444,6 +509,12 @@ struct SyscallTraceView: View {
                              // The first existing one: a rename's source is usually gone, its destination isn't.
                              if rows.count == 1, let path = rows[0].paths.lazy.compactMap(Reveal.path(in:)).first {
                                  items.append(DataMenuItem(title: "Reveal in Finder") { Reveal.reveal([path]) })
+                             }
+                             let tids = Set(rows.map(\.thread))
+                             if thread != nil {
+                                 items.append(DataMenuItem(title: "Show All Threads") { thread = nil })
+                             } else if tids.count == 1, let t = tids.first {
+                                 items.append(DataMenuItem(title: "Follow Thread " + Self.thread(t, context.threadNames)) { thread = t })
                              }
                              return items
                          },
@@ -509,27 +580,29 @@ struct SyscallTraceView: View {
     private func recompute() async {
         guard !Task.isCancelled else { return }
         let all = tracer.records + tracer.pending
-        let filter = filter, errorsOnly = errorsOnly, context = tracer.context, sort = sort, summaryMode = mode == "Summary", argNames = argNames
+        let filter = filter, errorsOnly = errorsOnly, thread = thread, context = tracer.context, sort = sort, summaryMode = mode == "Summary", argNames = argNames
         if mode == "Activity" {
-            let groups = await Task.detached(priority: .userInitiated) {
-                SyscallActivity.build(all, filter: filter, errorsOnly: errorsOnly, context: context)
+            let (groups, counts) = await Task.detached(priority: .userInitiated) {
+                (SyscallActivity.build(all, filter: filter, errorsOnly: errorsOnly, thread: thread, context: context), Self.callsByThread(all))
             }.value
-            if !Task.isCancelled { activities = groups }
+            if !Task.isCancelled { activities = groups; threadCounts = counts }
             return
         }
-        let result = await Task.detached(priority: .userInitiated) { () -> ([SyscallRecord], [SyscallSummaryRow]) in
+        let result = await Task.detached(priority: .userInitiated) { () -> ([SyscallRecord], [SyscallSummaryRow], [(tid: UInt64, calls: Int)]) in
+            let counts = Self.callsByThread(all)
             let rows = all.filter { r in
-                (!errorsOnly || r.failed) &&
+                (thread == nil || r.thread == thread) && (!errorsOnly || r.failed) &&
                 (filter.isEmpty || r.name.localizedCaseInsensitiveContains(filter) || r.pathText.localizedCaseInsensitiveContains(filter)
                  || Self.result(r, context).localizedCaseInsensitiveContains(filter) || r.argsText.localizedCaseInsensitiveContains(filter)
                  || r.caller.localizedCaseInsensitiveContains(filter)
                  || (context.threadNames[r.thread]?.localizedCaseInsensitiveContains(filter) ?? false))
             }
             // The summary's table sorts itself (it is short); this order is the export's.
-            if summaryMode { return ([], SyscallSummaryRow.build(rows).sorted { $0.totalNanos > $1.totalNanos }) }
-            return (Self.ordered(rows, by: sort, context: context, argNames: argNames), [])
+            if summaryMode { return ([], SyscallSummaryRow.build(rows).sorted { $0.totalNanos > $1.totalNanos }, counts) }
+            return (Self.ordered(rows, by: sort, context: context, argNames: argNames), [], counts)
         }.value
         guard !Task.isCancelled else { return }
+        threadCounts = result.2
         if summaryMode { summary = result.1 } else { shown = result.0 }
     }
 

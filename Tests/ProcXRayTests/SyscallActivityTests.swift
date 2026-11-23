@@ -36,6 +36,17 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertEqual(SyscallActivity.build(records, filter: "read", errorsOnly: true).map(\.id), [8])
     }
 
+    /// Following one thread: only its calls, and another thread's close still ends the descriptor's life.
+    func testOneThread() {
+        let a = record(1, "read", 0, thread: 7)
+        let b = record(2, "read", 10, thread: 8)
+        let close = record(3, "close", 20, thread: 8)
+        let c = record(4, "read", 30, thread: 7)
+        let groups = SyscallActivity.build([a, b, close, c], filter: "", errorsOnly: false, thread: 7)
+        XCTAssertEqual(groups.map { $0.calls.map(\.id) }, [[4], [1]])
+        XCTAssertEqual(SyscallActivity.build([a, b, close, c], filter: "", errorsOnly: false, thread: 9).count, 0)
+    }
+
     func testSocketLife() {
         let socket = record(1, "socket", 0, args: [UInt64(AF_INET), UInt64(SOCK_STREAM)], ret: 5, label: nil)
         var connect = record(2, "connect", 10, args: [5], label: "TCP 10.0.0.1:50000->1.2.3.4:443")

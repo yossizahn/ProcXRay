@@ -123,9 +123,31 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         deadline = start + UInt64(maxSeconds) * 1_000_000_000 * denom / numer
     }
 
+    /// The kernel has one trace facility, and the helper owns it for every client at once: a second setup (a trace
+    /// from another app or window, a voucher recording) would remove the buffer the first one is reading, which then
+    /// fails with EINVAL. Whoever sets kdebug up in this process claims it first, and gives it back after `cleanUp`.
+    private static let claimLock = NSLock()
+    nonisolated(unsafe) private static var claimed = false
+    static let claimedText = "Another trace is running through the helper (in another Proc X-Ray window or app, or a voucher recording). One trace at a time: stop that one and trace again."
+
+    static func claim() -> Bool {
+        claimLock.lock(); defer { claimLock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
+    }
+
+    static func release() {
+        claimLock.lock(); claimed = false; claimLock.unlock()
+    }
+
     /// Configures kdebug for `pid` and starts reading. Needs root.
     static func start(pid: Int32, stacks: Bool = false, maxPending: Int, maxSeconds: Int) -> Result<KdebugTrace, StartError> {
         guard pid > 0 else { return .failure(.failed("bad pid \(pid)")) }
+        guard claim() else { return .failure(.refused(claimedText)) }
+        // Every way out but a running trace gives the claim back; the pump gives it back when the trace ends.
+        var started = false
+        defer { if !started { release() } }
         // Only clears a session we may configure: someone else's gives EBUSY here and is left alone. A kperf
         // configuration left behind (a tracer that died) goes with it.
         if op(KERN_KDREMOVE) == nil { Kperf.reset() }
@@ -155,6 +177,7 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         if t.stacks { t.mapLoadedImages() }
         if let e = op(KERN_KDENABLE, KDEBUG_ENABLE_TRACE) { Kperf.reset(); return fail("KDENABLE", e) }
         Thread.detachNewThread { t.pump() }
+        started = true
         return .success(t)
     }
 
@@ -211,7 +234,11 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
                 var ms = Self.waitMs
                 _ = Self.call([CTL_KERN, KERN_KDEBUG, Self.KERN_KDBUFWAIT], nil, &ms)
             }
-            var n = cap   // in and out: a count of events, not bytes
+            // In: the room in bytes (xnu divides it by sizeof(kd_buf)); out: the events read. Passing the event
+            // count capped each read at 1/64 of the buffer, 4,096 events: enough while KDBUFWAIT has reads follow one
+            // another, but the settle reads after a stop (20 ms apart) then fell behind a busy trace and the kernel
+            // wrapped, marking lost events at the end of every busy trace.
+            var n = cap * Self.recordSize
             if let e = Self.call([CTL_KERN, KERN_KDEBUG, Self.KERN_KDREADTR], buf, &n) {
                 failure = "Reading the kernel trace failed: \(Self.errText(e))."
                 break
@@ -221,6 +248,7 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
             if last { break }
         }
         Self.cleanUp()
+        Self.release()
         lock.lock()
         if let failure { notes += failure + "\n" }
         if !stopRequested && failure == nil { notes += "The trace reached its \(SyscallTraceConfig.maxSeconds / 60)-minute limit.\n" }

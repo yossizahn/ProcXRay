@@ -177,7 +177,10 @@ struct SyscallActivity: Identifiable, Sendable {
     /// Repeats of a one-off call (the same lookup, the same message destination) this close join one activity.
     static let repeatGap: UInt64 = 500_000_000
 
-    static func build(_ records: [SyscallRecord], filter: String, errorsOnly: Bool, context: Context = Context()) -> [Self] {
+    /// `thread`: only that thread's calls make activities. A close on any thread still ends its descriptor's life
+    /// (as with `errorsOnly`), so a descriptor number another thread closed and reused starts a new activity.
+    static func build(_ records: [SyscallRecord], filter: String, errorsOnly: Bool, thread: UInt64? = nil,
+                      context: Context = Context()) -> [Self] {
         var groups: [Self] = []
         var waits: Self?
         /// Descriptor → its activity, until its close.
@@ -187,7 +190,7 @@ struct SyscallActivity: Identifiable, Sendable {
         // Start order also puts calls still pending at trace stop in their proper position.
         for r in records.sorted(by: { ($0.time, $0.id) < ($1.time, $1.id) }) {
             let name = r.name.hasSuffix("_nocancel") ? String(r.name.dropLast(9)) : r.name
-            let skip = errorsOnly && !r.failed
+            let skip = (errorsOnly && !r.failed) || (thread != nil && r.thread != thread)
             if isWait(name, r) {
                 if skip { continue }
                 if waits == nil { waits = Self(operation: .waits, target: "", calls: []) }

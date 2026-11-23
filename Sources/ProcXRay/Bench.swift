@@ -163,7 +163,9 @@ enum Bench {
     /// `ProcXRay --helper-call <status|argsenv|threads|lsof|lsofall|vmmap|sample|procinfo|btm|taskinfo|stacks|powermetrics|counters|sessions|task> [pid] [--full]`:
     /// one helper call from the shell, for testing the helper without the UI. Only this exact binary is accepted by the helper.
     /// The helper's trace path without XPC: start, read every 250 ms as the app does, decode, pair.
-    static func trace(pid: Int32, seconds: Double, ktrace: Bool, activity: Bool = false, out: String?) {
+    /// `stacks`: kperf user stacks as the app's Stacks option. `lost`: prints each TRACE_LOST_EVENTS marker the
+    /// kernel put in (when and on which CPU) and the trace's events by CPU and kind, to see what overflowed.
+    static func trace(pid: Int32, seconds: Double, ktrace: Bool, activity: Bool = false, stacks: Bool = false, lost: Bool = false, out: String?) {
         let t0 = Date()
         let source: TraceSource
         if ktrace {
@@ -172,7 +174,7 @@ enum Bench {
             if let err = t.start(path, args) { print(err); return }
             source = t
         } else {
-            switch KdebugTrace.start(pid: pid, maxPending: SyscallTraceConfig.maxPending, maxSeconds: SyscallTraceConfig.maxSeconds) {
+            switch KdebugTrace.start(pid: pid, stacks: stacks, maxPending: SyscallTraceConfig.maxPending, maxSeconds: SyscallTraceConfig.maxSeconds) {
             case .success(let t): source = t
             case .failure(.refused(let s)), .failure(.failed(let s)): print(s); return
             }
@@ -185,10 +187,12 @@ enum Bench {
         var events = 0, bytes = 0, bad = 0
         var decodeTime = 0.0
         var stopped = false
+        var byCPU: [UInt32: Int] = [:], byKind: [UInt32: Int] = [:], lastByCPU: [UInt32: UInt64] = [:]
         while true {
             if !stopped && -t0.timeIntervalSinceNow > seconds { source.stop(); stopped = true }
             let (d, running, notes) = source.read(max: SyscallTraceConfig.maxRead)
             if !notes.isEmpty { print("note: " + notes.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            if lost && !ktrace { scanLost(d, &byCPU, &byKind, &lastByCPU) }
             let d0 = Date()
             let (evs, b) = ktrace ? KdebugEvent.decode(d) : (KdebugEvent.decodeRaw(d), 0)
             var batch = dec.feed(evs)
@@ -210,6 +214,7 @@ enum Bench {
         print(String(format: "%@: started in %.0f ms; %d events, %d bytes, %d bad, %d gaps; %d records + %d in flight; decode+pair %.3f s; CPU %.3f s here + %.3f s ktrace",
                      ktrace ? "ktrace" : "kdebug", started * 1000, events, bytes, bad, dec.gaps, recs.count, inFlight.count, decodeTime,
                      secs(ru.ru_utime) + secs(ru.ru_stime), secs(rc.ru_utime) + secs(rc.ru_stime)))
+        if lost { printLostTotals(byCPU, byKind) }
         if activity { printActivity(recs + inFlight, pid: pid, names: MachPortNames.resolveHere(pid: pid), woken: wakes.names,
                                     threads: SyscallTracer.threadNames(wakes.threadNames, dec.threadNames)) }
         guard let out else { return }
@@ -218,6 +223,27 @@ enum Bench {
             text += "\(r.name)\t\(r.argsText)\t\(r.resultText)\t\(r.pathText)\t\(r.state)\n"
         }
         FileManager.default.createFile(atPath: out, contents: Data(text.utf8))
+    }
+
+    /// Raw kdebug records (KdebugTrace.Record): counts them by CPU and class/subclass, and prints each
+    /// TRACE_LOST_EVENTS marker with the time of that CPU's previous event (the gap it stands for).
+    static func scanLost(_ d: Data, _ byCPU: inout [UInt32: Int], _ byKind: inout [UInt32: Int], _ last: inout [UInt32: UInt64]) {
+        d.withUnsafeBytes { raw in
+            for r in raw.bindMemory(to: KdebugTrace.Record.self) {
+                byCPU[r.cpuid, default: 0] += 1; byKind[r.debugid >> 16, default: 0] += 1
+                if r.debugid == KdebugTrace.lostEvents {
+                    let prev = last[r.cpuid].map { String(format: "%.3f", Double($0) / 1e9) } ?? "-"
+                    print(String(format: "lost: at %.3f s on cpu %u (its previous event at %@ s), args %llx %llx %llx %llx",
+                                 Double(r.timestamp) / 1e9, r.cpuid, prev, r.arg1, r.arg2, r.arg3, r.arg4))
+                }
+                last[r.cpuid] = r.timestamp
+            }
+        }
+    }
+
+    static func printLostTotals(_ byCPU: [UInt32: Int], _ byKind: [UInt32: Int]) {
+        print("by cpu: " + byCPU.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: " "))
+        print("by class/subclass: " + byKind.sorted { $0.value > $1.value }.prefix(10).map { String(format: "%04x:%d", $0.key, $0.value) }.joined(separator: " "))
     }
 
     /// The Activity view's grouping, oldest first, with Mach message destinations named from `names`.
@@ -520,6 +546,9 @@ enum Bench {
             let symbols = StackSymbols()
             var withStack = 0, callers: [String: Int] = [:], examples: [String: SyscallRecord] = [:]
             let activity = launching ? !launchStacks : args.contains("activity")
+            // `lost`: where the kernel marked lost events, and the trace's events by CPU and kind.
+            let lost = args.contains("lost")
+            var byCPU: [UInt32: Int] = [:], byKind: [UInt32: Int] = [:], lastByCPU: [UInt32: UInt64] = [:]
             var all: [SyscallRecord] = []
             func take(_ rs: [SyscallRecord]) {
                 if activity { all += rs }
@@ -536,6 +565,7 @@ enum Bench {
                 symbols.add(regions)
                 if !stopped && -t0.timeIntervalSinceNow > secs { s.stop(); stopped = true }
                 if !notes.isEmpty { print("note: " + notes.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                if lost && format == .kdebug { scanLost(d, &byCPU, &byKind, &lastByCPU) }
                 let evs = format == .kdebug ? KdebugEvent.decodeRaw(d) : KdebugEvent.decode(d).events
                 events += evs.count
                 var batch = dec.feed(evs)
@@ -549,6 +579,7 @@ enum Bench {
             var tail = dec.flush()
             _ = wakes.label(&tail) { s.threads($0) }
             take(tail)
+            if lost { printLostTotals(byCPU, byKind) }
             if activity {
                 // As SyscallTracer does: names for message destinations through the helper.
                 printActivity(all + dec.pending(), pid: pid, names: MachPortNames.resolve(pid: pid), woken: wakes.names,
@@ -1255,14 +1286,15 @@ extension Bench {
                 }
             }
             let hidden = intents.actions.filter(\.hidden).count
-            print("  intents: \(intents.actions.count) actions (\(hidden) hidden, \(intents.indexedActions) from the index), \(intents.entities.count) types, \(intents.appShortcuts.count) App Shortcuts  [\(Int(t2.timeIntervalSince(t1) * 1000)) ms]")
+            let siriOnly = intents.actions.filter(\.siriOnly).count, schemas = intents.actions.filter { !$0.schemas.isEmpty }.count
+            print("  intents: \(intents.actions.count) actions (\(hidden) hidden, \(siriOnly) Siri only, \(schemas) with schemas, \(intents.indexedActions) from the index), \(intents.entities.count) types, \(intents.appShortcuts.count) App Shortcuts  [\(Int(t2.timeIntervalSince(t1) * 1000)) ms]")
             if let n = intents.indexNote { print("  index: \(n)") }
             for f in intents.metadataFiles { print("  metadata: \(f)") }
             for e in intents.siriKit { print("  SiriKit \((e.path as NSString).lastPathComponent): \(e.supported.joined(separator: ", "))") }
             for f in intents.intentDefinitions { print("  intentdefinition: \(f)") }
             if verbose {
                 for a in intents.actions {
-                    print("    \(a.hidden ? "h" : " ") \(a.kind == "siriIntent" ? "S" : " ") \(a.name)  [\(a.id)] vf=\(a.visibilityFlags.map(String.init) ?? "-") open=\(a.openAppWhenRun.map(String.init) ?? "-") src=\(a.source)")
+                    print("    \(a.hidden ? "h" : " ") \(a.kind == "siriIntent" ? "S" : " ") \(a.name)  [\(a.id)] vf=\(a.visibilityFlags.map(String.init) ?? "-") open=\(a.openAppWhenRun.map(String.init) ?? "-") src=\(a.source)\(a.siriOnly ? " siri-only" : "")\(a.assistantInvocable ? " assistant" : "")\(a.schemas.isEmpty ? "" : " schema=" + a.schemas.joined(separator: ","))\(a.traits.isEmpty ? "" : " traits=" + a.traits.joined(separator: ","))")
                     for p in a.parameters { print("          \(p.key) \(p.name): \(p.type)  \(p.description)") }
                 }
                 for e in intents.entities { print("    \(e.kind) \(e.name) [\(e.id)]: \(e.members.prefix(8).joined(separator: ", "))") }

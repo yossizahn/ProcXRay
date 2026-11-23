@@ -218,6 +218,8 @@ private struct TapsCard: View {
     @Environment(Store.self) var store
     let pid: pid_t
     let taps: [EventTaps.Tap]
+    /// The card's natural content height, which its scroll view shrinks to when shorter than the cap.
+    @State private var contentHeight: CGFloat = 0
 
     var body: some View {
         let mine = taps.filter { $0.tapping == pid }
@@ -230,24 +232,30 @@ private struct TapsCard: View {
             return other.asid == nil || other.asid == session || other.session?.kind == .system
         }
         Card(title: "Input taps (Event taps)", trailing: mine.isEmpty ? "none installed" : "\(mine.count) installed") {
-            VStack(alignment: .leading, spacing: 6) {
-                if mine.isEmpty {
-                    Text("This process doesn't watch keyboard or mouse input.").foregroundStyle(.secondary)
-                } else {
-                    ForEach(mine) { row($0, other: $0.tapped == 0 ? nil : $0.tapped, otherLabel: "watching") }
-                }
-                if !onIt.isEmpty {
-                    Text("Aimed at this process").font(.subheadline).foregroundStyle(.secondary).padding(.top, 2)
-                    ForEach(onIt) { row($0, other: $0.tapping, otherLabel: "installed by") }
-                }
-                if !global.isEmpty {
-                    Collapsible(title: "Other processes see all input (\(global.count) tap\(global.count == 1 ? "" : "s"))", startsOpen: false) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(global) { row($0, other: $0.tapping, otherLabel: "installed by") }
+            // Scrolls past a few rows, so long lists of taps don't push the windows table out of the tab.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    if mine.isEmpty {
+                        Text("This process doesn't watch keyboard or mouse input.").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(mine) { row($0, other: $0.tapped == 0 ? nil : $0.tapped, otherLabel: "watching") }
+                    }
+                    if !onIt.isEmpty {
+                        Text("Aimed at this process").font(.subheadline).foregroundStyle(.secondary).padding(.top, 2)
+                        ForEach(onIt) { row($0, other: $0.tapping, otherLabel: "installed by") }
+                    }
+                    if !global.isEmpty {
+                        Collapsible(title: "Other processes see all input (\(global.count) tap\(global.count == 1 ? "" : "s"))", startsOpen: false) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(global) { row($0, other: $0.tapping, otherLabel: "installed by") }
+                            }
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .onGeometryChange(for: CGFloat.self, of: \.size.height) { contentHeight = $0 }
             }
+            .frame(height: min(contentHeight, 220))
         }
         .help("CGGetEventTapList: taps see keyboard and mouse events before apps do. A tap that isn't listen-only can also change or drop them.")
     }

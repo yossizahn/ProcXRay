@@ -51,6 +51,8 @@ enum BankLedger {
     /// Records for `seconds` (or until `cancel` fires) and sums the settlements per pair. Needs root.
     static func record(seconds: Double, cancel: Shell.Cancel? = nil) -> Result<Recording, KdebugTrace.StartError> {
         typealias K = KdebugTrace
+        guard K.claim() else { return .failure(.refused(K.claimedText)) }
+        defer { K.release() }
         if K.op(K.KERN_KDREMOVE) == nil { Kperf.reset() }
         if let e = K.op(K.KERN_KDSETBUF, Int32(kernelEvents)) { return .failure(e == EBUSY ? .refused(K.busyText()) : .failed("KDSETBUF: \(K.errText(e))")) }
         func fail(_ what: String, _ e: Int32) -> Result<Recording, KdebugTrace.StartError> {
@@ -84,7 +86,7 @@ enum BankLedger {
                 var ms = 100
                 _ = K.call([CTL_KERN, KERN_KDEBUG, K.KERN_KDBUFWAIT], nil, &ms)
             }
-            var n = kernelEvents
+            var n = kernelEvents * K.recordSize   // in: the room in bytes; out: the events read (KdebugTrace.pump)
             if let e = K.call([CTL_KERN, KERN_KDEBUG, K.KERN_KDREADTR], buf, &n) { return .failure(.failed("reading the kernel trace: \(K.errText(e))")) }
             let recs = buf.bindMemory(to: K.Record.self, capacity: n)
             for i in 0..<n {

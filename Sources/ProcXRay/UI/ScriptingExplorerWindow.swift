@@ -232,7 +232,9 @@ final class ExplorerController: NSViewController, NSOutlineViewDataSource, NSOut
         case .object:
             guard n.contents == nil else { return }
             n.loading = true
-            let pid = pid, spec = n.spec, model = model
+            // The descriptor isn't Sendable, but the queue only reads it (it becomes an event's direct object).
+            let pid = pid, model = model
+            nonisolated(unsafe) let spec = n.spec
             queue.async {
                 let c = ScriptingExplorer.contents(pid, spec, model: model)
                 DispatchQueue.main.async { self.loaded(n, c) }
@@ -279,7 +281,8 @@ final class ExplorerController: NSViewController, NSOutlineViewDataSource, NSOut
     private func loadPage(_ g: ObjectNode) {
         guard !g.loading else { return }
         g.loading = true
-        let pid = pid, spec = g.spec, code = g.elementCode, from = g.nextIndex, total = g.total
+        let pid = pid, code = g.elementCode, from = g.nextIndex, total = g.total
+        nonisolated(unsafe) let spec = g.spec  // read-only on the queue, as in load(_:)
         queue.async {
             let kids = ScriptingExplorer.children(pid, spec, code, from: from, upTo: total)
             DispatchQueue.main.async { self.pageLoaded(g, kids, from: from) }

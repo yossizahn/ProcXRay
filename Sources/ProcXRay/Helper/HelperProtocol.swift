@@ -170,7 +170,7 @@ enum SyscallTraceConfig {
 
 /// Allowlisted tools; the helper builds the argv itself.
 enum HelperTool: Int, CaseIterable {
-    case lsof = 1, vmmap, sample, launchctlProcinfo, btmDump, lsofAll, pidDomain, taskinfo, powermetrics, stacks
+    case lsof = 1, vmmap, sample, launchctlProcinfo, btmDump, lsofAll, pidDomain, taskinfo, powermetrics, stacks, heap
 
     func argv(pid: Int32) -> (String, [String])? {
         switch self {
@@ -183,6 +183,10 @@ enum HelperTool: Int, CaseIterable {
         // One sample of every thread's stack (duration 0): ~0.3 s with symbols, against ~20 s for a 1 s run of
         // an Electron app. The target is suspended only for that one sample.
         case .stacks: return pid > 0 ? ("/usr/bin/sample", ["\(pid)", "0", "1", "-mayDie", "-file", "/dev/stdout"]) : nil
+        // Every live malloc block, matched to its ObjC, Swift, CF or C type and summed per type. --forkCorpse walks
+        // a copy-on-write corpse of the target, so the target runs on: Safari was suspended 9–39 s without it,
+        // and the run itself was 4 s instead of 9 (27.2).
+        case .heap: return pid > 0 ? ("/usr/bin/heap", ["--forkCorpse", "\(pid)"]) : nil
         case .launchctlProcinfo: return pid > 0 ? ("/bin/launchctl", ["procinfo", "\(pid)"]) : nil
         case .btmDump: return ("/usr/bin/sfltool", ["dumpbtm"])
         // Every process's descriptors in field form (pid, fd, type, address, name, protocol, TCP state), for
@@ -201,7 +205,7 @@ enum HelperTool: Int, CaseIterable {
     /// Seconds before the helper kills the tool. Under HelperClient.run's 60 s wait, so the reply still arrives.
     var timeout: Double {
         switch self {
-        case .sample: 45   // 1 s of sampling, then symbolication: ~13 s for a 39-thread daemon
+        case .sample, .heap: 45   // heap: walks every block; sample: 1 s of sampling, then symbolication: ~13 s for a 39-thread daemon
         case .vmmap, .btmDump: 30
         case .lsof, .lsofAll: 20
         case .powermetrics: 15
