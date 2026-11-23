@@ -314,14 +314,6 @@ struct SyscallTraceView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            if !tracer.notes.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(tracer.notes, id: \.self) { Text($0) }
-                }
-                .font(.caption).foregroundStyle(.orange)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 8).padding(.bottom, 4)
-            }
             Divider()
             if tracer.phase == .idle {
                 placeholder
@@ -340,6 +332,8 @@ struct SyscallTraceView: View {
                 callsTable
                 if let r = selectedStackRecord { Divider(); stackPane(r) }
             }
+            Divider()
+            footer
         }
         // Filled and pinned to the top: an empty Activity view (as the trace starts) doesn't fill the height,
         // and the pane would otherwise sit centered until the first calls arrive.
@@ -365,35 +359,22 @@ struct SyscallTraceView: View {
         }
     }
 
+    /// One row whose controls keep their places: the trace button and the views on the left, what narrows the
+    /// trace (threads, errors, filter) on the right, and the rest in the menu at the end. Nothing in it changes
+    /// width with the trace or the view, except the Thread button, which grows into the gap. The status is in
+    /// the footer, where it has the pane's width.
     private var header: some View {
         HStack(spacing: 8) {
-            // The controls left of the status keep their width as the trace starts and stops, so nothing after
-            // them shifts: the button sits in a slot sized to its widest label, Stacks stays (disabled while
-            // tracing, as it applies at the start), and the spinner's place is kept when it's not shown.
-            ZStack(alignment: .leading) {
-                Button {} label: { Label("Trace again", systemImage: "record.circle") }
-                    .hidden().accessibilityHidden(true)
-                if tracer.isActive {
-                    Button { tracer.stop() } label: { Label("Stop", systemImage: "stop.fill") }
-                        .disabled(tracer.phase == .stopping)
-                } else {
-                    Button { tracer.start(pid: target.pid, start: target.start, stacks: stacks) } label: {
-                        Label(tracer.phase == .idle ? "Trace" : "Trace again", systemImage: "record.circle")
-                    }
-                    .disabled(disabledReason != nil)
-                    .help(disabledReason ?? "Trace this process's BSD syscalls and Mach traps (kdebug, as root via the helper)")
+            if tracer.isActive {
+                Button { tracer.stop() } label: { traceLabel("Stop", "stop.fill") }
+                    .disabled(tracer.phase == .stopping)
+            } else {
+                Button { tracer.start(pid: target.pid, start: target.start, stacks: stacks) } label: {
+                    traceLabel(tracer.phase == .idle ? "Trace" : "Trace again", "record.circle")
                 }
+                .disabled(disabledReason != nil)
+                .help(disabledReason ?? "Trace this process's BSD syscalls and Mach traps (kdebug, as root via the helper)")
             }
-            .fixedSize()   // in a narrow window only the status gives way, not these
-            Toggle("Stacks", isOn: $stacks).toggleStyle(.checkbox).font(.caption).fixedSize()
-                .disabled(tracer.isActive)
-                .help("Record the user stack of every call (kperf), to see which code made it. The traced process runs up to a third slower.")
-            ProgressView().controlSize(.small)
-                .opacity(tracer.phase == .starting || tracer.phase == .stopping ? 1 : 0)
-            // First to give way when the window is narrow, so no control wraps and the header keeps its height.
-            Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationHelp(status)
-                .layoutPriority(-1)
-            Spacer()
             Picker("", selection: $mode) {
                 Text("Activity").tag("Activity")
                 Text("Calls").tag("Calls")
@@ -401,31 +382,61 @@ struct SyscallTraceView: View {
                 Text("Summary").tag("Summary")
             }
             .pickerStyle(.segmented).labelsHidden().controlSize(.small).fixedSize()
-            if mode == "Calls" {
-                Toggle("Names", isOn: $argNames).toggleStyle(.checkbox).font(.caption).fixedSize()
-                .help("Show argument names (as xnu declares them) with the values")
-            }
+            Spacer(minLength: 0)
             threadMenu
-            Toggle("Errors only", isOn: $errorsOnly).toggleStyle(.checkbox).font(.caption).fixedSize()
-            TextField("filter", text: $filter).textFieldStyle(.roundedBorder).frame(minWidth: 60, maxWidth: 160)
-                .layoutPriority(-2)   // narrows before the status disappears
+            Toggle("Errors", isOn: $errorsOnly).toggleStyle(.button).controlSize(.small).fixedSize()
+                .help("Show only the calls that failed")
+            // The only control that gives way in a narrow window.
+            TextField("Filter", text: $filter).textFieldStyle(.roundedBorder).controlSize(.small)
+                .frame(minWidth: 60, maxWidth: 160)
             Menu {
-                Button("Copy All") { Pasteboard.copy(exportText()) }
-                Button("Save as Text…") { save() }
+                Toggle("Record Call Stacks", isOn: $stacks).disabled(tracer.isActive)
+                Toggle("Argument Names in Calls", isOn: $argNames)
+                Divider()
+                Button("Copy All") { Pasteboard.copy(exportText()) }.disabled(tracer.phase == .idle)
+                Button("Save as Text…") { save() }.disabled(tracer.phase == .idle)
+                Divider()
+                Button("Clear Trace") { clear() }.disabled(tracer.isActive || tracer.phase == .idle)
             } label: {
-                Image(systemName: "square.and.arrow.up")
+                Image(systemName: "ellipsis.circle")
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .disabled(tracer.phase == .idle)
-            .help("Copy or save the \(mode) view as text, everything the filter shows")
-            Button { tracer.clear(); threads = []; laneSelected = nil; selection = []; summarySelection = []; activitySelection = [] } label: {
-                Image(systemName: "trash")
-            }
-            .accessibilityLabel("Clear")
-            .help("Clear the trace")
-            .disabled(tracer.isActive || tracer.phase == .idle)
+            .accessibilityLabel("Trace options")
+            .help("Call stacks (kperf: which code made each call; the traced process runs up to a third slower, and it applies from the next trace), argument names, copying or saving the \(mode) view as text, clearing the trace")
         }
         .padding(6)
+    }
+
+    /// The trace button's label, as wide as its widest so the views after it stay put as the trace starts and stops.
+    private func traceLabel(_ title: String, _ image: String) -> some View {
+        ZStack {
+            Label("Trace again", systemImage: "record.circle").hidden().accessibilityHidden(true)
+            Label(title, systemImage: image)
+        }
+    }
+
+    private func clear() {
+        tracer.clear(); threads = []; laneSelected = nil; selection = []; summarySelection = []; activitySelection = []
+    }
+
+    /// Under the views, the pane's whole width: the trace's state and counts, and the tracer's notes. Always
+    /// there, so nothing above moves when a trace starts or a note arrives.
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(tracer.notes, id: \.self) { Text($0).foregroundStyle(.orange).lineLimit(2).truncationHelp($0) }
+            HStack(spacing: 6) {
+                ZStack {
+                    ProgressView().controlSize(.small).scaleEffect(0.7)
+                        .opacity(tracer.phase == .starting || tracer.phase == .stopping ? 1 : 0)
+                    Circle().fill(.red).frame(width: 7, height: 7).opacity(tracer.phase == .running ? 1 : 0)
+                }
+                .frame(width: 12, height: 12)
+                Text(status).foregroundStyle(.secondary).monospacedDigit().lineLimit(1).truncationHelp(status)
+                Spacer(minLength: 0)
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 8).padding(.vertical, 4)
     }
 
     /// All threads, or the ones ticked: every view (Activity, Calls, Lanes, Summary) then shows only their calls.
@@ -461,10 +472,10 @@ struct SyscallTraceView: View {
     private var status: String {
         let n = tracer.records.count + tracer.pending.count
         let calls = "\(n.formatted()) call\(n == 1 ? "" : "s")"
-        let dropped = tracer.dropped > 0 ? " · oldest \(tracer.dropped.formatted()) let go" : ""
+        let dropped = (tracer.dropped > 0 ? " · oldest \(tracer.dropped.formatted()) let go" : "") + (tracer.withStacks ? " · with call stacks" : "")
         let showing = shown.count != tracer.records.count + tracer.pending.count && (mode == "Calls" || mode == "Lanes") ? " · \(shown.count.formatted()) shown" : ""
         switch tracer.phase {
-        case .idle: return "kdebug \(SyscallTraceConfig.filter) for pid \(target.pid)"
+        case .idle: return "Not tracing · pid \(target.pid)"
         case .starting: return "Starting the trace…"
         case .running: return "Tracing · \(calls)\(showing)\(dropped)"
         case .stopping: return "Stopping · \(calls)"
@@ -475,8 +486,9 @@ struct SyscallTraceView: View {
     private var placeholder: some View {
         VStack(spacing: 8) {
             Image(systemName: "waveform.path.ecg").font(.largeTitle).foregroundStyle(.tertiary)
+            // Its full height, or the last line is cut with "…" when the pane is short of room.
             Text(placeholderText)
-                .multilineTextAlignment(.center)
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             Text(disabledReason ?? "Uses the kernel's kdebug trace (as Instruments' System Call Trace does). One trace at a time per machine: it can't run while Instruments or fs_usage is recording.")
                 .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
             EmptyRunButton(title: "Trace", systemImage: "record.circle", disabledReason: disabledReason,
@@ -484,6 +496,10 @@ struct SyscallTraceView: View {
                 tracer.start(pid: target.pid, start: target.start, stacks: stacks)
             }
             .padding(.top, 6)
+            // Also in the header's menu; here it is in sight before the first trace, which it applies to.
+            Toggle("Record call stacks", isOn: $stacks).toggleStyle(.checkbox).font(.caption)
+                .disabled(disabledReason != nil)
+                .help("Record the user stack of every call (kperf), to see which code made it. The traced process runs up to a third slower.")
         }
         .padding(30).frame(maxWidth: 520).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
