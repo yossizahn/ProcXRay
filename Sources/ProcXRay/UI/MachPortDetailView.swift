@@ -1,24 +1,7 @@
 import SwiftUI
 
-/// A button on a Mach peer row in Connections that lists the ports behind the link.
-struct MachPortsButton: View {
-    let pid: Int32
-    let peer: Int32
-    let peerName: String
-    @State private var shown = false
-
-    var body: some View {
-        Button { shown.toggle() } label: { Image(systemName: "list.bullet.rectangle") }
-            .buttonStyle(.borderless)
-            .help("List the ports behind this link: their names, rights, queues, boosts and flags")
-            .popover(isPresented: $shown, arrowEdge: .bottom) {
-                MachPortDetailView(pid: pid, peer: peer, peerName: peerName)
-            }
-    }
-}
-
 /// The ports between this process and one peer, both directions, from the helper's last lsmp run
-/// (HelperClient.machPortDetail).
+/// (HelperClient.machPortDetail). Shown in a popover from a Mach peer row's menu in Files & Ports.
 struct MachPortDetailView: View {
     let pid: Int32
     let peer: Int32

@@ -287,8 +287,12 @@ struct LsofView: View {
     let entries: [LsofEntry]
     let filter: String
     let pid: Int32
+    @Environment(\.inspectorLinks) private var links
+    @Environment(\.openWindow) private var openWindow
     @State private var kinds: Set<LsofEntry.Kind> = []
-    @State private var sort = [KeyPathComparator(\LsofEntry.fdSort)]
+    /// The Mach peer whose ports are listed in a popover (the row's menu).
+    @State private var machPeer: MachPeer?
+    private struct MachPeer: Identifiable { let id: Int32; let name: String }
     @State private var index: PeerIndex?
     @State private var resolved: [Int: PeerInfo] = [:]
     @State private var loading = false
@@ -331,7 +335,7 @@ struct LsofView: View {
             (locations.isEmpty || locations.contains($0.location)) &&
             (filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) || $0.fd.contains(filter)
              || $0.type.localizedCaseInsensitiveContains(filter) || peerMatches($0, filter))
-        }.sorted(using: sort)
+        }
         let listeners = entries.filter { $0.kind == .tcp && $0.endpoints.state == "LISTEN" }
         VStack(spacing: 0) {
             summary
@@ -379,47 +383,111 @@ struct LsofView: View {
             if view == "Graph" {
                 PeerGraph(center: pid, entries: entries, resolved: resolved, mach: machSnapshot).environment(store)
             } else {
-            Table(rows, sortOrder: $sort) {
-                TableColumn("FD", value: \.fdSort) { e in
-                    HStack(spacing: 4) {
-                        Text(e.fd).monospacedDigit()
-                        if !e.mode.isEmpty {
-                            Pill(text: e.mode == "u" ? "rw" : e.mode, color: e.mode == "r" ? .blue : .orange)
-                        }
-                    }
-                }.width(min: 66, ideal: 74, max: 100)
-                TableColumn("Kind", value: \.kindName) { e in
-                    Label(e.kind == .image ? "mapped" : e.type, systemImage: e.kind.symbol).foregroundStyle(e.kind.color)
-                        .truncationHelp(e.kind == .image ? "mapped" : e.type)
-                }.width(min: 96, ideal: 104, max: 140)
-                TableColumn("Name", value: \.name) { e in
-                    HStack(spacing: 4) {
-                        if e.kind == .mach, let peer = Int32(e.node) {
-                            MachPortsButton(pid: pid, peer: peer, peerName: store.procs[peer]?.name ?? "pid")
-                        }
-                        NameCell(e: e)
-                    }
-                }
-                TableColumn("Location", value: \.location) { e in
-                    Text(e.location).foregroundStyle(.secondary).lineLimit(1).truncationHelp(e.location)
-                }.width(min: 70, ideal: 110, max: 180)
-                TableColumn("Other end") { e in
-                    if let info = resolved[e.id] {
-                        // Re-injected: a Table cell can be rebuilt (on an accessibility press, for one) without
-                        // the window's environment, and ProcessChip's @Environment(Store.self) then traps.
-                        PeerCell(info: info, pid: pid, scope: index?.scope ?? .ownUser).environment(store)
-                    }
-                }.width(min: 90, ideal: 190)
-                TableColumn("Size", value: \.sizeSort) { e in
-                    Text(e.size.map { Fmt.bytes($0) } ?? "").monospacedDigit().foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }.width(min: 70, ideal: 80, max: 100)
-            }
+            // live: the other ends are found after the rows are shown, and processes come and go.
+            DataTable(rows: rows, columns: columns(resolved), initialSort: ("fd", true), autosave: "openFiles", live: true,
+                      menu: { rows in rows.count == 1 ? menu(rows[0], resolved) : [] },
+                      // Double-click: the process at the other end, else the file in Finder.
+                      onOpen: { e in
+                          if let p = peerPids(e, resolved).first(where: { $0 != pid }).flatMap({ store.procs[$0] }) { show(p) }
+                          else if e.kind == .file || e.kind == .image || e.kind == .dir { Reveal.reveal([e.name]) }
+                      },
+                      exportName: "Files and ports of pid \(pid)")
+                .popover(item: $machPeer, arrowEdge: .top) { m in MachPortDetailView(pid: pid, peer: m.id, peerName: m.name) }
             }
         }
         // The view is rebuilt for every lsof run (CommandTab's generation), so Re-run resolves again too.
         .task { await loadIndex(fresh: false) }
         .task { await loadMach(fresh: false) }
+    }
+
+    /// The table's columns. What were controls in the cells are in each row's menu: the processes at the other
+    /// end, the file in Finder, a Mach link's ports.
+    private func columns(_ resolved: [Int: PeerInfo]) -> [DataColumn<LsofEntry>] {
+        let secondary: (LsofEntry) -> NSColor? = { _ in .secondaryLabelColor }
+        var fd = DataColumn<LsofEntry>.text("fd", "FD", width: 74) { e in
+            e.mode.isEmpty ? e.fd : e.fd + " " + (e.mode == "u" ? "rw" : e.mode)
+        }
+        fd.less = { $0.fdSort < $1.fdSort }
+        var kind = DataColumn<LsofEntry>.text("kind", "Kind", width: 110) { $0.kind == .image ? "mapped" : $0.type }
+        kind.symbol = { ($0.kind.symbol, NSColor($0.kind.color)) }
+        kind.less = { $0.kindName < $1.kindName }
+        var name = DataColumn<LsofEntry>.text("name", "Name", width: 420, color: { e in
+            switch e.kind {
+            case .tcp, .udp, .file, .image, .dir: nil
+            default: .secondaryLabelColor
+            }
+        }) { Self.nameText($0) }
+        name.minWidth = 160
+        var other = DataColumn<LsofEntry>.text("peer", "Other end", width: 190, color: { resolved[$0.id]?.unresolved == true ? .tertiaryLabelColor : nil }) { e in
+            resolved[e.id].map(peerText) ?? ""
+        }
+        other.tooltip = { e in resolved[e.id].flatMap(peerHelp) }
+        var size = DataColumn<LsofEntry>.number("size", "Size", width: 80, color: secondary, value: { $0.size }, format: { Fmt.bytes($0) })
+        size.less = { $0.sizeSort < $1.sizeSort }
+        return [fd, kind, name, .text("location", "Location", width: 110, color: secondary) { $0.location }, other, size]
+    }
+
+    /// "127.0.0.1:5000 → 127.0.0.1:61022  ESTABLISHED", a path, or whatever lsof names the thing.
+    private static func nameText(_ e: LsofEntry) -> String {
+        switch e.kind {
+        case .tcp, .udp:
+            let p = e.endpoints
+            return [p.local, p.remote.map { "→ " + $0 }, p.state.map { " " + $0 }].compactMap { $0 }.joined(separator: " ")
+        default:
+            return e.name.isEmpty ? "—" : e.name
+        }
+    }
+
+    private func peerPids(_ e: LsofEntry, _ resolved: [Int: PeerInfo]) -> [Int32] { resolved[e.id]?.pids ?? [] }
+
+    /// "from Safari (512), Mail (640) +3", "this process · fd 4, 7", "not visible".
+    private func peerText(_ info: PeerInfo) -> String {
+        if info.unresolved { return "not visible" }
+        let pids = info.pids
+        var parts = pids.prefix(2).map { p -> String in
+            if p == pid { return "this process · fd " + info.ends.filter { $0.pid == p }.map(\.fd).joined(separator: ", ") }
+            return store.procs[p].map { "\($0.name) (\(p))" } ?? "pid \(p), exited"
+        }.joined(separator: ", ")
+        if pids.count > 2 { parts += " +\(pids.count - 2)" }
+        switch info.relation {
+        case .clients: return "from " + parts
+        case .alsoOpen: return "also " + parts
+        case .otherEnd: return parts
+        }
+    }
+
+    private func peerHelp(_ info: PeerInfo) -> String? {
+        if info.unresolved {
+            return (index?.scope ?? .ownUser) == .ownUser
+                ? "No process of yours holds the other end: it is probably in a root daemon or another user's process. Install the helper to search every process."
+                : "No running process holds the other end: it may be the kernel, or the peer already closed it."
+        }
+        guard info.pids.count > 2 else { return nil }
+        return info.pids.map { p in store.procs[p].map { "\($0.name) (\(p))" } ?? "pid \(p)" }.joined(separator: "\n")
+    }
+
+    /// Shows a process as a process chip does: in this inspector, or in a window of its own where there is none.
+    private func show(_ p: ProcInfo) {
+        guard let live = store.live(p) else { return }
+        if let links { links.open(live) } else { openWindow(id: ProcessWindow.id, value: ProcessRef(live)) }
+    }
+
+    private func menu(_ e: LsofEntry, _ resolved: [Int: PeerInfo]) -> [DataMenuItem] {
+        var items: [DataMenuItem] = []
+        for p in peerPids(e, resolved).prefix(6) where p != pid {
+            guard let proc = store.procs[p] else { continue }
+            items.append(DataMenuItem(title: "Show \(proc.name) (\(p))") { show(proc) })
+        }
+        if e.kind == .mach, let peer = Int32(e.node) {
+            let name = store.procs[peer]?.name ?? "pid"
+            items.append(DataMenuItem(title: "List the Ports Behind This Link…") { machPeer = MachPeer(id: peer, name: name) })
+        }
+        if e.kind == .file || e.kind == .image || e.kind == .dir {
+            if !items.isEmpty { items.append(.separator) }
+            items.append(DataMenuItem(title: "Reveal in Finder") { Reveal.reveal([e.name]) })
+            items.append(DataMenuItem(title: "Copy Path") { ProcessOutline.Coordinator.copy(e.name) })
+        }
+        return items
     }
 
     /// XPC links from launchd pid domains, as rows beside the descriptors: the process hosting this one
@@ -651,91 +719,6 @@ struct LsofView: View {
             .padding(.horizontal, 8)
         }
         .frame(height: 28)
-    }
-
-    struct PeerCell: View {
-        @Environment(Store.self) private var store
-        let info: PeerInfo
-        let pid: Int32
-        let scope: PeerIndex.Scope
-        private let shown = 2
-
-        var body: some View {
-            if info.unresolved {
-                Text("not visible").foregroundStyle(.tertiary)
-                    .help(scope == .ownUser
-                          ? "No process of yours holds the other end: it is probably in a root daemon or another user's process. Install the helper to search every process."
-                          : "No running process holds the other end: it may be the kernel, or the peer already closed it.")
-            } else {
-                let pids = info.pids
-                HStack(spacing: 4) {
-                    switch info.relation {
-                    case .clients: Text("from").foregroundStyle(.secondary)
-                    case .alsoOpen: Text("also").foregroundStyle(.secondary)
-                    case .otherEnd: EmptyView()
-                    }
-                    ForEach(pids.prefix(shown), id: \.self) { p in
-                        if p == pid {
-                            let fds = info.ends.filter { $0.pid == p }.map(\.fd).joined(separator: ", ")
-                            Text("this process · fd \(fds)").foregroundStyle(.secondary)
-                        } else if let proc = store.procs[p] {
-                            ProcessChip(proc: proc)
-                        } else {
-                            Text(verbatim: "pid \(p)").foregroundStyle(.secondary).strikethrough()
-                        }
-                    }
-                    if pids.count > shown {
-                        Text("+\(pids.count - shown)").foregroundStyle(.secondary)
-                            .help(pids.dropFirst(shown).map { p in
-                                store.procs[p].map { "\($0.name) (\(p))" } ?? "pid \(p)"
-                            }.joined(separator: "\n"))
-                    }
-                }
-                .lineLimit(1)
-            }
-        }
-    }
-
-    struct NameCell: View {
-        let e: LsofEntry
-        var body: some View {
-            switch e.kind {
-            case .tcp, .udp:
-                let p = e.endpoints
-                HStack(spacing: 6) {
-                    Text(p.local).font(.system(.body, design: .monospaced))
-                    if let r = p.remote {
-                        Image(systemName: "arrow.right").foregroundStyle(.secondary)
-                        Text(r).font(.system(.body, design: .monospaced))
-                    }
-                    if let s = p.state {
-                        Pill(text: s, color: s == "ESTABLISHED" ? .green : s == "LISTEN" ? .blue : .orange)
-                    }
-                }
-                .truncationHelp([p.local, p.remote.map { "→ \($0)" }, p.state].compactMap { $0 }.joined(separator: " "))
-                .textSelection(.enabled)
-            case .file, .image, .dir:
-                let slash = e.name.lastIndex(of: "/")
-                let dir = slash.map { String(e.name[...$0]) } ?? ""
-                let leaf = slash.map { String(e.name[e.name.index(after: $0)...]) } ?? e.name
-                HStack(spacing: 4) {
-                    HStack(spacing: 0) {
-                        Text(dir).foregroundStyle(.secondary)
-                        Text(leaf)
-                    }
-                    .lineLimit(1).truncationMode(.head)
-                    .truncationHelp(e.name)
-                    RevealButton(path: e.name)
-                }
-                .contextMenu {
-                    Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: e.name)]) }
-                    Button("Copy Path") { ProcessOutline.Coordinator.copy(e.name) }
-                }
-            default:
-                Text(e.name.isEmpty ? "—" : e.name).foregroundStyle(.secondary).lineLimit(1)
-                    .truncationHelp(e.name)
-            }
-        }
     }
 }
 
