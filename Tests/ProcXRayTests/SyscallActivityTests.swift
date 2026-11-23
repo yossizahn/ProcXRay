@@ -119,6 +119,203 @@ final class SyscallActivityTests: XCTestCase {
         let context = SyscallActivity.Context(pid: 10, portKinds: [0x203: "task port", 0x1103: "own port"])
         let groups = SyscallActivity.build([task, own, reply, gone], filter: "", errorsOnly: false, context: context)
         XCTAssertEqual(groups.map(\.target), ["Unknown destination (port not in any listing)", "Reply (send-once)", "Own port", "Kernel: task port"])
+        // Messages to its own ports are one activity, whichever thread sent them and however far apart.
+        var later = own
+        later = SyscallRecord(id: 5, start: 9_000_000_000, end: 9_000_000_005, thread: 9, mach: true, number: 0, name: "mach_msg2_trap", args: own.args)
+        let one = SyscallActivity.build([task, own, reply, gone, later], filter: "", errorsOnly: false, context: context)
+        XCTAssertEqual(one.first { $0.target == "Own port" }?.calls.map(\.id), [2, 5])
+        XCTAssertEqual(one.count, 4)
+    }
+
+    private func stat(_ id: Int, _ path: String, _ time: UInt64, thread: UInt64 = 7, missing: Bool = false) -> SyscallRecord {
+        SyscallRecord(id: id, start: time, end: time + 5, thread: thread, mach: false, number: 0, name: "stat64", args: [0],
+                      error: missing ? Int64(ENOENT) : 0, paths: [path], failed: missing)
+    }
+
+    /// A walk of a directory tree is one activity under the directory its paths spread out from, whichever
+    /// threads made the calls; what lies outside the tree, or comes later, stays its own.
+    func testBurstRollsUpByDirectory() {
+        var recs = [stat(1, "/Users/me/.config.json", 0)]
+        let names = ["a", "a/SKILL.md", "b", "b/SKILL.md", "synced/x", "synced/x/SKILL.md", "synced/y"]
+        for (i, n) in names.enumerated() {
+            recs.append(stat(10 + i, "/Users/me/.claude/skills/" + n, 1_000 + UInt64(i) * 1_000, thread: i % 2 == 0 ? 7 : 8,
+                             missing: n == "synced/y"))
+        }
+        recs.append(stat(30, "/Users/me/.claude/skills/late", 500_000_000))
+        let groups = SyscallActivity.build(recs, filter: "", errorsOnly: false)
+        XCTAssertEqual(groups.map(\.target), ["/Users/me/.claude/skills/late", "/Users/me/.claude/skills", "/Users/me/.config.json"])
+        let tree = groups[1]
+        XCTAssertEqual(tree.operation, .lookup)
+        XCTAssertEqual(tree.paths, 7)
+        XCTAssertEqual(tree.calls.map(\.id), Array(10...16))
+        XCTAssertEqual(tree.failures, 1)
+        XCTAssertEqual(tree.id, 10)
+        XCTAssertTrue(tree.detail.hasPrefix("7 paths in "), tree.detail)
+        XCTAssertTrue(tree.detail.contains("1 failed"), tree.detail)
+
+        // Three paths aren't a walk, and paths with nothing in common below the top have no directory to go under.
+        XCTAssertEqual(SyscallActivity.build(Array(recs[1...3]), filter: "", errorsOnly: false).count, 3)
+        let apart = ["/usr/lib/a", "/usr/share/b", "/private/tmp/c", "/Users/me/d", "/System/Library/e"].enumerated().map { stat($0, $1, UInt64($0)) }
+        XCTAssertEqual(SyscallActivity.build(apart, filter: "", errorsOnly: false).count, 5)
+    }
+
+    /// A walk that changes into each directory and names its entries: the paths are followed through the chdirs.
+    func testRelativePathsFollowTheWorkingDirectory() {
+        func chdir(_ id: Int, _ path: String, _ time: UInt64) -> SyscallRecord {
+            SyscallRecord(id: id, start: time, end: time + 1, thread: 7, mach: false, number: 0, name: "chdir", args: [0], paths: [path])
+        }
+        let before = stat(1, "notes.txt", 0)
+        var at = stat(8, "x", 70)
+        at = SyscallRecord(id: 8, start: 70, end: 71, thread: 7, mach: false, number: 0, name: "fstatat64", args: [5, 0], paths: ["x"])
+        let recs = [before, chdir(2, "/usr/share/zsh", 10), stat(3, "5.9", 20), chdir(4, "5.9", 30), stat(5, "functions", 40),
+                    chdir(6, "..", 50), stat(7, "./site-functions", 60), at]
+        let context = SyscallActivity.Context(cwd: "/Users/me")
+        let groups = SyscallActivity.build(recs, filter: "", errorsOnly: false, context: context)
+        XCTAssertEqual(groups.map(\.target), ["x", "/usr/share/zsh/site-functions", "/usr/share/zsh/5.9/functions", "/usr/share/zsh/5.9",
+                                              "/Users/me/notes.txt"])
+        // Nobody knows where it started: the path stays as the program gave it.
+        XCTAssertEqual(SyscallActivity.build([before], filter: "", errorsOnly: false).map(\.target), ["notes.txt"])
+    }
+
+    /// The same thing at even intervals is one activity, kept after the others and before the waits.
+    func testRecurringActivitiesMerge() {
+        var recs: [SyscallRecord] = []
+        for round in 0..<4 {
+            recs.append(stat(round * 10, "/repo/.git/HEAD", UInt64(round) * 1_000_000_000 + UInt64(round) * 3_000_000))
+        }
+        // The same path at uneven times, and one seen twice: no rhythm.
+        for (i, t) in [UInt64(100_000_000), 900_000_000, 3_500_000_000].enumerated() { recs.append(stat(100 + i, "/etc/hosts", t)) }
+        recs.append(stat(200, "/etc/once", 2_000_000_000))
+        var wait = record(300, "kevent", 50, label: nil)
+        wait.end = 60
+        recs.append(wait)
+        let groups = SyscallActivity.build(recs, filter: "", errorsOnly: false)
+        XCTAssertEqual(groups.map(\.target), ["/etc/hosts", "/etc/once", "/etc/hosts", "/etc/hosts", "/repo/.git/HEAD", ""])
+        let beat = groups[4]
+        XCTAssertEqual(beat.rounds, 4)
+        XCTAssertEqual(beat.calls.map(\.id), [0, 10, 20, 30])
+        XCTAssertEqual(beat.when, "every 1.0 s")
+        XCTAssertTrue(beat.pinned)
+        XCTAssertTrue(beat.detail.hasPrefix("4 times"), beat.detail)
+        XCTAssertEqual(SyscallActivity.matching(groups, "every 1.0").map(\.id), [0])
+        // What recurs and the waits take no lane in the thread graph.
+        XCTAssertEqual(ThreadGraph(groups).span[7]?.bottom, 3)
+    }
+
+    /// Time on a CPU comes from the context switches the helper marks as the process's: the thread's own when it
+    /// leaves, another thread's when it is put back on.
+    func testTimeOnCPUFromContextSwitches() {
+        let read: UInt32 = 0x040c_0000 | 3 << 2, sched: UInt32 = 0x0140_0000
+        var dec = SyscallDecoder()
+        let out = dec.feed([
+            KdebugEvent(ts: 100, debugid: read | 1, arg: [3, 0, 0, 0], thread: 7),
+            // A "switch" to itself: it keeps its CPU.
+            KdebugEvent(ts: 120, debugid: sched, arg: [0, 7, 0, 0], thread: 7, ours: 3),
+            KdebugEvent(ts: 150, debugid: sched, arg: [0, 99, 0, 0], thread: 7, ours: 1),
+            // Another process's thread hands the CPU to thread 7.
+            KdebugEvent(ts: 400, debugid: sched, arg: [0, 7, 0, 0], thread: 99, ours: 2),
+            KdebugEvent(ts: 450, debugid: read | 2, arg: [0, 10, 0, 0], thread: 7),
+            // Thread 8 of the process only computes: known by the scheduler leaving it on, then by its switches.
+            KdebugEvent(ts: 500, debugid: sched, arg: [0, 8, 0, 0], thread: 8, ours: 3),
+            KdebugEvent(ts: 560, debugid: sched, arg: [0, 99, 0, 0], thread: 8, ours: 1),
+        ])
+        XCTAssertEqual(out.first?.duration, 350)
+        XCTAssertEqual(out.first?.cpu, 100)
+        XCTAssertTrue(dec.cpuMeasured)
+        XCTAssertEqual(dec.takeRuns(), [SyscallDecoder.Run(thread: 7, start: 100, end: 150), SyscallDecoder.Run(thread: 8, start: 500, end: 560)])
+        XCTAssertEqual(dec.openRuns(), [SyscallDecoder.Run(thread: 7, start: 400, end: 560)])
+
+        var cpu = TraceCPU()
+        cpu.add([SyscallDecoder.Run(thread: 7, start: 100, end: 150)], open: [SyscallDecoder.Run(thread: 7, start: 400, end: 450)], measured: true)
+        XCTAssertEqual(cpu.total(7), 100)
+        XCTAssertEqual(cpu.time(in: 120...420, threads: []), 50)
+        XCTAssertEqual(cpu.time(in: 0...500, threads: [8]), 0)
+        let row = SyscallSummaryRow.build(out)[0]
+        XCTAssertEqual([row.cpuNanos, row.offNanos], [100, 250])
+
+        // Events lost: who was on a CPU across the hole isn't known, so nothing is claimed from then on.
+        _ = dec.feed([KdebugEvent(ts: 600, debugid: KdebugEvent.lostEvents, arg: [], thread: 0)])
+        XCTAssertFalse(dec.cpuMeasured)
+        XCTAssertEqual(dec.endRuns(), [])
+        // Switches nobody marked (an older helper, ktrace): not measured, and no call gets a time.
+        var old = SyscallDecoder()
+        let alone = old.feed([
+            KdebugEvent(ts: 100, debugid: read | 1, arg: [3, 0, 0, 0], thread: 7),
+            KdebugEvent(ts: 150, debugid: sched, arg: [0, 99, 0, 0], thread: 7),
+            KdebugEvent(ts: 450, debugid: read | 2, arg: [0, 10, 0, 0], thread: 7),
+        ])
+        XCTAssertFalse(old.cpuMeasured)
+        XCTAssertNil(alone.first?.cpu)
+        XCTAssertEqual(alone.first?.blocked, true)
+    }
+
+    /// A connection over before anyone can ask about its socket keeps the endpoints the helper read as its
+    /// connect came by; the next socket with the same number doesn't inherit them.
+    func testSocketKeepsEndpointsReadAtItsConnect() {
+        func call(_ id: Int, _ name: String, _ time: UInt64, args: [UInt64], ret: UInt64 = 0) -> SyscallRecord {
+            var r = SyscallRecord(id: id, start: time, end: time + 5, thread: 7, mach: false, number: 0, name: name, args: args, ret: ret)
+            SyscallFormat.fill(&r)
+            return r
+        }
+        let tcp: [UInt64] = [UInt64(AF_INET), UInt64(SOCK_STREAM), 0]
+        var recs = [call(1, "socket", 0, args: tcp, ret: 5), call(2, "connect", 100, args: [5, 0, 16]),
+                    call(3, "sendto", 200, args: [5, 0, 18, 0]), call(4, "close", 300, args: [5]),
+                    call(5, "socket", 400, args: tcp, ret: 5), call(6, "sendto", 500, args: [5, 0, 18, 0])]
+        var fds = FdLabeler()
+        // The lookup comes after the close and the new socket: it has nothing for the first connection.
+        fds.label(&recs, sockets: { [SeenSocket(fd: 5, time: 100, label: "TCP 10.0.0.2:50000->1.1.1.1:80")] }) { _ in [:] }
+        XCTAssertEqual(recs.map(\.firstFDLabel), [nil, "TCP 10.0.0.2:50000->1.1.1.1:80", "TCP 10.0.0.2:50000->1.1.1.1:80",
+                                                   "TCP 10.0.0.2:50000->1.1.1.1:80", nil, "TCP socket"])
+        XCTAssertEqual(SeenSocket(key: SeenSocket(fd: 5, time: 100, label: "x").key, label: "x"), SeenSocket(fd: 5, time: 100, label: "x"))
+        XCTAssertNil(SeenSocket(key: "5", label: "x"))
+    }
+
+    func testScopeNarrowsByKindAndStretch() {
+        let context = SyscallActivity.Context()
+        let lookup = stat(1, "/a", 100)
+        let send = record(2, "sendto", 200, label: "TCP 10.0.0.1:50000->1.2.3.4:443")
+        let read = record(3, "read", 300, label: "TCP 10.0.0.1:50000->1.2.3.4:443")
+        let file = record(4, "read", 400)
+        let unknown = record(7, "read", 450, label: nil)
+        let pipe = record(5, "write", 500, label: "pipe")
+        let wait = record(6, "kevent", 600, label: nil)
+        let all = [lookup, send, read, file, pipe, wait]
+        XCTAssertEqual(all.map { SyscallActivity.kind($0, context) }, [.files, .network, .network, .files, .other, .waits])
+        XCTAssertEqual(SyscallActivity.kind(unknown, context), .other)
+        let network = SyscallActivity.build(all, scope: TraceScope(kinds: [.network]), context: context)
+        XCTAssertEqual(network.map { $0.calls.map(\.id) }, [[2, 3]])
+        let early = SyscallActivity.build(all, scope: TraceScope(range: 0...250), context: context)
+        XCTAssertEqual(early.map { $0.calls.map(\.id) }, [[2], [1]])
+    }
+
+    func testOverview() {
+        let context = SyscallActivity.Context()
+        // Thread 7 waits from 0 to 600 ms, looks five paths up, then waits to the end; thread 8 is parked throughout.
+        var first = record(1, "kevent", 0, label: nil)
+        first.start = nil; first.end = 600_000_000; first.state = .entryMissed
+        var recs = [first]
+        for i in 0..<5 { recs.append(stat(10 + i, "/Users/me/tree/f\(i)", 600_000_000 + UInt64(i) * 1_000_000)) }
+        var last = record(20, "kevent", 700_000_000, label: nil)
+        last.end = nil; last.state = .inProgress
+        var parked = record(21, "ulock_wait", 100, thread: 8, label: nil)
+        parked.end = 1_000_000_000
+        recs += [last, parked]
+        let scope = TraceScope()
+        let o = TraceOverview.build(recs, scope: scope, context: context,
+                                    groups: SyscallActivity.build(recs, scope: scope, context: context), fromStart: true)
+        XCTAssertEqual(o.lo, 0)
+        XCTAssertEqual(o.hi, 1_000_000_000)
+        XCTAssertEqual(o.counts[TraceKind.files.rawValue], 5)
+        XCTAssertEqual(o.counts[TraceKind.waits.rawValue], 3)
+        XCTAssertEqual(o.bars[0].reduce(0, +), 5)
+        XCTAssertEqual(o.bars[0][TraceOverview.bins * 6 / 10], 5)
+        XCTAssertEqual(o.sentence, "1.0 s · 2 threads · 5 lookups (5 under /Users/me/tree)")
+
+        let part = TraceScope(range: 600_000_000...800_000_000)
+        let p = TraceOverview.build(recs, scope: part, context: context,
+                                    groups: SyscallActivity.build(recs, scope: part, context: context), fromStart: true)
+        XCTAssertTrue(p.sentence.hasPrefix("200 ms selected · 1 thread · 5 lookups"), p.sentence)
+        XCTAssertEqual(p.bars, o.bars)
     }
 
     func testMessageDestinationFromTheCall() {

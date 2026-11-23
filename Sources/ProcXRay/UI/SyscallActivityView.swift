@@ -24,7 +24,7 @@ struct SyscallActivityView: View {
         if groups.isEmpty {
             ContentUnavailableView(filtered ? "No matching activity" : "No activity to show",
                                    systemImage: "waveform.path.ecg",
-                                   description: Text(filtered ? "Try another filter." : "Files, connections, Mach messages, launches and waits appear here. See Calls for the full trace."))
+                                   description: Text(filtered ? "Try another filter, kind or stretch of the trace." : "Files, connections, Mach messages, launches and waits appear here. See Calls for the full trace."))
         } else {
             // An NSOutlineView rather than List(children:): on every selection change SwiftUI's outline re-diffed
             // every row, copying each call out of its activity, which took seconds a click on a long trace.
@@ -43,7 +43,7 @@ struct SyscallActivityView: View {
 
     nonisolated static func groupLine(_ g: SyscallActivity) -> String {
         var parts: [String] = []
-        if g.operation != .waits { parts.append(g.calls[0].start.map(SyscallTraceView.seconds) ?? "before") }
+        if !g.when.isEmpty { parts.append(g.when) }
         parts.append(g.operation.rawValue)
         if !g.target.isEmpty { parts.append(g.target) }
         return parts.joined(separator: "  ") + "  — " + g.detail
@@ -80,9 +80,8 @@ private struct GroupLabel: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            if group.operation != .waits {
-                Text(group.calls[0].start.map(SyscallTraceView.seconds) ?? "before")
-                    .monospacedDigit().foregroundStyle(.secondary)
+            if !group.when.isEmpty {
+                Text(group.when).monospacedDigit().foregroundStyle(.secondary)
             }
             Text(group.operation.rawValue).fontWeight(.medium)
             if !group.target.isEmpty {
@@ -346,13 +345,14 @@ private struct ActivityOutline: NSViewRepresentable {
         /// no lanes.
         private func graphMarks(_ o: NSOutlineView, _ it: Item) -> [ThreadGraphCell.Mark] {
             switch it.kind {
-            case .group(let g) where g.operation == .waits: return []
+            case .group(let g) where g.pinned: return []
             case .group: return graph.groupMarks(it.position, expanded: o.isItemExpanded(it))
             case .thread(_, let tid, _): return graph.dot(tid)
             case .call(let r):
                 guard case .call(let gid, let tid, _) = it.id else { return [] }
                 if tid != nil { return graph.dot(r.thread) }
                 guard let i = groups.firstIndex(where: { $0.id == gid }) else { return [] }
+                if groups[i].pinned { return graph.dot(r.thread) }
                 return graph.callMarks(group: i, call: it.position, thread: r.thread)
             }
         }
@@ -513,14 +513,15 @@ struct ThreadGraph {
     init() {}
 
     init(_ groups: [SyscallActivity]) {
-        self.init(activities: groups.map { ($0.operation == .waits, $0.calls.map(\.thread)) })
+        self.init(activities: groups.map { ($0.pinned, $0.calls.map(\.thread)) })
     }
 
-    /// Each activity's calls' threads, top to bottom, and whether it is the waits.
+    /// Each activity's calls' threads, top to bottom, and whether it is kept at the end (the waits, what recurs).
     init(activities: [(waits: Bool, threads: [UInt64])]) {
         for (i, a) in activities.enumerated() {
             var last: [UInt64: Int] = [:]
-            // The waits hold every thread: they'd keep every lane open to the bottom.
+            // The waits hold every thread, and what recurs runs through the whole trace: they'd keep every lane
+            // open to the bottom.
             if !a.waits {
                 for (k, t) in a.threads.enumerated() { last[t] = k }
                 for t in last.keys { span[t] = (span[t]?.top ?? i, i) }

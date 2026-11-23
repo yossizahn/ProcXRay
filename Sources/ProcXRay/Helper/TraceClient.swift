@@ -6,6 +6,8 @@ struct TraceStartError: Error { let message: String }
 
 final class HelperTraceSession: @unchecked Sendable {
     private let connection: NSXPCConnection
+    /// Only the task running the trace asks for descriptors and takes these.
+    private var seen: [SeenSocket] = []
 
     init() {
         let c = NSXPCConnection(machServiceName: HelperConfig.machService, options: .privileged)
@@ -42,7 +44,14 @@ final class HelperTraceSession: @unchecked Sendable {
         guard !fds.isEmpty, let req = try? JSONEncoder().encode(Array(fds)),
               let d: Data = call(timeout: 5, { p, done in p.traceDescribeFds(req) { done($0) } }),
               let m = try? JSONDecoder().decode([String: String].self, from: d) else { return [:] }
+        seen += m.compactMap { SeenSocket(key: $0, label: $1) }
         return Dictionary(uniqueKeysWithValues: m.compactMap { k, v in Int32(k).map { ($0, v) } })
+    }
+
+    /// Socket endpoints the helper read as their calls came by, from the lookups since the last call.
+    func takeSeenSockets() -> [SeenSocket] {
+        defer { seen = [] }
+        return seen
     }
 
     /// The process and name of each thread (HelperProtocol.traceThreads); empty when the helper can't say.

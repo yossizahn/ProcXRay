@@ -180,6 +180,17 @@ enum Bench {
             }
         }
         let started = -t0.timeIntervalSinceNow
+        // The kernel's own count of the process's CPU time over the trace, to hold the trace's against.
+        func used() -> UInt64 {
+            var ri = rusage_info_v4()
+            let ok = withUnsafeMutablePointer(to: &ri) { $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) } } == 0
+            var tb = mach_timebase_info_data_t(); mach_timebase_info(&tb)
+            return ok ? (ri.ri_user_time + ri.ri_system_time) * UInt64(tb.numer) / UInt64(tb.denom) : 0
+        }
+        var tb = mach_timebase_info_data_t(); mach_timebase_info(&tb)
+        let usedBefore = used(), machBefore = mach_absolute_time()
+        var usedAfter: UInt64 = 0, window: UInt64 = 0
+        var runs: [SyscallDecoder.Run] = []
         var dec = SyscallDecoder()
         var fds = FdLabeler()
         var wakes = ThreadLabeler()
@@ -189,14 +200,18 @@ enum Bench {
         var stopped = false
         var byCPU: [UInt32: Int] = [:], byKind: [UInt32: Int] = [:], lastByCPU: [UInt32: UInt64] = [:]
         while true {
-            if !stopped && -t0.timeIntervalSinceNow > seconds { source.stop(); stopped = true }
+            if !stopped && -t0.timeIntervalSinceNow > seconds {
+                usedAfter = used(); window = (mach_absolute_time() - machBefore) * UInt64(tb.numer) / UInt64(tb.denom)
+                source.stop(); stopped = true
+            }
             let (d, running, notes) = source.read(max: SyscallTraceConfig.maxRead)
             if !notes.isEmpty { print("note: " + notes.trimmingCharacters(in: .whitespacesAndNewlines)) }
             if lost && !ktrace { scanLost(d, &byCPU, &byKind, &lastByCPU) }
             let d0 = Date()
             let (evs, b) = ktrace ? KdebugEvent.decode(d) : (KdebugEvent.decodeRaw(d), 0)
             var batch = dec.feed(evs)
-            fds.label(&batch) { NativeLsof.describe(pid, fds: $0) }
+            runs += dec.takeRuns()
+            fds.label(&batch, sockets: { source.seenSockets() }) { NativeLsof.describe(pid, fds: $0) }
             _ = wakes.label(&batch) { ThreadOwners.lookup($0) }
             recs += batch
             decodeTime += -d0.timeIntervalSinceNow
@@ -205,7 +220,7 @@ enum Bench {
             if d.count < SyscallTraceConfig.maxRead / 2 { usleep(250_000) }
         }
         var tail = dec.flush()
-        fds.label(&tail) { NativeLsof.describe(pid, fds: $0) }
+        fds.label(&tail, sockets: { source.seenSockets() }) { NativeLsof.describe(pid, fds: $0) }
         _ = wakes.label(&tail) { ThreadOwners.lookup($0) }
         recs += tail
         let inFlight = dec.pending()
@@ -214,6 +229,27 @@ enum Bench {
         print(String(format: "%@: started in %.0f ms; %d events, %d bytes, %d bad, %d gaps; %d records + %d in flight; decode+pair %.3f s; CPU %.3f s here + %.3f s ktrace",
                      ktrace ? "ktrace" : "kdebug", started * 1000, events, bytes, bad, dec.gaps, recs.count, inFlight.count, decodeTime,
                      secs(ru.ru_utime) + secs(ru.ru_stime), secs(rc.ru_utime) + secs(rc.ru_stime)))
+        runs += dec.endRuns()
+        var byThread: [UInt64: UInt64] = [:]
+        for r in runs { byThread[r.thread, default: 0] += r.end - r.start }
+        let onCPU = byThread.values.reduce(0, +)
+        let inCalls = recs.compactMap(\.cpu).reduce(0, +)
+        // The same stretch as the kernel's count: the trace began a moment before it and ran on after it.
+        let zero = (source as? KdebugTrace)?.start ?? machBefore
+        let from = (machBefore - zero) * UInt64(tb.numer) / UInt64(tb.denom), to = from + window
+        let inWindow = runs.reduce(UInt64(0)) { $0 + (min($1.end, to) > max($1.start, from) ? min($1.end, to) - max($1.start, from) : 0) }
+        print(String(format: "on CPU from %.3f to %.3f s of the trace: %.4f s by the trace, %.4f s by the kernel's count", Double(from) / 1e9, Double(to) / 1e9, Double(inWindow) / 1e9, Double(usedAfter - usedBefore) / 1e9))
+        print(String(format: "on CPU: %.4f s in %d runs by the trace's context switches (%.4f s of it inside calls); %.4f s by the kernel's count (rusage) over about the same time",
+                     Double(onCPU) / 1e9, runs.count, Double(inCalls) / 1e9, Double(usedAfter - usedBefore) / 1e9))
+        print("on CPU by thread: " + byThread.sorted { $0.value > $1.value }.prefix(8).map { String(format: "%llu %.4f s", $0.key, Double($0.value) / 1e9) }.joined(separator: ", "))
+        if dec.cpuMeasured {
+            // The Summary view's rows: each call's total, and how it splits into on and off a CPU.
+            for row in SyscallSummaryRow.build(recs).prefix(4) {
+                print("  \(row.name): \(row.calls) calls, total \(SyscallTraceView.duration(row.totalNanos)), on CPU \(SyscallTraceView.duration(row.cpuNanos)), off CPU \(SyscallTraceView.duration(row.offNanos)) (\(row.timed) measured)")
+            }
+        } else {
+            print("time on a CPU not measured (events lost, or the trace's source doesn't mark the process's context switches)")
+        }
         if lost { printLostTotals(byCPU, byKind) }
         if activity { printActivity(recs + inFlight, pid: pid, names: MachPortNames.resolveHere(pid: pid), woken: wakes.names,
                                     threads: SyscallTracer.threadNames(wakes.threadNames, dec.threadNames)) }
@@ -267,8 +303,11 @@ enum Bench {
             how[k, default: 0] += 1
         }
         print("sends by how named: " + how.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
-        for g in SyscallActivity.build(recs, filter: "", errorsOnly: false, context: context).reversed() {
-            let at = g.calls[0].start.map { String(format: "%8.3f", Double($0) / 1e9) } ?? "  before"
+        let groups = SyscallActivity.build(recs, scope: TraceScope(), context: context)
+        print(TraceOverview.build(recs, scope: TraceScope(), context: context, groups: groups, fromStart: true).sentence)
+        // Oldest first, then what recurs and the waits, as the view keeps them at the end.
+        for g in groups.filter({ !$0.pinned }).reversed() + groups.filter(\.pinned) {
+            let at = g.period != nil ? g.when : g.calls[0].start.map { String(format: "%8.3f", Double($0) / 1e9) } ?? "  before"
             print("\(at)  \(g.operation.rawValue)  \(g.target)  ·  \(g.detail)")
         }
     }
@@ -464,7 +503,7 @@ enum Bench {
                 while let (d, running, _, _) = s.read() {
                     if !stopped && -t0.timeIntervalSinceNow > secs { s.stop(); stopped = true }
                     var batch = dec.feed(format == .kdebug ? KdebugEvent.decodeRaw(d) : KdebugEvent.decode(d).events)
-                    fds.label(&batch) { s.describeFds($0) }
+                    fds.label(&batch, sockets: { s.takeSeenSockets() }) { s.describeFds($0) }
                     recs += batch
                     if !running { break }
                     if d.count < SyscallTraceConfig.maxRead / 2 { usleep(250_000) }
@@ -569,7 +608,7 @@ enum Bench {
                 let evs = format == .kdebug ? KdebugEvent.decodeRaw(d) : KdebugEvent.decode(d).events
                 events += evs.count
                 var batch = dec.feed(evs)
-                fds.label(&batch) { s.describeFds($0) }
+                fds.label(&batch, sockets: { s.takeSeenSockets() }) { s.describeFds($0) }
                 _ = wakes.label(&batch) { s.threads($0) }
                 if show { for r in batch where shown < 40 && !r.name.contains("semwait") { print("  \(r.name)(\(r.namedArgsText)) = \(r.resultText)"); shown += 1 } }
                 take(batch)

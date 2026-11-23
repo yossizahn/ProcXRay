@@ -309,10 +309,13 @@ enum HelperDaemon {
         }
 
         func traceDescribeFds(_ fds: Data, reply: @escaping (Data) -> Void) {
-            traceLock.lock(); let pid = trace == nil ? 0 : tracedPid; traceLock.unlock()
+            traceLock.lock(); let pid = trace == nil ? 0 : tracedPid; let source = trace; traceLock.unlock()
             guard pid > 0, let list = try? JSONDecoder().decode([Int32].self, from: fds) else { reply(Data()); return }
             let d = NativeLsof.describe(pid, fds: Set(list.prefix(4096)))
-            reply((try? JSONEncoder().encode(Dictionary(uniqueKeysWithValues: d.map { (String($0.key), $0.value) }))) ?? Data())
+            var out = Dictionary(uniqueKeysWithValues: d.map { (String($0.key), $0.value) })
+            // And the sockets read as their calls came by (SeenSocket): keys no descriptor has.
+            for s in source?.seenSockets() ?? [] { out[s.key] = s.label }
+            reply((try? JSONEncoder().encode(out)) ?? Data())
         }
 
         func traceThreads(_ tids: Data, reply: @escaping (Data) -> Void) {

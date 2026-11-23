@@ -17,7 +17,11 @@ import Foundation
 //            thread between the entry and return of the syscall doing the lookup.
 //   Scheduler (1 / 0x40), logged on the thread doing the scheduling, so the pid filter keeps the traced process's:
 //            MACH_MKRUNNABLE (code 0x6) args[0] = the thread made runnable; MACH_BLOCK (0xf), MACH_WAIT (0x10),
-//            MACH_SCHED (0x0) and MACH_STKHANDOFF (0x2) = this thread gave up its CPU. Checked on Finder against
+//            MACH_SCHED (0x0) and MACH_STKHANDOFF (0x2) = this thread gave up its CPU, args[1] = the thread that
+//            got it (so the events of other processes' threads that hand a CPU to a traced one are kept too:
+//            SyscallDecoder.switched; the helper marks whose each is, KdebugEvent.ours); the same thread there means it kept its CPU. The runs these give add up
+//            to the kernel's own count of the process's CPU time (proc_pid_rusage over the same stretch) within
+//            0.3% for WindowServer, Finder, logd and scripts that compute, sleep and connect (VM, 27.2). Checked on Finder against
 //            lsmp (27.2): a message send that wakes a thread wakes one of the receiving process (60 of 60), and
 //            a send-and-receive whose reply came without the thread blocking went to a kernel object (38 of 38;
 //            every call to another process blocked). The kernel's per-message IPC events (MACH_IPC_kmsg_info,
@@ -73,6 +77,10 @@ struct SyscallRecord: Identifiable, Sendable, Hashable {
     var blocked: Bool?
     /// The process `woke` belongs to (ThreadLabeler).
     var receiver: Int32?
+    /// Time the thread was on a CPU between the call's entry and its return, from the scheduler's context
+    /// switches; the rest of its duration it was off one (blocked, or waiting its turn). nil: not measured (no
+    /// scheduler events, the entry missed, events lost during the call).
+    var cpu: UInt64?
     /// A message a kernel object handled: the kernel routine's index (MIGRoutines), from the MIG trace events.
     var kernelRoutine: Int?
     /// `number` of a dyld call (dlopen, dlsym…, from dyld's trace events): no syscall has it.
@@ -115,6 +123,9 @@ struct KdebugEvent: Sendable {
     var debugid: UInt32 = 0
     var arg: [UInt64] = []
     var thread: UInt64 = 0
+    /// Context switches from the helper (KdebugTrace.take): 1 = the thread leaving the CPU is the traced process's,
+    /// 2 = the thread taking it is. 0 from anything else, which doesn't say.
+    var ours: UInt8 = 0
 
     var cls: UInt32 { debugid >> 24 }
     var subclass: UInt32 { (debugid >> 16) & 0xff }
@@ -125,6 +136,7 @@ struct KdebugEvent: Sendable {
     static let stackHeader: UInt32 = 0x2502_0018  // PERF_STK_UHdr: flags, frame count
     static let stackData: UInt32 = 0x2502_0010    // PERF_STK_UData: four frames
     static let makeRunnable: UInt32 = 0x0140_0018 // MACH_MKRUNNABLE: args[0] = the thread
+    static let contextSwitch: Set<UInt32> = [0x0140_0000, 0x0140_0008]   // SCHED, STKHANDOFF: args[1] = the thread coming on
     static let gaveUpCPU: Set<UInt32> = [0x0140_003c, 0x0140_0040, 0x0140_0000, 0x0140_0008]   // BLOCK, WAIT, SCHED, STKHANDOFF
 
     /// The helper's KdebugTrace.Record layout (the kernel's kd_buf, timestamp in ns since the trace started).
@@ -145,7 +157,8 @@ struct KdebugEvent: Sendable {
                                              raw.loadUnaligned(fromByteOffset: o + 16, as: UInt64.self),
                                              raw.loadUnaligned(fromByteOffset: o + 24, as: UInt64.self),
                                              raw.loadUnaligned(fromByteOffset: o + 32, as: UInt64.self)],
-                                       thread: raw.loadUnaligned(fromByteOffset: o + 40, as: UInt64.self)))
+                                       thread: raw.loadUnaligned(fromByteOffset: o + 40, as: UInt64.self),
+                                       ours: UInt8(truncatingIfNeeded: raw.loadUnaligned(fromByteOffset: o + 56, as: UInt64.self))))
                 o += size
             }
         }
@@ -293,6 +306,67 @@ struct SyscallDecoder: Sendable {
     private struct Open: Sendable {
         var rec: SyscallRecord
         let debugBase: UInt32
+        /// The thread's time on a CPU so far as the call was entered (`cpuTime`), and the gap count then.
+        var cpuAtEntry: UInt64 = 0
+        var gapsAtEntry = 0
+    }
+
+    /// A stretch one of the traced process's threads spent on a CPU, in ns since the trace started.
+    struct Run: Sendable, Equatable {
+        let thread: UInt64
+        let start: UInt64
+        let end: UInt64
+    }
+    /// When each of the process's threads now on a CPU came on, as far as the trace shows: at a context switch to
+    /// it, or at its first sign of running (a call, or the scheduler leaving it on at the end of its quantum),
+    /// when the switch came before the trace or before the helper knew the thread. So a run's start can be late
+    /// (by a quantum at most, about 10 ms) and never early.
+    private var onSince: [UInt64: UInt64] = [:]
+    /// Each thread's finished runs added up.
+    private var ranFor: [UInt64: UInt64] = [:]
+    private var runs: [Run] = []
+    private var lastTime: UInt64 = 0
+    /// The helper marks whose each context switch is (KdebugEvent.ours): without that, a switch to one of the
+    /// process's threads can't be told from any other, and nothing is measured (an older helper, ktrace).
+    private var marked = false
+    /// Runs and calls' time on a CPU can be trusted: the switches are marked and no events were lost.
+    var cpuMeasured: Bool { marked && gaps == 0 }
+
+    /// The runs still going at the last event, up to it.
+    func openRuns() -> [Run] {
+        onSince.compactMap { t, since in lastTime > since ? Run(thread: t, start: since, end: lastTime) : nil }
+    }
+
+    /// The runs finished since the last call.
+    mutating func takeRuns() -> [Run] {
+        defer { runs = [] }
+        return runs
+    }
+
+    /// The runs still going when the trace ended, ended there.
+    mutating func endRuns() -> [Run] {
+        for (t, since) in onSince where lastTime > since { runs.append(Run(thread: t, start: since, end: lastTime)) }
+        onSince = [:]
+        return takeRuns()
+    }
+
+    /// One of the process's threads shows it is running.
+    private mutating func running(_ thread: UInt64, _ ts: UInt64) {
+        if onSince[thread] == nil { onSince[thread] = ts }
+    }
+
+    /// The thread's time on a CPU up to `ts`.
+    private func cpuTime(_ thread: UInt64, _ ts: UInt64) -> UInt64 {
+        (ranFor[thread] ?? 0) + (onSince[thread].map { ts > $0 ? ts - $0 : 0 } ?? 0)
+    }
+
+    /// A context switch: the event's thread leaves its CPU and args[1] takes it.
+    private mutating func switched(_ e: KdebugEvent) {
+        if e.ours & 1 != 0, let since = onSince.removeValue(forKey: e.thread), e.ts > since {
+            ranFor[e.thread, default: 0] += e.ts - since
+            runs.append(Run(thread: e.thread, start: since, end: e.ts))
+        }
+        if e.ours & 2 != 0 { onSince[e.arg[1]] = e.ts }
     }
     private var open: [UInt64: [Open]] = [:]
     private var lookups: [UInt64: Data] = [:]
@@ -326,9 +400,12 @@ struct SyscallDecoder: Sendable {
     mutating func feed(_ events: [KdebugEvent]) -> [SyscallRecord] {
         var out: [SyscallRecord] = []
         for e in events {
+            lastTime = max(lastTime, e.ts)
             if e.debugid == KdebugEvent.lostEvents {
                 // A call open across the gap may have returned in it: pairing its entry with a later return of the
                 // same call would be wrong, so start over. Returns of calls entered before show as entryMissed.
+                // Nor is it known who was on a CPU across the gap.
+                onSince = [:]
                 open = [:]; lookups = [:]; gaps += 1; dyldOpen = [:]; stringParts = [:]; nameParts = [:]; imageLoad = [:]
                 out += held.values; held = [:]; building = [:]
                 continue
@@ -352,6 +429,7 @@ struct SyscallDecoder: Sendable {
             guard e.subclass == 0x0c, e.cls == 4 || e.cls == 1 else { continue }
             let base = e.debugid & ~3
             let mach = e.cls == 1
+            running(e.thread, e.ts)
             switch e.fn {
             case 1:
                 // A new call on the thread: the last one's stack isn't coming.
@@ -360,11 +438,12 @@ struct SyscallDecoder: Sendable {
                                       number: e.code, name: Self.name(e.eventname, mach: mach, code: e.code))
                 nextID += 1
                 r.args = e.arg
-                open[e.thread, default: []].append(Open(rec: r, debugBase: base))
+                open[e.thread, default: []].append(Open(rec: r, debugBase: base, cpuAtEntry: cpuTime(e.thread, e.ts), gapsAtEntry: gaps))
             case 2:
                 var r: SyscallRecord
                 if var stack = open[e.thread], let i = stack.lastIndex(where: { $0.debugBase == base }) {
                     r = stack[i].rec
+                    if marked, stack[i].gapsAtEntry == gaps { r.cpu = cpuTime(e.thread, e.ts) - stack[i].cpuAtEntry }
                     // Anything opened after it on this thread never returned in the trace: drop it.
                     stack.removeSubrange(i...)
                     open[e.thread] = stack.isEmpty ? nil : stack
@@ -591,6 +670,17 @@ struct SyscallDecoder: Sendable {
     /// Scheduler events land on the innermost open call of their thread: who it woke first, whether it blocked.
     private mutating func sched(_ e: KdebugEvent) {
         schedSeen = true
+        if KdebugEvent.contextSwitch.contains(e.debugid & ~3) {
+            // The scheduler also logs a "switch" from a thread to itself when it looks for something better to
+            // run and finds nothing (seen after MACH_REDISPATCH in a thread computing through its quantum): the
+            // thread keeps its CPU, so it neither left it nor blocked.
+            if e.ours != 0 { marked = true }
+            if e.arg.count > 1, e.arg[1] == e.thread {
+                if e.ours != 0 { running(e.thread, e.ts) }
+                return
+            }
+            if e.arg.count > 1 { switched(e) }
+        }
         guard var stack = open[e.thread], !stack.isEmpty else { return }
         let base = e.debugid & ~3
         var r = stack[stack.count - 1].rec
@@ -648,11 +738,18 @@ struct SyscallDecoder: Sendable {
 /// and sockets (whose endpoints change on connect) are asked of the helper, once per batch of records, and a
 /// helper answer is applied only after the fd's last open/close/dup in the batch. An fd closed and reopened by
 /// something the trace doesn't show, between the call and the lookup, can still get a stale label.
+///
+/// A connection is often over before that lookup, so the helper also reads a socket's endpoints as its calls
+/// come by (SeenSocket): such a reading names the socket from the call it was made for to the socket's close.
 struct FdLabeler {
     /// Labels the trace itself established.
     private var known: [Int32: String] = [:]
     /// fds whose trace label is only a kind ("UDP socket"): a valid helper answer (with endpoints) wins.
     private var refreshable: Set<Int32> = []
+    /// When each descriptor last changed hands (opened, made, copied onto, closed).
+    private var changed: [Int32: UInt64] = [:]
+    /// The helper's readings of sockets' endpoints not yet matched to a call.
+    private var seen: [Int32: [SeenSocket]] = [:]
 
     /// (argument index, fd) for each fd argument of a record.
     static func fdArgs(_ r: SyscallRecord) -> [(Int, Int32)] {
@@ -706,7 +803,8 @@ struct FdLabeler {
     }
 
     /// Labels the fd arguments of `recs` (in the order they returned), asking `lookup` about the rest.
-    mutating func label(_ recs: inout [SyscallRecord], lookup: (Set<Int32>) -> [Int32: String]) {
+    /// `sockets`: asked after `lookup`, for the endpoints the helper read as the calls came by.
+    mutating func label(_ recs: inout [SyscallRecord], sockets: () -> [SeenSocket] = { [] }, lookup: (Set<Int32>) -> [Int32: String]) {
         // Pass 1: which fds the trace can't name, and where each fd last changed in this batch.
         var state = known
         var need = Set<Int32>()
@@ -717,18 +815,36 @@ struct FdLabeler {
             for e in Self.effects(r) { apply(e, to: &state, soft: &soft, at: n, lastChange: &lastChange) }
         }
         let answers = need.isEmpty ? [:] : lookup(need)
+        for s in sockets() { seen[s.fd, default: []].append(s) }
         // Pass 2: label, replaying the same changes.
         var scratch: [Int32: Int] = [:]
         for n in recs.indices {
             for (i, fd) in Self.fdArgs(recs[n]) {
                 let answer = (lastChange[fd] ?? -1) <= n ? answers[fd] : nil
-                let label = refreshable.contains(fd) ? (answer ?? known[fd]) : (known[fd] ?? answer)
+                // A reading made for a call on this descriptor since it last changed hands, up to this call: the
+                // socket's endpoints, which the lookup just now can't give once it is closed.
+                let at = recs[n].end ?? recs[n].time
+                if answer?.contains("->") != true, known[fd]?.hasPrefix("/") != true,
+                   let s = seen[fd]?.last(where: { $0.time >= changed[fd] ?? 0 && $0.time <= at }) {
+                    known[fd] = s.label
+                }
+                // A socket's lookup wins, unless it has lost the endpoints a reading had.
+                let reading = known[fd].flatMap { $0.contains("->") && answer?.contains("->") != true ? $0 : nil }
+                let label = refreshable.contains(fd) ? (reading ?? answer ?? known[fd]) : (known[fd] ?? answer)
                 if let label, !label.isEmpty {
                     recs[n].argValues[i] += " (" + label + ")"
                     if i == 0 { recs[n].firstFDLabel = label }
                 }
             }
-            for e in Self.effects(recs[n]) { apply(e, to: &known, soft: &refreshable, at: n, lastChange: &scratch) }
+            for e in Self.effects(recs[n]) {
+                apply(e, to: &known, soft: &refreshable, at: n, lastChange: &scratch)
+                let t = recs[n].end ?? recs[n].time
+                switch e {
+                case .open(let fd, _), .socket(let fd, _), .unknown(let fd), .close(let fd), .copy(_, let fd):
+                    changed[fd] = t
+                    seen[fd]?.removeAll { $0.time < t }
+                }
+            }
         }
     }
 
@@ -1288,6 +1404,10 @@ struct SyscallSummaryRow: Identifiable, Sendable {
     var errors = 0
     var totalNanos: UInt64 = 0
     var maxNanos: UInt64 = 0
+    /// Of the calls whose time on a CPU was measured (SyscallRecord.cpu): that time, and the rest of their duration.
+    var cpuNanos: UInt64 = 0
+    var offNanos: UInt64 = 0
+    var timed = 0
     var avgNanos: UInt64 { calls > 0 ? totalNanos / UInt64(calls) : 0 }
 
     static func build(_ records: [SyscallRecord]) -> [SyscallSummaryRow] {
@@ -1297,6 +1417,7 @@ struct SyscallSummaryRow: Identifiable, Sendable {
             s.calls += 1
             if r.failed { s.errors += 1 }
             if let d = r.duration { s.totalNanos += d; s.maxNanos = max(s.maxNanos, d) }
+            if let d = r.duration, let c = r.cpu { s.cpuNanos += min(c, d); s.offNanos += d - min(c, d); s.timed += 1 }
             rows[r.name] = s
         }
         return rows.values.sorted { $0.totalNanos > $1.totalNanos }
@@ -1316,6 +1437,13 @@ struct ThreadInfo: Codable, Hashable, Sendable {
 /// PROC_PIDLISTTHREADIDS, not in the SDK's headers) and PROC_PIDTHREADID64INFO. Root reads every process's
 /// (~13 ms for 580 processes); another user only its own.
 enum ThreadOwners {
+    /// One process's thread ids, as the kernel lists them now.
+    static func threads(of pid: Int32) -> [UInt64] {
+        var buf = [UInt64](repeating: 0, count: 4096)
+        let n = buf.withUnsafeMutableBytes { proc_pidinfo(pid, 28, 0, $0.baseAddress, Int32($0.count)) }   // PROC_PIDLISTTHREADIDS
+        return n > 0 ? Array(buf.prefix(Int(n) / 8)) : []
+    }
+
     static func lookup(_ tids: Set<UInt64>) -> [UInt64: ThreadInfo] {
         guard !tids.isEmpty else { return [:] }
         let PROC_PIDLISTTHREADIDS: Int32 = 28
@@ -1428,5 +1556,55 @@ enum MIGRoutines {
             i += 1
         }
         return nil
+    }
+}
+
+/// When the traced process's threads were on a CPU, from the trace's context switches (SyscallDecoder.Run).
+struct TraceCPU: Sendable {
+    /// Finished runs, in the order they ended, then the ones still going at the last event.
+    var runs: [SyscallDecoder.Run] = []
+    var open: [SyscallDecoder.Run] = []
+    /// Runs that ended before this were let go to bound memory: nothing is known about earlier stretches.
+    var from: UInt64 = 0
+    /// Each thread's time on a CPU over the whole trace.
+    var totals: [UInt64: UInt64] = [:]
+    /// False while the trace can't say (SyscallDecoder.cpuMeasured): then nothing here is shown.
+    var measured = false
+
+    static let cap = 400_000
+
+    mutating func add(_ new: [SyscallDecoder.Run], open: [SyscallDecoder.Run], measured: Bool) {
+        for r in new { totals[r.thread, default: 0] += r.end - r.start }
+        runs += new
+        self.open = open
+        self.measured = measured
+        if runs.count > Self.cap {
+            let cut = runs.count - Self.cap + Self.cap / 10
+            from = max(from, runs[cut - 1].end)
+            runs.removeFirst(cut)
+        }
+    }
+
+    /// A thread's time on a CPU so far, the run it is in included.
+    func total(_ thread: UInt64) -> UInt64? {
+        guard measured else { return nil }
+        return (totals[thread] ?? 0) + open.lazy.filter { $0.thread == thread }.map { $0.end - $0.start }.reduce(0, +)
+    }
+
+    /// Calls `body` with each run's part inside `range`, for `threads` (none: all).
+    func each(in range: ClosedRange<UInt64>, threads: Set<UInt64>, _ body: (UInt64, UInt64) -> Void) {
+        for list in [runs, open] {
+            for r in list where r.end > range.lowerBound && r.start < range.upperBound && (threads.isEmpty || threads.contains(r.thread)) {
+                body(max(r.start, range.lowerBound), min(r.end, range.upperBound))
+            }
+        }
+    }
+
+    /// Time on a CPU inside `range`; nil when it isn't known for all of it.
+    func time(in range: ClosedRange<UInt64>, threads: Set<UInt64>) -> UInt64? {
+        guard measured, range.lowerBound >= from else { return nil }
+        var sum: UInt64 = 0
+        each(in: range, threads: threads) { sum += $1 - $0 }
+        return sum
     }
 }

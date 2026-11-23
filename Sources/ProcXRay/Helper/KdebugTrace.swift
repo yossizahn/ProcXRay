@@ -9,10 +9,30 @@ protocol TraceSource: AnyObject, Sendable {
     func stop()
     /// Images behind stack frames found since the last call (StackRegion JSON); empty without stacks.
     func newRegions() -> Data
+    /// Sockets whose endpoints the source read as their calls came by, since the last call (KdebugTrace.sockets).
+    func seenSockets() -> [SeenSocket]
+}
+
+/// A socket's endpoints ("TCP 10.0.0.2:52311->1.1.1.1:443") as read while the call at `time` (ns since the trace
+/// started) on descriptor `fd` was among the newest events.
+struct SeenSocket: Sendable, Equatable {
+    let fd: Int32
+    let time: UInt64
+    let label: String
+
+    /// Carried in the reply to a descriptor lookup beside the descriptors' own entries, which have a number for a key.
+    var key: String { "seen:\(fd):\(time)" }
+    init(fd: Int32, time: UInt64, label: String) { self.fd = fd; self.time = time; self.label = label }
+    init?(key: String, label: String) {
+        let p = key.split(separator: ":")
+        guard p.count == 3, p[0] == "seen", let fd = Int32(p[1]), let time = UInt64(p[2]) else { return nil }
+        self.init(fd: fd, time: time, label: label)
+    }
 }
 
 extension TraceSource {
     func newRegions() -> Data { Data() }
+    func seenSockets() -> [SeenSocket] { [] }
 }
 
 /// A mapped file in the traced process, for symbolicating stack frames: [start, size, path]. `path` is empty
@@ -65,8 +85,17 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         var unused: UInt64
     }
     static let recordSize = 64
-    /// Threads seen making a call: the traced process's. Only the pump thread touches it.
+    /// The traced process's threads: those the kernel lists for it at each read, and any seen making a call. Only the pump thread touches it.
     private var ownThreads: Set<UInt64> = []
+    /// Socket endpoints read as their calls came by, until the app takes them.
+    private var sockets: [SeenSocket] = []
+    /// BSD syscall numbers whose first argument is a socket that has, or is getting, a peer: connect, connectx,
+    /// sendto, sendmsg, recvfrom, recvmsg and their _nocancel forms. Then accept's two, and what ends a descriptor.
+    private static let socketCalls: Set<UInt32> = [98, 409, 447, 133, 413, 28, 402, 29, 403, 27, 401]
+    private static let acceptCalls: Set<UInt32> = [30, 404]
+    private static let closeCalls: Set<UInt32> = [6, 399, 442]
+    /// Events were dropped since the last ones queued for the app.
+    private var droppedSinceQueued = false
     static let lostEvents: UInt32 = 0x0702_0008   // TRACE_LOST_EVENTS in /usr/share/misc/trace.codes
     /// PERF_STK_UData: four frames of a user stack.
     static let stackData: UInt32 = 0x2502_0010
@@ -103,7 +132,8 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
     private var lostMarks = 0
     private let maxPending: Int
     private let deadline: UInt64
-    private let start: UInt64
+    /// mach_absolute_time at the trace's time zero.
+    let start: UInt64
     private let numer: UInt64, denom: UInt64
     private let pid: Int32
     private let stacks: Bool
@@ -261,16 +291,29 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
     ///
     /// The kernel's pid filter doesn't hold back scheduler events (DBG_MACH_SCHED) or thread names: a 6 s trace of
     /// Finder got scheduler events from 354 threads, 145k events for 1,061 calls. Kept: those of threads that made a call, which are the traced
-    /// process's (syscall events do pass the filter) and the only ones SyscallDecoder uses.
+    /// process's (syscall events do pass the filter), and the context switches that put one of them on a CPU:
+    /// the only ones SyscallDecoder uses.
     private func take(_ buf: UnsafeMutableRawPointer, _ count: Int) {
         let recs = buf.bindMemory(to: Record.self, capacity: count)
+        // The process's threads now, from the kernel: one that only computes makes no call to be known by, and
+        // its time on a CPU would go uncounted.
+        for t in ThreadOwners.threads(of: pid) { ownThreads.insert(t) }
         var lost = 0
         var n = 0
+        /// Descriptors a socket call in these events used, and when last; not ones closed after it.
+        var used: [Int32: UInt64] = [:]
         for i in 0..<count {
             let id = recs[i].debugid
             // Thread names (TRACE_STRING_THREADNAME, 0x0701) leak from other processes the same way.
             if id >> 16 == 0x0140 || id >> 16 == 0x0701 {
-                guard ownThreads.contains(recs[i].arg5) else { continue }
+                // A context switch is logged on the thread leaving the CPU, with the one coming on in its second
+                // argument: kept for either, so the decoder sees the traced threads come on as well as go off.
+                let isSwitch = id & ~3 == 0x0140_0000 || id & ~3 == 0x0140_0008
+                let from = ownThreads.contains(recs[i].arg5), to = isSwitch && ownThreads.contains(recs[i].arg2)
+                guard from || to else { continue }
+                // Whose the switch is, in the record's spare word (KdebugEvent.ours): the decoder can't know that
+                // of a thread that has made no call.
+                if isSwitch { recs[i].unused = (from ? 1 : 0) | (to ? 2 : 0) }
             } else if id >> 16 == 0x010c || id >> 16 == 0x040c {
                 ownThreads.insert(recs[i].arg5)
             }
@@ -278,6 +321,13 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
             let ts = recs[n].timestamp
             recs[n].timestamp = ts > start ? (ts - start) * numer / denom : 0
             if id == Self.lostEvents { lost += 1 }
+            if id >> 16 == 0x040c {
+                let call = (id >> 2) & 0x3fff, fn = id & 3
+                if fn == 1, Self.socketCalls.contains(call) { used[Int32(truncatingIfNeeded: recs[n].arg1)] = recs[n].timestamp }
+                else if fn == 1, Self.closeCalls.contains(call) { used[Int32(truncatingIfNeeded: recs[n].arg1)] = nil }
+                // accept's return: no error, the new descriptor.
+                else if fn == 2, Self.acceptCalls.contains(call), recs[n].arg1 == 0 { used[Int32(truncatingIfNeeded: recs[n].arg2)] = recs[n].timestamp }
+            }
             if stacks && id & ~3 == Self.stackData {
                 for a in [recs[n].arg1, recs[n].arg2, recs[n].arg3, recs[n].arg4] { noteFrame(a) }
             }
@@ -286,6 +336,7 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
             n += 1
         }
         guard n > 0 else { return }
+        let seen = used.isEmpty ? [] : seenNow(used)
         let bytes = n * Self.recordSize
         lock.lock()
         let full = pendingBytes + bytes > maxPending
@@ -293,6 +344,8 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
         // Copied outside the lock; nothing to copy when it would be dropped anyway.
         let copy = full ? Data() : Data(bytes: buf, count: bytes)
         lock.lock()
+        sockets += seen
+        if sockets.count > 4096 { sockets.removeFirst(sockets.count - 4096) }
         if lost > 0 {
             if lostMarks == 0 { notes += "The kernel's trace buffer overflowed: some calls are missing, so calls in flight then show without arguments or results.\n" }
             lostMarks += lost
@@ -301,11 +354,43 @@ final class KdebugTrace: TraceSource, @unchecked Sendable {
             // Said once here (notes are shown deduplicated), with the total when the trace ends.
             if droppedRecords == 0 { notes += "The app fell behind the trace: events are being dropped.\n" }
             droppedRecords += n
+            droppedSinceQueued = true
         } else {
+            if droppedSinceQueued {
+                // Tell the decoder where events are missing, as the kernel does for its own (TRACE_LOST_EVENTS):
+                // it mustn't pair a call's entry with a later return, or count a thread as on a CPU across the hole.
+                droppedSinceQueued = false
+                var mark = Record(timestamp: recs[0].timestamp, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+                                  debugid: Self.lostEvents, cpuid: 0, unused: 0)
+                chunks.append(Data(bytes: &mark, count: Self.recordSize))
+                pendingBytes += Self.recordSize
+            }
             chunks.append(copy)
             pendingBytes += bytes
         }
         lock.unlock()
+    }
+
+    /// The endpoints of the sockets these events' calls used, read now: a short connection is closed, and its
+    /// number given to another, long before the app's own lookup (a batch of records and an XPC call later), and
+    /// the trace's events have only the address of a sockaddr, not the address in it. Still a reading after the
+    /// fact: the events are up to `waitMs` old, so a socket closed since has no endpoints to give (it keeps its
+    /// kind, "TCP socket"), and one closed and replaced by another connection in that time would get the new
+    /// one's. Descriptors the same events close are left out for that reason.
+    private func seenNow(_ used: [Int32: UInt64]) -> [SeenSocket] {
+        NativeLsof.describe(pid, fds: Set(used.keys.prefix(256))).compactMap { fd, label in
+            guard label.contains("->"), let time = used[fd] else { return nil }
+            // Without the TCP state at the end ("ESTABLISHED"): it is this moment's, and the label stays on later calls.
+            var parts = label.split(separator: " ")
+            if parts.count > 2, let last = parts.last, last.allSatisfy({ $0.isUppercase || $0 == "_" }) { parts.removeLast() }
+            return SeenSocket(fd: fd, time: time, label: parts.joined(separator: " "))
+        }
+    }
+
+    func seenSockets() -> [SeenSocket] {
+        lock.lock(); defer { lock.unlock() }
+        defer { sockets = [] }
+        return sockets
     }
 
     /// The executable code mapped from files outside the shared cache when the trace starts, so frames in it
