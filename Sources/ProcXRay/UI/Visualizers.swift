@@ -1463,31 +1463,29 @@ struct LogView: View {
             }
             .padding(8)
             histogram(v.hist).frame(height: 70).padding(.horizontal, 8).padding(.bottom, 6)
-            ScrollViewReader { proxy in
-                table(rows)
-                    .onChange(of: rows.last?.id) { _, id in if follow, let id { proxy.scrollTo(id, anchor: .bottom) } }
-                    .onChange(of: follow) { _, on in if on, let id = rows.last?.id { proxy.scrollTo(id, anchor: .bottom) } }
-                    .onAppear { if follow, let id = rows.last?.id { proxy.scrollTo(id, anchor: .bottom) } }
-            }
+            table(rows)
         }
     }
 
+    /// In the order the events came (no column sorted to begin with); while following, the newest stays in view.
     private func table(_ rows: [LogEntry]) -> some View {
-            Table(rows) {
-                TableColumn("Time") { e in Text(e.time).monospacedDigit().foregroundStyle(.secondary) }.width(min: 80, ideal: 90, max: 110)
-                TableColumn("Level") { e in Pill(text: e.level.rawValue, color: e.level.color) }.width(min: 54, ideal: 60, max: 70)
-                TableColumn("Thread") { e in Text(e.thread).monospaced().foregroundStyle(.secondary).truncationHelp(e.thread) }.width(min: 50, ideal: 60, max: 80)
-                TableColumn("Subsystem") { e in
-                    let parts = e.subsystem.split(separator: ":", maxSplits: 1).map(String.init)
-                    HStack(spacing: 4) {
-                        if let s = parts.first { Text(s).foregroundStyle(libColor(s)) }
-                        if parts.count > 1 { Pill(text: parts[1]) }
-                    }
-                    .lineLimit(1)
-                    .truncationHelp(e.subsystem)
-                }.width(min: 110, ideal: 170, max: 260)
-                TableColumn("Message") { e in Text(e.message).lineLimit(2).help(e.message) }
-            }
+        var level = DataColumn<LogEntry>.text("level", "Level", width: 70) { $0.level.rawValue }
+        level.dot = { NSColor($0.level.color) }
+        // The last column: it takes the width that is left.
+        var message = DataColumn<LogEntry>.text("message", "Message", width: 300) { $0.message }
+        message.minWidth = 160
+        message.truncatesTail = true
+        message.tooltip = { $0.message }
+        return DataTable(rows: rows, columns: [
+            .text("time", "Time", width: 90, color: { _ in .secondaryLabelColor }) { $0.time },
+            level,
+            .text("thread", "Thread", width: 60, mono: true, color: { _ in .secondaryLabelColor }) { $0.thread },
+            // The library or subsystem in its own color, then the category.
+            .text("subsystem", "Subsystem", width: 170, color: { e in
+                e.subsystem.split(separator: ":", maxSplits: 1).first.map { NSColor(libColor(String($0))) }
+            }) { $0.subsystem },
+            message,
+        ], initialSort: ("", true), autosave: "logEvents", followsEnd: follow, exportName: "Log")
     }
 
     private static let timeFormatter: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f }()
