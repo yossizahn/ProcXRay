@@ -24,7 +24,7 @@ enum PerfStages {
         case ambientPublish = "main: menu bar publish"
     }
 
-    nonisolated(unsafe) static let path = ProcessInfo.processInfo.environment["PROCXRAY_PERF"]
+    static let path = ProcessInfo.processInfo.environment["PROCXRAY_PERF"]
     static var enabled: Bool { path != nil }
 
     private struct Total { var calls = 0; var cpu: UInt64 = 0; var maxCPU: UInt64 = 0 }
