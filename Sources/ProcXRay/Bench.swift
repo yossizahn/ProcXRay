@@ -305,9 +305,9 @@ enum Bench {
         print("sends by how named: " + how.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
         let groups = SyscallActivity.build(recs, scope: TraceScope(), context: context)
         print(TraceOverview.build(recs, scope: TraceScope(), context: context, groups: groups, fromStart: true).sentence)
-        // Oldest first, then what recurs and the waits, as the view keeps them at the end.
+        // Oldest first, then the waits, as the view keeps them at the end.
         for g in groups.filter({ !$0.pinned }).reversed() + groups.filter(\.pinned) {
-            let at = g.period != nil ? g.when : g.calls[0].start.map { String(format: "%8.3f", Double($0) / 1e9) } ?? "  before"
+            let at = g.calls[0].start.map { String(format: "%8.3f", Double($0) / 1e9) } ?? "  before"
             print("\(at)  \(g.operation.rawValue)  \(g.target)  ·  \(g.detail)")
         }
     }

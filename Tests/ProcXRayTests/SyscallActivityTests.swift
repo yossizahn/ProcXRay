@@ -119,12 +119,6 @@ final class SyscallActivityTests: XCTestCase {
         let context = SyscallActivity.Context(pid: 10, portKinds: [0x203: "task port", 0x1103: "own port"])
         let groups = SyscallActivity.build([task, own, reply, gone], filter: "", errorsOnly: false, context: context)
         XCTAssertEqual(groups.map(\.target), ["Unknown destination (port not in any listing)", "Reply (send-once)", "Own port", "Kernel: task port"])
-        // Messages to its own ports are one activity, whichever thread sent them and however far apart.
-        var later = own
-        later = SyscallRecord(id: 5, start: 9_000_000_000, end: 9_000_000_005, thread: 9, mach: true, number: 0, name: "mach_msg2_trap", args: own.args)
-        let one = SyscallActivity.build([task, own, reply, gone, later], filter: "", errorsOnly: false, context: context)
-        XCTAssertEqual(one.first { $0.target == "Own port" }?.calls.map(\.id), [2, 5])
-        XCTAssertEqual(one.count, 4)
     }
 
     private func stat(_ id: Int, _ path: String, _ time: UInt64, thread: UInt64 = 7, missing: Bool = false) -> SyscallRecord {
@@ -177,29 +171,24 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertEqual(SyscallActivity.build([before], filter: "", errorsOnly: false).map(\.target), ["notes.txt"])
     }
 
-    /// The same thing at even intervals is one activity, kept after the others and before the waits.
-    func testRecurringActivitiesMerge() {
+    /// The same thing at even intervals is marked on each of its rounds; every round stays its own row, in place.
+    func testRecurringActivitiesAreMarked() {
         var recs: [SyscallRecord] = []
         for round in 0..<4 {
             recs.append(stat(round * 10, "/repo/.git/HEAD", UInt64(round) * 1_000_000_000 + UInt64(round) * 3_000_000))
         }
-        // The same path at uneven times, and one seen twice: no rhythm.
+        // The same path at uneven times, and one seen once: no rhythm.
         for (i, t) in [UInt64(100_000_000), 900_000_000, 3_500_000_000].enumerated() { recs.append(stat(100 + i, "/etc/hosts", t)) }
         recs.append(stat(200, "/etc/once", 2_000_000_000))
-        var wait = record(300, "kevent", 50, label: nil)
-        wait.end = 60
-        recs.append(wait)
         let groups = SyscallActivity.build(recs, filter: "", errorsOnly: false)
-        XCTAssertEqual(groups.map(\.target), ["/etc/hosts", "/etc/once", "/etc/hosts", "/etc/hosts", "/repo/.git/HEAD", ""])
-        let beat = groups[4]
-        XCTAssertEqual(beat.rounds, 4)
-        XCTAssertEqual(beat.calls.map(\.id), [0, 10, 20, 30])
-        XCTAssertEqual(beat.when, "every 1.0 s")
-        XCTAssertTrue(beat.pinned)
-        XCTAssertTrue(beat.detail.hasPrefix("4 times"), beat.detail)
-        XCTAssertEqual(SyscallActivity.matching(groups, "every 1.0").map(\.id), [0])
-        // What recurs and the waits take no lane in the thread graph.
-        XCTAssertEqual(ThreadGraph(groups).span[7]?.bottom, 3)
+        XCTAssertEqual(groups.map(\.id), [102, 30, 20, 200, 10, 101, 100, 0])
+        let beat = groups.filter { $0.target == "/repo/.git/HEAD" }
+        XCTAssertEqual(beat.map { $0.recurrence?.round }, [4, 3, 2, 1])
+        XCTAssertEqual(beat[0].recurrence, SyscallActivity.Recurrence(period: 1_003_000_000, round: 4, rounds: 4))
+        XCTAssertTrue(beat[0].detail.hasSuffix("↻ every 1.0 s (4 of 4)"), beat[0].detail)
+        XCTAssertTrue(groups.filter { $0.target != "/repo/.git/HEAD" }.allSatisfy { $0.recurrence == nil })
+        // Filtering by the mark's words shows the loop alone.
+        XCTAssertEqual(SyscallActivity.matching(groups, "every 1.0 s").map(\.id), [30, 20, 10, 0])
     }
 
     /// Time on a CPU comes from the context switches the helper marks as the process's: the thread's own when it
@@ -338,7 +327,7 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertEqual(o.counts[TraceKind.waits.rawValue], 3)
         XCTAssertEqual(o.bars[0].reduce(0, +), 5)
         XCTAssertEqual(o.bars[0][TraceOverview.bins * 6 / 10], 5)
-        XCTAssertEqual(o.sentence, "1.0 s · 2 threads · 5 lookups (5 under /Users/me/tree)")
+        XCTAssertEqual(o.sentence, "1.0 s · 2 threads · 5 lookups")
 
         let part = TraceScope(range: 600_000_000...800_000_000)
         let p = TraceOverview.build(recs, scope: part, context: context,

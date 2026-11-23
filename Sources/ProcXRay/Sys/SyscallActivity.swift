@@ -143,24 +143,28 @@ struct SyscallActivity: Identifiable, Sendable {
     var replyTime: UInt64 = 0
     /// The target is a stand-in ("Socket", "fd 4") that the first label of the descriptor replaces.
     private var provisional = false
-    /// A roll-up (`rollUp`): how many paths under `target`, a directory, a burst of this operation touched. 0: none.
+    /// One round of something the process does at even intervals (`markRecurring`): how often, which round this
+    /// is and of how many so far. A mark only: every round stays a row of its own, where it happened.
+    struct Recurrence: Sendable, Equatable {
+        var period: UInt64
+        var round: Int
+        var rounds: Int
+        /// "↻ every 2.0 s (3 of 5)": the same words on every round, so filtering by them shows the loop alone.
+        var text: String { "↻ every \(SyscallActivity.interval(period)) (\(round) of \(rounds))" }
+    }
+    var recurrence: Recurrence?
+    /// A roll-up (`rollUp`): how many paths under `target`, a directory, one burst of this operation touched. 0: none.
     var paths = 0
-    /// Recurs (`mergeRecurring`): about this often (ns), `rounds` times so far. Such activities hold every round's
-    /// calls and stay at the end of the list, above the waits, instead of at their first round's time.
-    var period: UInt64?
-    var rounds = 0
     var id: Int { calls[0].id }
-    /// Kept at the end of the list whatever its time: the waits, and what recurs.
-    var pinned: Bool { operation == .waits || period != nil }
+    /// Kept at the end of the list whatever its time: the waits.
+    var pinned: Bool { operation == .waits }
 
-    /// What stands where a row's time does: when it started, how often it recurs, nothing for the waits.
+    /// What stands where a row's time does: when it started; nothing for the waits.
     var when: String {
-        if operation == .waits { return "" }
-        if let period { return "every " + Self.interval(period) }
-        return calls[0].start.map(SyscallTraceView.seconds) ?? "before"
+        operation == .waits ? "" : calls[0].start.map(SyscallTraceView.seconds) ?? "before"
     }
 
-    /// "1.0 s", "250 ms": a period, which is never exact enough for more digits.
+    /// "1.0 s", "250 ms": a period, or a length of time in the overview's sentence.
     static func interval(_ ns: UInt64) -> String {
         ns >= 1_000_000_000 ? String(format: "%.1f s", Double(ns) / 1e9) : String(format: "%.0f ms", Double(ns) / 1e6)
     }
@@ -177,15 +181,13 @@ struct SyscallActivity: Identifiable, Sendable {
             parts.append("\(threads.count) thread\(threads.count == 1 ? "" : "s")")
             if let longest { parts.append("longest " + SyscallTraceView.duration(longest)) }
         } else if allFailed || (count == 1 && first.state == .inProgress) {
-            if rounds > 0 { parts.append("\(rounds.formatted()) times") }
+            // Answers ("Create directory — -1 EEXIST: already exists") say what they found, not "Succeeded".
             if paths > 0 { parts.append("\(paths.formatted()) paths") }
             parts.append(first.resultText)
         } else {
-            if rounds > 0 { parts.append("\(rounds.formatted()) times") }
             if paths > 0 {
                 var p = "\(paths.formatted()) paths"
-                // A burst's own length; what recurs has its period instead.
-                if period == nil, let a = calls.first?.start, let b = calls.lazy.compactMap(\.end).max(), b > a {
+                if let a = calls.first?.start, let b = calls.lazy.compactMap(\.end).max(), b > a {
                     p += " in " + SyscallTraceView.duration(b - a)
                 }
                 parts.append(p)
@@ -232,6 +234,7 @@ struct SyscallActivity: Identifiable, Sendable {
             }
             parts.append("\(count.formatted()) " + unit)
         }
+        if let recurrence { parts.append(recurrence.text) }
         return parts.joined(separator: " · ")
     }
 
@@ -264,7 +267,7 @@ struct SyscallActivity: Identifiable, Sendable {
         }
     }
 
-    /// Every activity of the calls `scope` lets through, newest first, then what recurs, then the waits. A close
+    /// Every activity of the calls `scope` lets through, newest first, then the waits. A close
     /// outside the scope still ends its descriptor's life.
     static func build(_ records: [SyscallRecord], scope: TraceScope, context: Context = Context()) -> [Self] {
         var groups: [Self] = []
@@ -278,8 +281,6 @@ struct SyscallActivity: Identifiable, Sendable {
         var cwd = context.cwd
         /// Threads with a working directory of their own (pthread_chdir): their relative paths stay as given.
         var ownDirectory = Set<UInt64>()
-        /// The activity holding the messages to the process's own ports.
-        var ownPorts: Int?
         // Start order also puts calls still pending at trace stop in their proper position.
         for r in records.sorted(by: { ($0.time, $0.id) < ($1.time, $1.id) }) {
             let name = r.name.hasSuffix("_nocancel") ? String(r.name.dropLast(9)) : r.name
@@ -346,17 +347,6 @@ struct SyscallActivity: Identifiable, Sendable {
             guard let op else { continue }
 
             let target = target(op, name, r, context, base: base)
-            // Messages to its own ports are one activity for the whole trace, whichever thread sent them and
-            // whenever: each burst was a row of its own, and a Finder or a Bun makes hundreds.
-            if op == .message, target == Context.ownPort {
-                if let i = ownPorts { groups[i].append(r, kind: op) } else {
-                    var g = Self(operation: op, target: target, calls: [])
-                    g.append(r, kind: op)
-                    ownPorts = groups.count
-                    groups.append(g)
-                }
-                continue
-            }
             var g = Self(operation: op, target: target, calls: [])
             // One-off calls a thread repeats on the same target, with the same result, join one activity. Another
             // thread's are its own: two threads asking the same service are separate work that shares a destination.
@@ -371,11 +361,9 @@ struct SyscallActivity: Identifiable, Sendable {
             groups.append(g)
         }
         for i in groups.indices where groups[i].fd != nil { groups[i].settle() }
-        groups = mergeRecurring(rollUp(groups))
-        let recurring = groups.filter { $0.period != nil }.sorted { ($0.period!, $0.calls[0].time) < ($1.period!, $1.calls[0].time) }
-        groups.removeAll { $0.period != nil }
+        groups = rollUp(groups)
+        markRecurring(&groups)
         groups.reverse()
-        groups += recurring
         if let waits { groups.append(waits) }
         return groups
     }
@@ -389,6 +377,9 @@ struct SyscallActivity: Identifiable, Sendable {
     private static let rollable: Set<Operation> = [.lookup, .xattr, .metadata, .open, .list, .read, .write, .readWrite,
                                                    .remove, .mkdir, .sync]
 
+    /// Only within one burst, so the timeline keeps its shape: the row stands where the burst began, says how long
+    /// it took, and opens to every call. Nothing further apart than `burstGap` is ever joined, and nothing is moved.
+    ///
     /// A program walking a directory tree looks up hundreds of paths within milliseconds, each a row of its own:
     /// a burst of one operation becomes one activity per directory holding its paths ("Look up /a/skills · 735
     /// paths in 14 ms"), whichever threads made the calls (a scan is often spread over a pool). `groups` oldest first.
@@ -441,39 +432,6 @@ struct SyscallActivity: Identifiable, Sendable {
         out.append(("/" + items[0].parts[..<depth].joined(separator: "/"), items.map(\.index).sorted()))
     }
 
-    /// Fewer rounds than this are a coincidence, not a rhythm.
-    static let recurringRounds = 3
-
-    /// What a program does on a timer (re-reading a config file every second) came as one row a round, scattered
-    /// through the list: activities with the same operation and target at even intervals become one, "every 1.0 s".
-    /// Repeats closer than `repeatGap` on one thread are one activity already. `groups` oldest first.
-    static func mergeRecurring(_ groups: [Self]) -> [Self] {
-        var same: [String: [Int]] = [:]
-        for (i, g) in groups.enumerated() where g.calls.last?.state == .done && g.calls[0].start != nil {
-            same[g.operation.rawValue + "\u{0}" + g.target, default: []].append(i)
-        }
-        var out = groups
-        var gone = Set<Int>()
-        for (_, indexes) in same where indexes.count >= recurringRounds {
-            let starts = indexes.map { groups[$0].calls[0].time }
-            let gaps = zip(starts.dropFirst(), starts).map { $0 - $1 }
-            let period = gaps.sorted()[gaps.count / 2]
-            guard period >= burstGap else { continue }
-            // Even: within 15% of the usual gap. A long trace may have a late round in five.
-            let slack = max(period * 15 / 100, 2_000_000)
-            let odd = gaps.filter { $0 > period + slack || $0 + slack < period }.count
-            guard gaps.count < 5 ? odd == 0 : odd * 5 <= gaps.count else { continue }
-            var g = groups[indexes[0]]
-            g.period = period
-            g.rounds = indexes.count
-            g.fd = nil
-            g.paths = indexes.map { groups[$0].paths }.max() ?? 0
-            for m in indexes.dropFirst() { g.absorb(groups[m]); gone.insert(m) }
-            out[indexes[0]] = g
-        }
-        return gone.isEmpty ? out : out.enumerated().filter { !gone.contains($0.offset) }.map(\.element)
-    }
-
     /// Takes another activity's calls and counts.
     private mutating func absorb(_ o: Self) {
         calls += o.calls
@@ -483,6 +441,32 @@ struct SyscallActivity: Identifiable, Sendable {
         threads.formUnion(o.threads)
         kinds.formUnion(o.kinds)
         if let l = o.longest { longest = max(longest ?? 0, l) }
+    }
+
+    /// Fewer rounds than this are a coincidence, not a rhythm; closer than this they are one burst.
+    static let recurringRounds = 3
+    static let shortestPeriod: UInt64 = 50_000_000
+
+    /// Marks what a program does on a timer (re-reading a file every second): activities with the same operation
+    /// and target whose starts are evenly spaced, each within 15% of the usual gap (a long run may have one odd
+    /// gap in five). From the times alone; nothing is merged or moved. `groups` oldest first.
+    static func markRecurring(_ groups: inout [Self]) {
+        var same: [String: [Int]] = [:]
+        for (i, g) in groups.enumerated() where g.calls[0].start != nil {
+            same[g.operation.rawValue + "\u{0}" + g.target, default: []].append(i)
+        }
+        for (_, indexes) in same where indexes.count >= recurringRounds {
+            let starts = indexes.map { groups[$0].calls[0].time }
+            let gaps = zip(starts.dropFirst(), starts).map { $0 - $1 }
+            let period = gaps.sorted()[gaps.count / 2]
+            guard period >= shortestPeriod else { continue }
+            let slack = max(period * 15 / 100, 2_000_000)
+            let odd = gaps.filter { $0 > period + slack || $0 + slack < period }.count
+            guard gaps.count < 5 ? odd == 0 : odd * 5 <= gaps.count else { continue }
+            for (n, i) in indexes.enumerated() {
+                groups[i].recurrence = Recurrence(period: period, round: n + 1, rounds: indexes.count)
+            }
+        }
     }
 
     private static let repeats: Set<Operation> = [.lookup, .xattr, .metadata, .message, .inspect, .signal, .open,

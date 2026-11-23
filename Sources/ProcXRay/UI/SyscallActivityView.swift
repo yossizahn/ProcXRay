@@ -516,12 +516,11 @@ struct ThreadGraph {
         self.init(activities: groups.map { ($0.pinned, $0.calls.map(\.thread)) })
     }
 
-    /// Each activity's calls' threads, top to bottom, and whether it is kept at the end (the waits, what recurs).
+    /// Each activity's calls' threads, top to bottom, and whether it is the waits, kept at the end.
     init(activities: [(waits: Bool, threads: [UInt64])]) {
         for (i, a) in activities.enumerated() {
             var last: [UInt64: Int] = [:]
-            // The waits hold every thread, and what recurs runs through the whole trace: they'd keep every lane
-            // open to the bottom.
+            // The waits hold every thread: they'd keep every lane open to the bottom.
             if !a.waits {
                 for (k, t) in a.threads.enumerated() { last[t] = k }
                 for t in last.keys { span[t] = (span[t]?.top ?? i, i) }

@@ -18,7 +18,7 @@ struct TraceOverview: Sendable, Equatable {
     var cpu: [Double] = []
     /// Calls of each kind (by TraceKind.rawValue) in the scope's threads, errors and stretch, whichever kinds it shows.
     var counts = [Int](repeating: 0, count: TraceKind.allCases.count)
-    /// "5.0 s · 19 threads · on CPU 312.40 ms · 790 lookups (735 under ~/.claude/skills) · …"
+    /// "5.0 s · 19 threads · on CPU 312.40 ms · 790 lookups · …"
     var sentence = ""
 
     var isEmpty: Bool { hi <= lo }
@@ -77,13 +77,10 @@ struct TraceOverview: Sendable, Equatable {
         var lookups = 0, read: UInt64 = 0, written: UInt64 = 0
         var connections = 0, sent: UInt64 = 0, received: UInt64 = 0
         var messages = 0, destinations = Set<String>(), kernelCalls = 0, launches = 0, failures = 0
-        var tree: SyscallActivity?
         for g in groups where g.operation != .waits {
             failures += g.failures
             switch g.operation {
-            case .lookup:
-                lookups += g.calls.count
-                if g.paths > 0, g.calls.count > tree?.calls.count ?? 0 { tree = g }
+            case .lookup: lookups += g.calls.count
             case .read, .write, .readWrite: read += g.bytesIn; written += g.bytesOut
             case .connection, .connect, .accept, .listen, .send, .receive:
                 connections += 1; sent += g.bytesOut; received += g.bytesIn
@@ -94,7 +91,7 @@ struct TraceOverview: Sendable, Equatable {
             }
         }
         if lookups > 0 {
-            parts.append(count(lookups, "lookup", "lookups") + (tree.map { " (\($0.calls.count.formatted()) under \(home($0.target)))" } ?? ""))
+            parts.append(count(lookups, "lookup", "lookups"))
         }
         let io = (read > 0 ? ["read " + size(read)] : []) + (written > 0 ? ["wrote " + size(written)] : [])
         if !io.isEmpty { parts.append("files: " + io.joined(separator: ", ")) }
@@ -109,11 +106,5 @@ struct TraceOverview: Sendable, Equatable {
         if launches > 0 { parts.append(count(launches, "launch", "launches")) }
         if failures > 0 { parts.append(count(failures, "call failed", "calls failed")) }
         return parts.joined(separator: " · ")
-    }
-
-    /// "~/.claude/skills": the sentence has little room.
-    private static func home(_ path: String) -> String {
-        let h = NSHomeDirectory()
-        return path == h ? "~" : path.hasPrefix(h + "/") ? "~" + path.dropFirst(h.count) : path
     }
 }
