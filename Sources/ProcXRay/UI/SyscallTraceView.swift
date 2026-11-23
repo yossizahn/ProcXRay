@@ -284,6 +284,10 @@ struct SyscallTraceView: View {
     @AppStorage("syscallTrace.argNames") private var argNames = true
     @State private var filter = ""
     @State private var errorsOnly = false
+    /// The one thread every view follows, nil for all of them.
+    @State private var thread: UInt64?
+    /// Each thread's calls in the whole trace, by thread id: the Thread menu's choices.
+    @State private var threadCounts: [(tid: UInt64, calls: Int)] = []
     @State private var sort = [KeyPathComparator(\SyscallRecord.time, order: .reverse)]
     @State private var shown: [SyscallRecord] = []
     @State private var activities: [SyscallActivity] = []
@@ -302,7 +306,7 @@ struct SyscallTraceView: View {
     }
 
     private var key: String {
-        "\(tracer.phase)\u{0}\(filter)\u{0}\(errorsOnly)\u{0}\(mode)\u{0}\(sort.first.map { "\($0.keyPath)\($0.order == .forward)" } ?? "")"
+        "\(tracer.phase)\u{0}\(filter)\u{0}\(errorsOnly)\u{0}\(thread.map(String.init) ?? "")\u{0}\(mode)\u{0}\(sort.first.map { "\($0.keyPath)\($0.order == .forward)" } ?? "")"
     }
 
     var body: some View {
@@ -321,7 +325,8 @@ struct SyscallTraceView: View {
                 placeholder
             } else if mode == "Activity" {
                 SyscallActivityView(groups: activities, threadNames: tracer.context.threadNames,
-                                    filtered: !filter.isEmpty || errorsOnly, selection: $activitySelection)
+                                    filtered: !filter.isEmpty || errorsOnly || thread != nil, selection: $activitySelection,
+                                    followed: thread, follow: { thread = $0 })
                 if let r = selectedActivityStackRecord { Divider(); stackPane(r) }
             } else if mode == "Summary" {
                 summaryTable
@@ -386,8 +391,10 @@ struct SyscallTraceView: View {
                 Toggle("Names", isOn: $argNames).toggleStyle(.checkbox).font(.caption).fixedSize()
                 .help("Show argument names (as xnu declares them) with the values")
             }
+            threadMenu
             Toggle("Errors only", isOn: $errorsOnly).toggleStyle(.checkbox).font(.caption).fixedSize()
-            TextField("filter", text: $filter).textFieldStyle(.roundedBorder).frame(width: 160)
+            TextField("filter", text: $filter).textFieldStyle(.roundedBorder).frame(minWidth: 70, maxWidth: 160)
+                .layoutPriority(-2)   // narrows before the status disappears
             Menu {
                 Button("Copy All") { Pasteboard.copy(exportText()) }
                 Button("Save as Text…") { save() }
@@ -397,10 +404,53 @@ struct SyscallTraceView: View {
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .disabled(tracer.phase == .idle)
             .help("Copy or save the \(mode) view as text, everything the filter shows")
-            Button("Clear") { tracer.clear(); selection = []; summarySelection = []; activitySelection = [] }
+            Button("Clear") { tracer.clear(); thread = nil; selection = []; summarySelection = []; activitySelection = [] }
                 .disabled(tracer.isActive || tracer.phase == .idle)
         }
         .padding(6)
+    }
+
+    /// All threads, or one: every view (Activity, Calls, Summary) then shows only that thread's calls, in order.
+    /// The button says only which (names can be long and the header is full); the items name each thread.
+    private var threadMenu: some View {
+        Menu {
+            Picker("", selection: $thread) {
+                Text("All threads").tag(UInt64?.none)
+                Divider()
+                ForEach(threadChoices, id: \.tid) { c in
+                    Text(threadChoiceTitle(c.tid, c.calls)).tag(Optional(c.tid))
+                }
+            }
+            .pickerStyle(.inline).labelsHidden()
+        } label: {
+            Text(threadMenuTitle)
+        }
+        .menuStyle(.borderlessButton).font(.caption).fixedSize()
+        .disabled(tracer.phase == .idle)
+        .help("Follow one thread: Activity, Calls and Summary show only its calls")
+    }
+
+    private func threadChoiceTitle(_ tid: UInt64, _ calls: Int) -> String {
+        let n: String = calls.formatted()
+        return Self.thread(tid, tracer.context.threadNames) + " · " + n + (calls == 1 ? " call" : " calls")
+    }
+
+    private var threadMenuTitle: String {
+        guard let thread else { return "All threads" }
+        let main = tracer.context.threadNames[thread]?.hasPrefix("main thread") ?? false
+        return main ? "Main thread" : "Thread " + String(thread)
+    }
+
+    /// The trace's threads, and the followed one even when this trace has no calls on it (a trace run again).
+    private var threadChoices: [(tid: UInt64, calls: Int)] {
+        guard let thread, !threadCounts.contains(where: { $0.tid == thread }) else { return threadCounts }
+        return (threadCounts + [(thread, 0)]).sorted { $0.tid < $1.tid }
+    }
+
+    nonisolated static func callsByThread(_ records: [SyscallRecord]) -> [(tid: UInt64, calls: Int)] {
+        var n: [UInt64: Int] = [:]
+        for r in records { n[r.thread, default: 0] += 1 }
+        return n.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
 
     private var status: String {
@@ -484,9 +534,16 @@ struct SyscallTraceView: View {
         .font(.system(size: 11, design: .monospaced))
         .contextMenu(forSelectionType: SyscallRecord.ID.self) { ids in
             Button("Copy") { copy(ids) }
-            let pages = Set(shown.filter { ids.contains($0.id) }.compactMap { ManPage.page(for: $0.name) })
+            let rows = shown.filter { ids.contains($0.id) }
+            let pages = Set(rows.compactMap { ManPage.page(for: $0.name) })
             if pages.count == 1, let page = pages.first {
                 Button("\(page.title) Man Page") { ManPage.open(page) }
+            }
+            let tids = Set(rows.map(\.thread))
+            if thread != nil {
+                Button("Show All Threads") { thread = nil }
+            } else if tids.count == 1, let t = tids.first {
+                Button("Follow Thread " + Self.thread(t, tracer.context.threadNames)) { thread = t }
             }
         }
         .onCopyCommand { [ids = selection] in
@@ -530,26 +587,28 @@ struct SyscallTraceView: View {
     private func recompute() async {
         guard !Task.isCancelled else { return }
         let all = tracer.records + tracer.pending
-        let filter = filter, errorsOnly = errorsOnly, context = tracer.context, sort = sort, summaryMode = mode == "Summary", summarySort = summarySort
+        let filter = filter, errorsOnly = errorsOnly, thread = thread, context = tracer.context, sort = sort, summaryMode = mode == "Summary", summarySort = summarySort
         if mode == "Activity" {
-            let groups = await Task.detached(priority: .userInitiated) {
-                SyscallActivity.build(all, filter: filter, errorsOnly: errorsOnly, context: context)
+            let (groups, counts) = await Task.detached(priority: .userInitiated) {
+                (SyscallActivity.build(all, filter: filter, errorsOnly: errorsOnly, thread: thread, context: context), Self.callsByThread(all))
             }.value
-            if !Task.isCancelled { activities = groups }
+            if !Task.isCancelled { activities = groups; threadCounts = counts }
             return
         }
-        let result = await Task.detached(priority: .userInitiated) { () -> ([SyscallRecord], [SyscallSummaryRow]) in
+        let result = await Task.detached(priority: .userInitiated) { () -> ([SyscallRecord], [SyscallSummaryRow], [(tid: UInt64, calls: Int)]) in
+            let counts = Self.callsByThread(all)
             let rows = all.filter { r in
-                (!errorsOnly || r.failed) &&
+                (thread == nil || r.thread == thread) && (!errorsOnly || r.failed) &&
                 (filter.isEmpty || r.name.localizedCaseInsensitiveContains(filter) || r.pathText.localizedCaseInsensitiveContains(filter)
                  || Self.result(r, context).localizedCaseInsensitiveContains(filter) || r.argsText.localizedCaseInsensitiveContains(filter)
                  || r.caller.localizedCaseInsensitiveContains(filter)
                  || (context.threadNames[r.thread]?.localizedCaseInsensitiveContains(filter) ?? false))
             }
-            if summaryMode { return ([], SyscallSummaryRow.build(rows).sorted(using: summarySort)) }
-            return (rows.sorted(using: sort), [])
+            if summaryMode { return ([], SyscallSummaryRow.build(rows).sorted(using: summarySort), counts) }
+            return (rows.sorted(using: sort), [], counts)
         }.value
         guard !Task.isCancelled else { return }
+        threadCounts = result.2
         if summaryMode { summary = result.1 } else { shown = result.0 }
     }
 

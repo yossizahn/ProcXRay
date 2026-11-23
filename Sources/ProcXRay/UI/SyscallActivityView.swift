@@ -14,6 +14,9 @@ struct SyscallActivityView: View {
     var threadNames: [UInt64: String] = [:]
     let filtered: Bool
     @Binding var selection: Set<ActivityRowID>
+    /// The thread the trace view follows (nil: all), and how to follow another or all again (the row menu).
+    var followed: UInt64? = nil
+    var follow: (UInt64?) -> Void = { _ in }
 
     var body: some View {
         if groups.isEmpty {
@@ -23,7 +26,7 @@ struct SyscallActivityView: View {
         } else {
             // An NSOutlineView rather than List(children:): on every selection change SwiftUI's outline re-diffed
             // every row, copying each call out of its activity, which took seconds a click on a long trace.
-            ActivityOutline(groups: groups, threadNames: threadNames, selection: $selection)
+            ActivityOutline(groups: groups, threadNames: threadNames, selection: $selection, followed: followed, follow: follow)
         }
     }
 
@@ -123,6 +126,8 @@ private struct ActivityOutline: NSViewRepresentable {
     let groups: [SyscallActivity]
     let threadNames: [UInt64: String]
     @Binding var selection: Set<ActivityRowID>
+    let followed: UInt64?
+    let follow: (UInt64?) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -302,11 +307,27 @@ private struct ActivityOutline: NSViewRepresentable {
         // MARK: Copy
 
         /// The right-clicked row, or the selection when the click was on a selected row.
-        private func menuIDs(_ o: NSOutlineView) -> Set<ActivityRowID> {
+        private func menuItems(_ o: NSOutlineView) -> [Item] {
             let r = o.clickedRow
             guard r >= 0 else { return [] }
-            if o.selectedRowIndexes.contains(r) { return selectedIDs(o) }
-            return (o.item(atRow: r) as? Item).map { [$0.id] } ?? []
+            let rows = o.selectedRowIndexes.contains(r) ? Array(o.selectedRowIndexes) : [r]
+            return rows.compactMap { o.item(atRow: $0) as? Item }
+        }
+
+        private func menuIDs(_ o: NSOutlineView) -> Set<ActivityRowID> { Set(menuItems(o).map(\.id)) }
+
+        /// The threads of the calls in the menu's rows.
+        private func menuThreads(_ o: NSOutlineView) -> Set<UInt64> {
+            var out = Set<UInt64>()
+            for it in menuItems(o) {
+                switch it.kind {
+                case .group(let g): out.formUnion(g.calls.lazy.map(\.thread))
+                case .thread(_, let tid, _): out.insert(tid)
+                case .call(let r): out.insert(r.thread)
+                }
+                if out.count > 1 { break }
+            }
+            return out
         }
 
         func copy(clicked: Bool) {
@@ -318,6 +339,8 @@ private struct ActivityOutline: NSViewRepresentable {
 
         @objc private func copyClicked() { copy(clicked: true) }
 
+        @objc private func followClicked(_ item: NSMenuItem) { parent?.follow(item.representedObject as? UInt64) }
+
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
             guard let o = outline else { return }
@@ -325,6 +348,18 @@ private struct ActivityOutline: NSViewRepresentable {
             item.target = self
             item.isEnabled = !menuIDs(o).isEmpty
             menu.addItem(item)
+            let follow: NSMenuItem
+            if parent?.followed != nil {
+                follow = NSMenuItem(title: "Show All Threads", action: #selector(followClicked), keyEquivalent: "")
+            } else {
+                let tids = menuThreads(o)
+                guard tids.count == 1, let t = tids.first else { return }
+                follow = NSMenuItem(title: "Follow Thread " + SyscallTraceView.thread(t, names), action: #selector(followClicked), keyEquivalent: "")
+                follow.representedObject = t
+            }
+            follow.target = self
+            menu.addItem(.separator())
+            menu.addItem(follow)
         }
     }
 }
