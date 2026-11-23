@@ -42,9 +42,10 @@ final class SyscallActivityTests: XCTestCase {
         let b = record(2, "read", 10, thread: 8)
         let close = record(3, "close", 20, thread: 8)
         let c = record(4, "read", 30, thread: 7)
-        let groups = SyscallActivity.build([a, b, close, c], filter: "", errorsOnly: false, thread: 7)
+        let groups = SyscallActivity.build([a, b, close, c], filter: "", errorsOnly: false, threads: [7])
         XCTAssertEqual(groups.map { $0.calls.map(\.id) }, [[4], [1]])
-        XCTAssertEqual(SyscallActivity.build([a, b, close, c], filter: "", errorsOnly: false, thread: 9).count, 0)
+        XCTAssertEqual(SyscallActivity.build([a, b, close, c], filter: "", errorsOnly: false, threads: [9]).count, 0)
+        XCTAssertEqual(SyscallActivity.build([a, b, close, c], filter: "", errorsOnly: false, threads: [7, 8]).map { $0.calls.map(\.id) }, [[4], [1, 2, 3]])
     }
 
     func testSocketLife() {

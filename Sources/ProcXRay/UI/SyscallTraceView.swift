@@ -284,8 +284,8 @@ struct SyscallTraceView: View {
     @AppStorage("syscallTrace.argNames") private var argNames = true
     @State private var filter = ""
     @State private var errorsOnly = false
-    /// The one thread every view follows, nil for all of them.
-    @State private var thread: UInt64?
+    /// The threads every view follows; none: all of them.
+    @State private var threads: Set<UInt64> = []
     /// Each thread's calls in the whole trace, by thread id: the Thread menu's choices.
     @State private var threadCounts: [(tid: UInt64, calls: Int)] = []
     /// The Calls table's order; the rows are sorted by it off the main thread (recompute).
@@ -308,7 +308,7 @@ struct SyscallTraceView: View {
     }
 
     private var key: String {
-        "\(tracer.phase)\u{0}\(filter)\u{0}\(errorsOnly)\u{0}\(thread.map(String.init) ?? "")\u{0}\(mode)\u{0}\(sort.column)\(sort.ascending)"
+        "\(tracer.phase)\u{0}\(filter)\u{0}\(errorsOnly)\u{0}\(threads.sorted().map(String.init).joined(separator: ","))\u{0}\(mode)\u{0}\(sort.column)\(sort.ascending)"
     }
 
     var body: some View {
@@ -327,13 +327,13 @@ struct SyscallTraceView: View {
                 placeholder
             } else if mode == "Activity" {
                 SyscallActivityView(groups: activities, threadNames: tracer.context.threadNames,
-                                    filtered: !filter.isEmpty || errorsOnly || thread != nil, selection: $activitySelection,
-                                    followed: thread, follow: { thread = $0 })
+                                    filtered: !filter.isEmpty || errorsOnly || !threads.isEmpty, selection: $activitySelection,
+                                    followed: threads, follow: { threads = $0 }, threadColors: threadColors)
                 if let r = selectedActivityStackRecord { Divider(); stackPane(r) }
             } else if mode == "Summary" {
                 summaryTable
             } else if mode == "Lanes" {
-                SyscallLanesPane(lanes: lanes, context: tracer.context, followed: thread, follow: { thread = $0 },
+                SyscallLanesPane(lanes: lanes, context: tracer.context, threadColors: threadColors, followed: threads, follow: { threads = $0 },
                                  selected: $laneSelected)
                 if let r = laneSelected, !r.stack.isEmpty { Divider(); stackPane(r) }
             } else {
@@ -418,7 +418,7 @@ struct SyscallTraceView: View {
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .disabled(tracer.phase == .idle)
             .help("Copy or save the \(mode) view as text, everything the filter shows")
-            Button { tracer.clear(); thread = nil; laneSelected = nil; selection = []; summarySelection = []; activitySelection = [] } label: {
+            Button { tracer.clear(); threads = []; laneSelected = nil; selection = []; summarySelection = []; activitySelection = [] } label: {
                 Image(systemName: "trash")
             }
             .accessibilityLabel("Clear")
@@ -428,24 +428,13 @@ struct SyscallTraceView: View {
         .padding(6)
     }
 
-    /// All threads, or one: every view (Activity, Calls, Summary) then shows only that thread's calls, in order.
-    /// The button says only which (names can be long and the header is full); the items name each thread.
+    /// All threads, or the ones ticked: every view (Activity, Calls, Lanes, Summary) then shows only their calls.
+    /// The button says only which (names can be long and the header is full); the menu's rows name each thread.
     private var threadMenu: some View {
-        Menu {
-            Picker("", selection: $thread) {
-                Text("All threads").tag(UInt64?.none)
-                Divider()
-                ForEach(threadChoices, id: \.tid) { c in
-                    Text(threadChoiceTitle(c.tid, c.calls)).tag(Optional(c.tid))
-                }
-            }
-            .pickerStyle(.inline).labelsHidden()
-        } label: {
-            Text(threadMenuTitle)
-        }
-        .menuStyle(.borderlessButton).font(.caption).fixedSize()
-        .disabled(tracer.phase == .idle)
-        .help("Follow one thread: every view shows only its calls")
+        ThreadMenuButton(title: ThreadFollow.title(threads, names: tracer.context.threadNames),
+                         choices: threadChoices.map { ($0.tid, threadChoiceTitle($0.tid, $0.calls)) },
+                         shown: threads, enabled: tracer.phase != .idle, change: { threads = $0 })
+            .fixedSize()
     }
 
     private func threadChoiceTitle(_ tid: UInt64, _ calls: Int) -> String {
@@ -453,17 +442,15 @@ struct SyscallTraceView: View {
         return Self.thread(tid, tracer.context.threadNames) + " · " + n + (calls == 1 ? " call" : " calls")
     }
 
-    private var threadMenuTitle: String {
-        guard let thread else { return "All threads" }
-        let main = tracer.context.threadNames[thread]?.hasPrefix("main thread") ?? false
-        return main ? "Main thread" : "Thread " + String(thread)
+    /// The trace's threads, and the followed ones even when this trace has no calls on them (a trace run again).
+    private var threadChoices: [(tid: UInt64, calls: Int)] {
+        let missing = threads.subtracting(threadCounts.map(\.tid))
+        guard !missing.isEmpty else { return threadCounts }
+        return (threadCounts + missing.map { ($0, 0) }).sorted { $0.tid < $1.tid }
     }
 
-    /// The trace's threads, and the followed one even when this trace has no calls on it (a trace run again).
-    private var threadChoices: [(tid: UInt64, calls: Int)] {
-        guard let thread, !threadCounts.contains(where: { $0.tid == thread }) else { return threadCounts }
-        return (threadCounts + [(thread, 0)]).sorted { $0.tid < $1.tid }
-    }
+    /// Every thread of the trace, filtered out or not, so a thread keeps its colour whatever the filter shows.
+    private var threadColors: [UInt64: NSColor] { ThreadColors.map(threadCounts.map(\.tid)) }
 
     nonisolated static func callsByThread(_ records: [SyscallRecord]) -> [(tid: UInt64, calls: Int)] {
         var n: [UInt64: Int] = [:]
@@ -529,11 +516,9 @@ struct SyscallTraceView: View {
                              if rows.count == 1, let path = rows[0].paths.lazy.compactMap(Reveal.path(in:)).first {
                                  items.append(DataMenuItem(title: "Reveal in Finder") { Reveal.reveal([path]) })
                              }
-                             let tids = Set(rows.map(\.thread))
-                             if thread != nil {
-                                 items.append(DataMenuItem(title: "Show All Threads") { thread = nil })
-                             } else if tids.count == 1, let t = tids.first {
-                                 items.append(DataMenuItem(title: "Follow Thread " + Self.thread(t, context.threadNames)) { thread = t })
+                             for (title, next) in ThreadFollow.items(rows: Set(rows.map(\.thread)), shown: threads,
+                                                                     names: context.threadNames) {
+                                 items.append(DataMenuItem(title: title) { threads = next })
                              }
                              return items
                          },
@@ -599,11 +584,11 @@ struct SyscallTraceView: View {
     private func recompute() async {
         guard !Task.isCancelled else { return }
         let all = tracer.records + tracer.pending
-        let filter = filter, errorsOnly = errorsOnly, thread = thread, context = tracer.context, sort = sort, summaryMode = mode == "Summary", argNames = argNames
+        let filter = filter, errorsOnly = errorsOnly, threads = threads, context = tracer.context, sort = sort, summaryMode = mode == "Summary", argNames = argNames
         let lanesMode = mode == "Lanes"
         if mode == "Activity" {
             let (groups, counts) = await Task.detached(priority: .userInitiated) {
-                (SyscallActivity.build(all, filter: filter, errorsOnly: errorsOnly, thread: thread, context: context), Self.callsByThread(all))
+                (SyscallActivity.build(all, filter: filter, errorsOnly: errorsOnly, threads: threads, context: context), Self.callsByThread(all))
             }.value
             if !Task.isCancelled { activities = groups; threadCounts = counts }
             return
@@ -612,7 +597,7 @@ struct SyscallTraceView: View {
             var out = Recomputed()
             out.counts = Self.callsByThread(all)
             let rows = all.filter { r in
-                (thread == nil || r.thread == thread) && (!errorsOnly || r.failed) &&
+                (threads.isEmpty || threads.contains(r.thread)) && (!errorsOnly || r.failed) &&
                 (filter.isEmpty || r.name.localizedCaseInsensitiveContains(filter) || r.pathText.localizedCaseInsensitiveContains(filter)
                  || Self.result(r, context).localizedCaseInsensitiveContains(filter) || r.argsText.localizedCaseInsensitiveContains(filter)
                  || r.caller.localizedCaseInsensitiveContains(filter)

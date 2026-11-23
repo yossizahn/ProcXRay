@@ -90,8 +90,9 @@ struct SyscallLanes: Sendable {
 struct SyscallLanesPane: View {
     let lanes: SyscallLanes
     let context: SyscallActivity.Context
-    let followed: UInt64?
-    let follow: (UInt64?) -> Void
+    var threadColors: [UInt64: NSColor] = [:]
+    let followed: Set<UInt64>
+    let follow: (Set<UInt64>) -> Void
     @Binding var selected: SyscallRecord?
     @State private var commands = LaneCommands()
 
@@ -124,7 +125,7 @@ struct SyscallLanesPane: View {
             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             .padding(.horizontal, 8).padding(.vertical, 3)
             Divider()
-            LanesRepresentable(lanes: lanes, context: context, followed: followed, follow: follow, commands: commands,
+            LanesRepresentable(lanes: lanes, context: context, threadColors: threadColors, followed: followed, follow: follow, commands: commands,
                                selected: $selected)
         }
     }
@@ -140,8 +141,9 @@ struct SyscallLanesPane: View {
 private struct LanesRepresentable: NSViewRepresentable {
     let lanes: SyscallLanes
     let context: SyscallActivity.Context
-    let followed: UInt64?
-    let follow: (UInt64?) -> Void
+    let threadColors: [UInt64: NSColor]
+    let followed: Set<UInt64>
+    let follow: (Set<UInt64>) -> Void
     let commands: LaneCommands
     @Binding var selected: SyscallRecord?
 
@@ -157,6 +159,7 @@ private struct LanesRepresentable: NSViewRepresentable {
         let c = v.canvas
         commands.canvas = c
         c.followed = followed
+        if c.threadColors != threadColors { c.threadColors = threadColors }
         c.onFollow = follow
         c.onSelect = { r in if r?.id != selected?.id { selected = r } }
         if c.context.threadNames != context.threadNames || c.lanes.id != lanes.id { c.context = context }
@@ -216,8 +219,10 @@ final class LanesContainer: NSView {
 final class LanesCanvas: NSView, NSUserInterfaceValidations {
     private(set) var lanes = SyscallLanes()
     var context = SyscallActivity.Context() { didSet { needsDisplay = true } }
-    var followed: UInt64?
-    var onFollow: ((UInt64?) -> Void)?
+    /// Each thread's colour (ThreadColors), as Activity's graph shows it: a mark before the thread's name.
+    var threadColors: [UInt64: NSColor] = [:] { didSet { needsDisplay = true } }
+    var followed: Set<UInt64> = []
+    var onFollow: ((Set<UInt64>) -> Void)?
     var onSelect: ((SyscallRecord?) -> Void)?
     /// The call to name under the lanes: the one under the pointer, else the selected one.
     var onInfo: ((SyscallRecord?) -> Void)?
@@ -486,7 +491,11 @@ final class LanesCanvas: NSView, NSUserInterfaceValidations {
             text.append(NSAttributedString(string: " " + name, attributes: [
                 .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor, .paragraphStyle: para]))
         }
-        text.draw(with: CGRect(x: 8, y: y + 3, width: Self.gutter - 24 - nw, height: Self.laneH - 4),
+        if let color = threadColors[lane.tid] {
+            color.setFill()
+            NSBezierPath(roundedRect: CGRect(x: 4, y: y + 4, width: 4, height: Self.laneH - 8), xRadius: 2, yRadius: 2).fill()
+        }
+        text.draw(with: CGRect(x: 12, y: y + 3, width: Self.gutter - 28 - nw, height: Self.laneH - 4),
                   options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
 
@@ -616,11 +625,9 @@ final class LanesCanvas: NSView, NSUserInterfaceValidations {
             menu.addItem(item("Zoom to Call") { [weak self] in self?.zoom(to: h) })
             menu.addItem(.separator())
         }
-        if followed != nil {
-            menu.addItem(item("Show All Threads") { [weak self] in self?.onFollow?(nil) })
-        } else if let li = lane(at: p) {
-            let tid = lanes.lanes[li].tid
-            menu.addItem(item("Follow Thread " + SyscallTraceView.thread(tid, context.threadNames)) { [weak self] in self?.onFollow?(tid) })
+        let tids: Set<UInt64> = lane(at: p).map { [lanes.lanes[$0].tid] } ?? []
+        for (title, next) in ThreadFollow.items(rows: tids, shown: followed, names: context.threadNames) {
+            menu.addItem(item(title) { [weak self] in self?.onFollow?(next) })
         }
         menu.addItem(item("Zoom to Fit") { [weak self] in self?.fit() })
         return menu
