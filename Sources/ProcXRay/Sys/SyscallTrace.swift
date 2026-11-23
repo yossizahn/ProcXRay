@@ -876,6 +876,9 @@ enum SyscallFormat {
         case chflags, prioWhich, rusageWho, rlimit, waitOptions, snapshotOp, purgable, personaOp, iopolCmd
         case workloopCmd, coalitionOp, coalitionInfo, memorystatusCmd
         case machOptions
+        case necpAction, channelSyncMode, channelSyncFlags
+        /// mac_syscall's policy: a pointer to the policy's name ("Sandbox", "Quarantine"), read from the shared cache.
+        case macPolicy
     }
 
     /// Arity and argument kinds (kdebug logs the first four arguments). Others show all four raw words.
@@ -1020,7 +1023,9 @@ enum SyscallFormat {
         set(["iokit_user_client"], [.hex, .int, .hex, .hex])                                           // connection, trap index, p1, p2
         set(["work_interval_ctl"], [.int, .hex, .ptr, .size])                                          // operation, id, arg, len
         set(["pthread_fchdir"], [.fd])
-        set(["mac_syscall"], [.ptr, .int, .ptr])                                                       // policy name, call, arg
+        set(["mac_syscall"], [.macPolicy, .int, .ptr])                                                 // policy name, call, arg
+        set(["necp_client_action"], [.fd, .necpAction, .ptr, .size])                                   // fd, action, client id, id length
+        set(["channel_sync"], [.fd, .channelSyncMode, .channelSyncFlags])
         set(["disable_threadsignal"], [.int])
         set(["kern_mach_vm_purgable_control_trap", "mach_vm_purgable_control_trap"], [.hex, .ptr, .purgable, .ptr])
         set(["mach_port_guard_trap"], [.hex, .hex, .hex, .int])
@@ -1091,6 +1096,13 @@ enum SyscallFormat {
             } else if r.error == 0 {
                 r.failed = false
                 r.resultText = result(r)
+            } else if r.name == "psynch_cvwait", r.error > 0 {
+                // The errno is the low byte; ECVCLEARED / ECVPREPOST ride above it (seen: 316 = ETIMEDOUT|ECVCLEARED
+                // on CVDisplayLink's every frame). libpthread turns ETIMEDOUT into pthread_cond_timedwait's timeout
+                // and EINTR into a spurious wakeup: neither is a failure the caller sees.
+                let e = r.error & 0xff, extra = UInt64(r.error) & ~0xff
+                r.failed = e != Int64(ETIMEDOUT) && e != Int64(EINTR)
+                r.resultText = errnoText(e) + (extra == 0 ? "" : " | " + SyscallFlags.bits(extra, SyscallFlags.psynchErrorBits))
             } else {
                 // EJUSTRETURN and ERESTART are the kernel's own bookkeeping, not failures the process sees.
                 r.failed = r.error > 0
@@ -1296,6 +1308,10 @@ enum SyscallFormat {
         case .coalitionInfo: return F.one(v, F.coalitionInfos)
         case .memorystatusCmd: return F.one(v, F.memorystatusCmds)
         case .machOptions: return F.bits(v, F.machOptions)
+        case .necpAction: return F.one(v, F.necpClientActions)
+        case .channelSyncMode: return F.one(v, F.channelSyncModes)
+        case .channelSyncFlags: return F.bits(v, F.channelSyncFlags)
+        case .macPolicy: return SharedCacheString.read(v).map(quote) ?? arg(v, .ptr)
         case nil: return value(v)
         }
     }

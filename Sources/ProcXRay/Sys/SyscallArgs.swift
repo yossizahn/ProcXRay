@@ -255,6 +255,25 @@ enum SyscallFlags {
                                   (0x030, "WQOPS_QUEUE_REQTHREADS2"),
                                   (0x040, "WQOPS_THREAD_KEVENT_RETURN"), (0x080, "WQOPS_SET_EVENT_MANAGER_PRIORITY"),
                                   (0x100, "WQOPS_THREAD_WORKLOOP_RETURN"), (0x200, "WQOPS_SHOULD_NARROW"), (0x400, "WQOPS_SETUP_DISPATCH")]
+    /// bsd/net/necp.h (NECP_CLIENT_ACTION_*), without the prefix: what Network.framework asks of the kernel's
+    /// registry of network clients and their flows.
+    static let necpClientActions: Table = [
+        (1, "ADD"), (2, "REMOVE"), (3, "COPY_PARAMETERS"), (4, "COPY_RESULT"), (5, "COPY_LIST"), (6, "REQUEST_NEXUS_INSTANCE"),
+        (7, "AGENT"), (8, "COPY_AGENT"), (9, "COPY_INTERFACE"), (10, "SET_STATISTICS"), (11, "COPY_ROUTE_STATISTICS"),
+        (12, "AGENT_USE"), (13, "MAP_SYSCTLS"), (14, "UPDATE_CACHE"), (15, "COPY_CLIENT_UPDATE"), (16, "COPY_UPDATED_RESULT"),
+        (17, "ADD_FLOW"), (18, "REMOVE_FLOW"), (19, "CLAIM"), (20, "SIGN"), (21, "GET_INTERFACE_ADDRESS"),
+        (22, "ACQUIRE_AGENT_TOKEN"), (23, "VALIDATE"), (24, "GET_SIGNED_CLIENT_ID"), (25, "SET_SIGNED_CLIENT_ID"),
+        (26, "COPY_UPDATED_RESULT_FINAL"), (27, "GET_FLOW_STATISTICS"),
+    ]
+    /// bsd/skywalk/channel/os_channel.h: __channel_sync's sync_mode_t and sync_flags_t (Skywalk, the user-space
+    /// packet channels Network.framework sends and receives through).
+    static let channelSyncModes: Table = [(0, "CHANNEL_SYNC_TX"), (1, "CHANNEL_SYNC_RX"), (2, "CHANNEL_SYNC_UPP")]
+    static let channelSyncFlags: Table = [(0x1, "CHANNEL_SYNCF_ALLOC"), (0x2, "CHANNEL_SYNCF_FREE"), (0x4, "CHANNEL_SYNCF_PURGE"),
+                                          (0x8, "CHANNEL_SYNCF_ALLOC_BUF"), (0x10, "CHANNEL_SYNCF_LARGE_ALLOC")]
+    /// libpthread's kern/kern_internal.h: psynch_cvwait fails with these bits over the errno in the low byte
+    /// (pthread_cond.c reads `err & 0xff`, then hands the bits back to the condition variable's sequence words).
+    static let psynchErrorBits: Table = [(0x100, "ECVCLEARED"), (0x200, "ECVPREPOST")]
+
     /// thread_qos_t (osfmk/mach/thread_policy_private.h), without the THREAD_QOS_ prefix.
     static let threadQoS: [UInt32: String] = [0: "UNSPECIFIED", 1: "MAINTENANCE", 2: "BACKGROUND", 3: "UTILITY",
                                               4: "DEFAULT", 5: "USER_INITIATED", 6: "USER_INTERACTIVE"]

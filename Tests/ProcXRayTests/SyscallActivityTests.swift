@@ -270,6 +270,35 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertNil(SeenSocket(key: "5", label: "x"))
     }
 
+    /// Network.framework's NECP and Skywalk calls and mac_syscall's policy are named; psynch_cvwait's errno has
+    /// libpthread's bits over it, and a timed wait running out is not a failure.
+    func testNamesNetworkCallsPolicyAndCondvarTimeouts() {
+        func call(_ name: String, _ args: [UInt64], error: Int64 = 0) -> SyscallRecord {
+            var r = SyscallRecord(id: 1, start: 0, end: 5, thread: 7, mach: false, number: 0, name: name, args: args, ret: 0)
+            r.error = error
+            SyscallFormat.fill(&r)
+            return r
+        }
+        XCTAssertEqual(call("necp_client_action", [6, 18, 0x74c62f12e0, 16]).argValues, ["6", "REMOVE_FLOW", "0x74c62f12e0", "16"])
+        XCTAssertEqual(call("channel_sync", [9, 2, 5, 0x16d46a760]).argValues, ["9", "CHANNEL_SYNC_UPP", "CHANNEL_SYNCF_ALLOC|CHANNEL_SYNCF_PURGE"])
+        XCTAssertEqual(call("channel_sync", [9, 0, 3, 0]).argValues[1], "CHANNEL_SYNC_TX")
+
+        // strerror's text for a known errno is a constant in libsystem_c, so in the shared cache.
+        let inCache = UInt64(UInt(bitPattern: strerror(EPERM)))
+        XCTAssertEqual(call("mac_syscall", [inCache, 180, 0x16d353958]).argValues, ["\"Operation not permitted\"", "180", "0x16d353958"])
+        let heap = strdup("Quarantine")!
+        defer { free(heap) }
+        XCTAssertEqual(call("mac_syscall", [UInt64(UInt(bitPattern: heap)), 180, 0]).argValues.first, "0x" + String(UInt(bitPattern: heap), radix: 16))
+
+        let timedOut = call("psynch_cvwait", [0x74c5c52478, 0, 0, 0], error: 316)
+        XCTAssertFalse(timedOut.failed)
+        XCTAssertEqual(timedOut.resultText, "-1 ETIMEDOUT (Operation timed out) | ECVCLEARED")
+        XCTAssertFalse(call("psynch_cvwait", [0, 0, 0, 0], error: Int64(EINTR)).failed)
+        let bad = call("psynch_cvwait", [0, 0, 0, 0], error: Int64(EINVAL) | 0x200)
+        XCTAssertTrue(bad.failed)
+        XCTAssertEqual(bad.resultText, "-1 EINVAL (Invalid argument) | ECVPREPOST")
+    }
+
     func testScopeNarrowsByKindAndStretch() {
         let context = SyscallActivity.Context()
         let lookup = stat(1, "/a", 100)
