@@ -186,7 +186,7 @@ struct SyscallActivity: Identifiable, Sendable {
         var waits: Self?
         /// Descriptor → its activity, until its close.
         var sessions: [Int32: Int] = [:]
-        /// Operation, target and error of a one-off call → its activity, for repeats.
+        /// Thread, operation, target and error of a one-off call → its activity, for repeats.
         var recent: [String: Int] = [:]
         // Start order also puts calls still pending at trace stop in their proper position.
         for r in records.sorted(by: { ($0.time, $0.id) < ($1.time, $1.id) }) {
@@ -247,8 +247,9 @@ struct SyscallActivity: Identifiable, Sendable {
 
             let target = target(op, name, r, context)
             var g = Self(operation: op, target: target, calls: [])
-            // One-off calls repeated on the same target, with the same result, join one activity.
-            let key = op.rawValue + "\u{0}" + target + "\u{0}" + String(r.error)
+            // One-off calls a thread repeats on the same target, with the same result, join one activity. Another
+            // thread's are its own: two threads asking the same service are separate work that shares a destination.
+            let key = String(r.thread) + "\u{0}" + op.rawValue + "\u{0}" + target + "\u{0}" + String(r.error)
             if repeats.contains(op), let i = recent[key], let last = groups[i].calls.last,
                last.state == .done, r.state == .done, r.time - last.time <= repeatGap {
                 groups[i].append(r, kind: op)

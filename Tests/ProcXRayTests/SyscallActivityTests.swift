@@ -84,6 +84,13 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertEqual(groups[3].calls.map(\.id), [1, 2])
         XCTAssertEqual(groups[3].bytesOut, 104)
         XCTAssertEqual(groups[3].replyTime, 1_000)
+
+        // The same lookup on another thread, between the two: its own activity, and the first thread's repeat
+        // still joins its first.
+        let other = SyscallRecord(id: 7, start: 350_000, end: 350_005, thread: 8, mach: false, number: 0, name: "stat64",
+                                  args: [0], error: Int64(ENOENT), paths: ["/missing"], failed: true)
+        let split = SyscallActivity.build([stat1, other, stat2], filter: "", errorsOnly: false, context: context)
+        XCTAssertEqual(split.map { $0.calls.map(\.id) }, [[7], [4, 5]])
     }
 
     func testWaitsAndConnection() {
