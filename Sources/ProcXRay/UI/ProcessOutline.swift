@@ -992,7 +992,7 @@ struct ProcessOutline: NSViewRepresentable {
 
     // MARK: Cells
 
-    final class Cell: NSTableCellView {
+    final class Cell: NSTableCellView, NSViewToolTipOwner {
         private let label = NSTextField(labelWithString: "")
         private let icon = NSImageView()
         private static let mono = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
@@ -1106,18 +1106,25 @@ struct ProcessOutline: NSViewRepresentable {
                 }
             }
             label.frame = NSRect(x: x, y: (h - lh) / 2, width: width, height: lh)
-            updateTip()
+            if tipRect != label.bounds {
+                tipRect = label.bounds
+                label.removeAllToolTips()
+                label.addToolTip(tipRect, owner: self, userData: nil)
+            }
         }
 
         private var naturalWidth: CGFloat {
             label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: .greatestFiniteMagnitude, height: label.frame.height)).width ?? 0
         }
 
-        /// The full text as the label's tooltip, only while the label is too narrow to show all of it.
-        private func updateTip() {
-            let whole = naturalWidth <= label.frame.width + 0.5
-            let tip = whole ? nil : label.stringValue
-            if label.toolTip != tip { label.toolTip = tip }
+        /// The label's tooltip, worked out when the pointer asks for it: why a value couldn't be read, else the full
+        /// text while the label is too narrow to show all of it. It was set on every change of the text, which
+        /// meant measuring the text of every changed cell on every refresh: as much work as drawing it.
+        private var tipRect = NSRect.null
+        private var unreadTip: String?
+        func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+            if let unreadTip { return unreadTip }
+            return naturalWidth <= label.frame.width + 0.5 ? "" : label.stringValue
         }
 
         /// Width this cell needs to show its content untruncated.
@@ -1154,7 +1161,7 @@ struct ProcessOutline: NSViewRepresentable {
         }
 
         // Assign only on change, so unchanged cells cause no redraw at all.
-        private func set(_ v: String) { styled = nil; if label.stringValue != v { label.stringValue = v; updateTip() } }
+        private func set(_ v: String) { styled = nil; if label.stringValue != v { label.stringValue = v } }
         private func set(_ v: NSAttributedString) {
             guard styled != v else { return }
             styled = v
@@ -1175,7 +1182,7 @@ struct ProcessOutline: NSViewRepresentable {
         private func showStyled() {
             guard let v = styled else { return }
             let shown = backgroundStyle == .emphasized ? Self.onSelection(v) : v
-            if label.attributedStringValue != shown { label.attributedStringValue = shown; updateTip() }
+            if label.attributedStringValue != shown { label.attributedStringValue = shown }
         }
         /// Every run in the selected-text color; badges keep a faint white plate instead of their tint.
         private static func onSelection(_ v: NSAttributedString) -> NSAttributedString {
@@ -1193,12 +1200,27 @@ struct ProcessOutline: NSViewRepresentable {
             if icon.contentTintColor != tint { icon.contentTintColor = tint }
         }
 
+        /// What the row's registrations were last worked out from: they are a handful of strings per row, and
+        /// building them again on every refresh to find them unchanged was wasted work.
+        private struct RegistrationKey: Equatable {
+            var process: String, lsType: String?, lsName: String?, lsTags: [String], label: String?, domain: String?, host: String?
+            var records: Int
+        }
+        private var registrationKey: RegistrationKey?
+
         func show(_ n: ProcNode, column c: Column, store: Store) {
+            unreadTip = nil
             switch c.id {
             case "name":
                 showName(n, procs: store.procs)
                 let p = n.proc ?? (n.kind == .unit ? n.rootPid.flatMap { store.procs[$0] } : nil)
-                set(registrations: p.map { Registrations.of($0, btm: store.btmItems) } ?? [])
+                let key = p.map { RegistrationKey(process: $0.codeKey, lsType: $0.lsType, lsName: $0.lsAppName, lsTags: $0.lsTags,
+                                                  label: $0.launchdLabel, domain: $0.launchdDomain, host: $0.domainOwnerName,
+                                                  records: store.btmItems.count) }
+                if key != registrationKey || key == nil {
+                    registrationKey = key
+                    set(registrations: p.map { Registrations.of($0, btm: store.btmItems) } ?? [])
+                }
             case "context":
                 set(Self.context(n))
                 set(color: .secondaryLabelColor)
@@ -1209,7 +1231,7 @@ struct ProcessOutline: NSViewRepresentable {
                 set(color: Self.color(v.tint))
                 // "?": say why it couldn't be read.
                 let tip = v == .unknown ? "Couldn't be read" + (c.needs.map { ": needs the \($0)" } ?? "") : nil
-                if label.toolTip != tip { label.toolTip = tip }
+                unreadTip = tip
             }
         }
 
