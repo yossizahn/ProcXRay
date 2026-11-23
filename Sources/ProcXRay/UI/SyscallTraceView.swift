@@ -291,6 +291,8 @@ struct SyscallTraceView: View {
     @State private var sort = [KeyPathComparator(\SyscallRecord.time, order: .reverse)]
     @State private var shown: [SyscallRecord] = []
     @State private var activities: [SyscallActivity] = []
+    @State private var lanes = SyscallLanes()
+    @State private var laneSelected: SyscallRecord?
     @State private var summary: [SyscallSummaryRow] = []
     @State private var summarySort = [KeyPathComparator(\SyscallSummaryRow.totalNanos, order: .reverse)]
     @State private var selection: Set<SyscallRecord.ID> = []
@@ -330,6 +332,10 @@ struct SyscallTraceView: View {
                 if let r = selectedActivityStackRecord { Divider(); stackPane(r) }
             } else if mode == "Summary" {
                 summaryTable
+            } else if mode == "Lanes" {
+                SyscallLanesPane(lanes: lanes, context: tracer.context, followed: thread, follow: { thread = $0 },
+                                 selected: $laneSelected)
+                if let r = laneSelected, !r.stack.isEmpty { Divider(); stackPane(r) }
             } else {
                 callsTable
                 if let r = selectedStackRecord { Divider(); stackPane(r) }
@@ -384,16 +390,17 @@ struct SyscallTraceView: View {
             Picker("", selection: $mode) {
                 Text("Activity").tag("Activity")
                 Text("Calls").tag("Calls")
+                Text("Lanes").tag("Lanes").help("Each thread's calls side by side on one time line")
                 Text("Summary").tag("Summary")
             }
-            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .pickerStyle(.segmented).labelsHidden().controlSize(.small).fixedSize()
             if mode == "Calls" {
                 Toggle("Names", isOn: $argNames).toggleStyle(.checkbox).font(.caption).fixedSize()
                 .help("Show argument names (as xnu declares them) with the values")
             }
             threadMenu
             Toggle("Errors only", isOn: $errorsOnly).toggleStyle(.checkbox).font(.caption).fixedSize()
-            TextField("filter", text: $filter).textFieldStyle(.roundedBorder).frame(minWidth: 70, maxWidth: 160)
+            TextField("filter", text: $filter).textFieldStyle(.roundedBorder).frame(minWidth: 60, maxWidth: 160)
                 .layoutPriority(-2)   // narrows before the status disappears
             Menu {
                 Button("Copy All") { Pasteboard.copy(exportText()) }
@@ -404,8 +411,12 @@ struct SyscallTraceView: View {
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .disabled(tracer.phase == .idle)
             .help("Copy or save the \(mode) view as text, everything the filter shows")
-            Button("Clear") { tracer.clear(); thread = nil; selection = []; summarySelection = []; activitySelection = [] }
-                .disabled(tracer.isActive || tracer.phase == .idle)
+            Button { tracer.clear(); thread = nil; laneSelected = nil; selection = []; summarySelection = []; activitySelection = [] } label: {
+                Image(systemName: "trash")
+            }
+            .accessibilityLabel("Clear")
+            .help("Clear the trace")
+            .disabled(tracer.isActive || tracer.phase == .idle)
         }
         .padding(6)
     }
@@ -427,7 +438,7 @@ struct SyscallTraceView: View {
         }
         .menuStyle(.borderlessButton).font(.caption).fixedSize()
         .disabled(tracer.phase == .idle)
-        .help("Follow one thread: Activity, Calls and Summary show only its calls")
+        .help("Follow one thread: every view shows only its calls")
     }
 
     private func threadChoiceTitle(_ tid: UInt64, _ calls: Int) -> String {
@@ -457,7 +468,7 @@ struct SyscallTraceView: View {
         let n = tracer.records.count + tracer.pending.count
         let calls = "\(n.formatted()) call\(n == 1 ? "" : "s")"
         let dropped = tracer.dropped > 0 ? " · oldest \(tracer.dropped.formatted()) let go" : ""
-        let showing = shown.count != tracer.records.count + tracer.pending.count && mode == "Calls" ? " · \(shown.count.formatted()) shown" : ""
+        let showing = shown.count != tracer.records.count + tracer.pending.count && (mode == "Calls" || mode == "Lanes") ? " · \(shown.count.formatted()) shown" : ""
         switch tracer.phase {
         case .idle: return "kdebug \(SyscallTraceConfig.filter) for pid \(target.pid)"
         case .starting: return "Starting the trace…"
@@ -470,7 +481,7 @@ struct SyscallTraceView: View {
     private var placeholder: some View {
         VStack(spacing: 8) {
             Image(systemName: "waveform.path.ecg").font(.largeTitle).foregroundStyle(.tertiary)
-            Text(mode == "Activity" ? "Follow what the process does with files, connections and Mach messages, and where it waits. Expand an activity to inspect its syscalls." : "Every syscall and Mach trap this process makes, with arguments, results, errors, durations and file paths.")
+            Text(placeholderText)
                 .multilineTextAlignment(.center)
             Text(disabledReason ?? "Uses the kernel's kdebug trace (as Instruments' System Call Trace does). One trace at a time per machine: it can't run while Instruments or fs_usage is recording.")
                 .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -481,6 +492,14 @@ struct SyscallTraceView: View {
             .padding(.top, 6)
         }
         .padding(30).frame(maxWidth: 520).frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var placeholderText: String {
+        switch mode {
+        case "Activity": "Follow what the process does with files, connections and Mach messages, and where it waits. Expand an activity to inspect its syscalls."
+        case "Lanes": "Each thread's calls side by side on one time line: when each thread works, when it waits, and what it calls."
+        default: "Every syscall and Mach trap this process makes, with arguments, results, errors, durations and file paths."
+        }
     }
 
     private var callsTable: some View {
@@ -588,6 +607,7 @@ struct SyscallTraceView: View {
         guard !Task.isCancelled else { return }
         let all = tracer.records + tracer.pending
         let filter = filter, errorsOnly = errorsOnly, thread = thread, context = tracer.context, sort = sort, summaryMode = mode == "Summary", summarySort = summarySort
+        let lanesMode = mode == "Lanes"
         if mode == "Activity" {
             let (groups, counts) = await Task.detached(priority: .userInitiated) {
                 (SyscallActivity.build(all, filter: filter, errorsOnly: errorsOnly, thread: thread, context: context), Self.callsByThread(all))
@@ -595,8 +615,9 @@ struct SyscallTraceView: View {
             if !Task.isCancelled { activities = groups; threadCounts = counts }
             return
         }
-        let result = await Task.detached(priority: .userInitiated) { () -> ([SyscallRecord], [SyscallSummaryRow], [(tid: UInt64, calls: Int)]) in
-            let counts = Self.callsByThread(all)
+        let result = await Task.detached(priority: .userInitiated) { () -> Recomputed in
+            var out = Recomputed()
+            out.counts = Self.callsByThread(all)
             let rows = all.filter { r in
                 (thread == nil || r.thread == thread) && (!errorsOnly || r.failed) &&
                 (filter.isEmpty || r.name.localizedCaseInsensitiveContains(filter) || r.pathText.localizedCaseInsensitiveContains(filter)
@@ -604,12 +625,27 @@ struct SyscallTraceView: View {
                  || r.caller.localizedCaseInsensitiveContains(filter)
                  || (context.threadNames[r.thread]?.localizedCaseInsensitiveContains(filter) ?? false))
             }
-            if summaryMode { return ([], SyscallSummaryRow.build(rows).sorted(using: summarySort), counts) }
-            return (rows.sorted(using: sort), [], counts)
+            if summaryMode {
+                out.summary = SyscallSummaryRow.build(rows).sorted(using: summarySort)
+            } else if lanesMode {
+                out.lanes = SyscallLanes.build(rows, threadNames: context.threadNames)
+                out.shown = rows
+            } else {
+                out.shown = rows.sorted(using: sort)
+            }
+            return out
         }.value
         guard !Task.isCancelled else { return }
-        threadCounts = result.2
-        if summaryMode { summary = result.1 } else { shown = result.0 }
+        threadCounts = result.counts
+        if summaryMode { summary = result.summary } else { shown = result.shown }
+        if let l = result.lanes { lanes = l }
+    }
+
+    private struct Recomputed: Sendable {
+        var shown: [SyscallRecord] = []
+        var summary: [SyscallSummaryRow] = []
+        var counts: [(tid: UInt64, calls: Int)] = []
+        var lanes: SyscallLanes?
     }
 
     /// The one selected call, when it has a stack.
@@ -695,6 +731,7 @@ struct SyscallTraceView: View {
         switch mode {
         case "Activity": SyscallActivityView.text(activities, names: tracer.context.threadNames)
         case "Summary": summaryText(nil)
+        case "Lanes": lanes.text(context: tracer.context)
         default: text(for: nil)
         }
     }
