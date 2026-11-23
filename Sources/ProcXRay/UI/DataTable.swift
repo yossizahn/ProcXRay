@@ -25,6 +25,8 @@ struct DataColumn<Row> {
     var minWidth: CGFloat = 40
     var numeric = false
     var mono = false
+    /// Cut text that doesn't fit at its end, not in its middle: for prose (a log message), whose start says most.
+    var truncatesTail = false
     var help: String? = nil
     /// Starts hidden; the header's menu shows it.
     var hidden = false
@@ -32,6 +34,8 @@ struct DataColumn<Row> {
     var color: ((Row) -> NSColor?)? = nil
     /// A small filled circle before the text, in this color: a state at a glance (enabled, running).
     var dot: ((Row) -> NSColor?)? = nil
+    /// An SF Symbol before the text, in this color: what kind of thing the row is.
+    var symbol: ((Row) -> (name: String, color: NSColor)?)? = nil
     /// A small bar before the text: the value as a share (0…1) of the largest, for comparing rows at a glance.
     var bar: ((Row) -> (fraction: Double, color: NSColor)?)? = nil
     var tooltip: ((Row) -> String?)? = nil
@@ -62,6 +66,12 @@ struct DataColumn<Row> {
 }
 
 /// A context-menu entry for the selected rows.
+/// The column a table is sorted by, for a table whose owner sorts its rows (DataTable.sort).
+struct DataSort: Equatable, Sendable {
+    var column: String
+    var ascending: Bool
+}
+
 struct DataMenuItem {
     var title: String
     var enabled = true
@@ -79,6 +89,16 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
     /// The rows' values change while their ids stay (threads, counters): every update re-sorts and redraws the
     /// visible cells. Off, an update with the same row ids is taken as no change at all.
     var live = false
+    /// For a table too big to sort on the main thread at every update (a syscall trace's calls): `rows` come
+    /// already in this order, and a click on a header only sets it, for the owner to sort by.
+    var sort: Binding<DataSort>? = nil
+    /// Columns that don't apply right now: hidden, and left out of the header's menu, until they do.
+    var hiddenColumns: Set<String> = []
+    /// What Cmd-C and Copy Row put on the pasteboard, when it isn't the cells tab-separated (a trace's calls copy
+    /// as strace-style lines with their stacks).
+    var copyText: (([Row]) -> String)? = nil
+    /// Keeps the last row in view as rows arrive (a log being followed).
+    var followsEnd = false
     /// The selected rows' ids, for a view that shows something about the selection.
     var selection: Binding<Set<Row.ID>>? = nil
     var allowsMultipleSelection = true
@@ -127,7 +147,8 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
             col.sortDescriptorPrototype = NSSortDescriptor(key: c.id, ascending: !c.numeric)
             table.addTableColumn(col)
         }
-        table.sortDescriptors = [NSSortDescriptor(key: initialSort.0, ascending: initialSort.ascending)]
+        let first = sort?.wrappedValue ?? DataSort(column: initialSort.0, ascending: initialSort.ascending)
+        table.sortDescriptors = [NSSortDescriptor(key: first.column, ascending: first.ascending)]
         if let autosave {
             // After the columns exist: setting the name restores their saved widths, order and visibility.
             table.autosaveName = "DataTable." + autosave
@@ -180,13 +201,14 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
         /// Sorts the parent's rows by the table's sort descriptor and shows them, keeping the selection.
         func apply(force: Bool = false) {
             guard let table else { return }
+            syncHidden(table)
             let ids = parent.rows.map(\.id)
             let same = ids == appliedIDs && table.sortDescriptors == appliedSort
             if !force, same, !parent.live { syncSelectionFromBinding(); return }
             appliedIDs = ids
             appliedSort = table.sortDescriptors
             var rows = parent.rows
-            if let d = table.sortDescriptors.first, let key = d.key, let c = column(key) {
+            if parent.sort == nil, let d = table.sortDescriptors.first, let key = d.key, let c = column(key) {
                 // Stable: equal keys keep the incoming order.
                 rows = rows.enumerated().sorted { a, b in
                     if c.less(a.element, b.element) { return d.ascending }
@@ -203,9 +225,29 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
             }
             let selected = parent.selection?.wrappedValue
                 ?? Set(table.selectedRowIndexes.compactMap { $0 < shown.count ? shown[$0].id : nil })
+            let grew = rows.count > shown.count
             shown = rows
             table.reloadData()
             select(selected, in: table)
+            if parent.followsEnd, grew, !rows.isEmpty {
+                // After this update is laid out: the first rows arrive before the table is in its scroll view.
+                let last = rows.count - 1
+                DispatchQueue.main.async { [weak table] in
+                    MainActor.assumeIsolated { if let table, last < table.numberOfRows { table.scrollRowToVisible(last) } }
+                }
+            }
+        }
+
+        /// Columns the owner says don't apply are hidden; one it hid comes back when it applies again.
+        private var forcedHidden: Set<String> = []
+        private func syncHidden(_ table: NSTableView) {
+            guard parent.hiddenColumns != forcedHidden else { return }
+            for tc in table.tableColumns {
+                let id = tc.identifier.rawValue
+                if parent.hiddenColumns.contains(id) { tc.isHidden = true }
+                else if forcedHidden.contains(id) { tc.isHidden = false }
+            }
+            forcedHidden = parent.hiddenColumns
         }
 
         private func select(_ ids: Set<Row.ID>, in table: NSTableView) {
@@ -238,6 +280,7 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
         private func fill(_ cell: DataCellView, _ c: DataColumn<Row>, _ r: Row) {
             let field = cell.label
             if let bar = c.bar { cell.setBar(bar(r)) }
+            if let symbol = c.symbol { cell.setSymbol(symbol(r)) }
             let text = c.text(r)
             let color = c.color?(r) ?? .labelColor
             if let dot = c.dot { cell.setDot(dot(r)) }
@@ -249,7 +292,15 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
 
         func numberOfRows(in tableView: NSTableView) -> Int { shown.count }
 
-        func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) { apply(force: true) }
+        func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+            // The owner sorts: tell it, and its next rows arrive in the new order.
+            if let b = parent.sort, let d = tableView.sortDescriptors.first, let key = d.key {
+                let s = DataSort(column: key, ascending: d.ascending)
+                if b.wrappedValue != s { b.wrappedValue = s }
+                return
+            }
+            apply(force: true)
+        }
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard let tableColumn, row < shown.count, let c = column(tableColumn.identifier.rawValue) else { return nil }
@@ -258,9 +309,9 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
             if let reused = tableView.makeView(withIdentifier: id, owner: nil) as? DataCellView {
                 cell = reused
             } else {
-                cell = DataCellView(hasBar: c.bar != nil, hasDot: c.dot != nil)
+                cell = DataCellView(hasBar: c.bar != nil, hasDot: c.dot != nil, hasSymbol: c.symbol != nil)
                 cell.identifier = id
-                cell.label.lineBreakMode = c.numeric ? .byTruncatingHead : .byTruncatingMiddle
+                cell.label.lineBreakMode = c.numeric ? .byTruncatingHead : c.truncatesTail ? .byTruncatingTail : .byTruncatingMiddle
                 cell.label.alignment = c.numeric ? .right : .left
                 cell.label.font = c.mono ? .monospacedSystemFont(ofSize: 11, weight: .regular)
                     : .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
@@ -343,7 +394,13 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
         func copyRows(header: Bool) {
             let rows = selectedRows
             guard !rows.isEmpty else { return }
-            put(text(rows, header: header, separator: "\t"))
+            put(rowsText(rows, header: header))
+        }
+
+        /// The owner's own format when it has one and no header line is asked for, else the cells tab-separated.
+        private func rowsText(_ rows: [Row], header: Bool) -> String {
+            if !header, let custom = parent.copyText { return custom(rows) }
+            return text(rows, header: header, separator: "\t")
         }
 
         private func export(_ rows: [Row]) {
@@ -402,7 +459,7 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
                 let n = rows.count
                 add(n == 1 ? "Copy Row" : "Copy \(n) Rows") { [weak self] in
                     guard let self else { return }
-                    self.put(self.text(rows, header: false, separator: "\t"))
+                    self.put(self.rowsText(rows, header: false))
                 }
                 let ci = table.clickedColumn
                 if n == 1, ci >= 0, ci < table.tableColumns.count, let c = column(table.tableColumns[ci].identifier.rawValue) {
@@ -422,7 +479,7 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
 
         /// The header's menu: every column, checked while shown.
         private func headerMenu(_ menu: NSMenu, _ table: NSTableView) {
-            for tc in table.tableColumns {
+            for tc in table.tableColumns where !parent.hiddenColumns.contains(tc.identifier.rawValue) {
                 guard let c = column(tc.identifier.rawValue) else { continue }
                 let mi = NSMenuItem(title: c.title.isEmpty ? c.id : c.title, action: #selector(toggleColumn(_:)), keyEquivalent: "")
                 mi.target = self
@@ -493,14 +550,23 @@ final class DataCellView: NSTableCellView {
     private let fill: CALayer?
     private let dot: CALayer?
     private var dotColor: NSColor?
+    private let symbolView: NSImageView?
+    private var symbolKey: String?
+    private static let symbolConfig = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+    nonisolated(unsafe) private static var symbols: [String: NSImage] = [:]
     private var fraction = -1.0
     static let barWidth: CGFloat = 46, barHeight: CGFloat = 5, dotSize: CGFloat = 7
 
-    init(hasBar: Bool, hasDot: Bool = false) {
+    init(hasBar: Bool, hasDot: Bool = false, hasSymbol: Bool = false) {
         track = hasBar ? CALayer() : nil
         fill = hasBar ? CALayer() : nil
         dot = hasDot ? CALayer() : nil
+        symbolView = hasSymbol ? NSImageView() : nil
         super.init(frame: .zero)
+        if let symbolView {
+            symbolView.imageScaling = .scaleProportionallyDown
+            addSubview(symbolView)
+        }
         if let dot {
             wantsLayer = true
             dot.cornerRadius = Self.dotSize / 2
@@ -521,6 +587,21 @@ final class DataCellView: NSTableCellView {
         textField = label
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// nil: no symbol on this row (the text keeps its place).
+    func setSymbol(_ v: (name: String, color: NSColor)?) {
+        guard let symbolView else { return }
+        if symbolKey != v?.name {
+            symbolKey = v?.name
+            symbolView.image = v.flatMap { s in
+                if let hit = Self.symbols[s.name] { return hit }
+                let img = NSImage(systemSymbolName: s.name, accessibilityDescription: nil)?.withSymbolConfiguration(Self.symbolConfig)
+                Self.symbols[s.name] = img
+                return img
+            }
+        }
+        if symbolView.contentTintColor != v?.color { symbolView.contentTintColor = v?.color }
+    }
 
     /// nil: no dot on this row (the text keeps its place).
     func setDot(_ color: NSColor?) {
@@ -555,6 +636,10 @@ final class DataCellView: NSTableCellView {
         if let dot {
             dot.frame = CGRect(x: 1, y: (bounds.height - Self.dotSize) / 2, width: Self.dotSize, height: Self.dotSize)
             x = Self.dotSize + 6
+        }
+        if let symbolView {
+            symbolView.frame = NSRect(x: 0, y: (bounds.height - 14) / 2, width: 16, height: 14)
+            x = 20
         }
         let h = label.intrinsicContentSize.height
         label.frame = NSRect(x: x, y: (bounds.height - h) / 2, width: max(0, bounds.width - x), height: h)
