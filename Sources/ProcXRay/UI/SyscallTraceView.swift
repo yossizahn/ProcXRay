@@ -284,11 +284,11 @@ struct SyscallTraceView: View {
     @AppStorage("syscallTrace.argNames") private var argNames = true
     @State private var filter = ""
     @State private var errorsOnly = false
-    @State private var sort = [KeyPathComparator(\SyscallRecord.time, order: .reverse)]
+    /// The Calls table's order; the rows are sorted by it off the main thread (recompute).
+    @State private var sort = DataSort(column: "time", ascending: false)
     @State private var shown: [SyscallRecord] = []
     @State private var activities: [SyscallActivity] = []
     @State private var summary: [SyscallSummaryRow] = []
-    @State private var summarySort = [KeyPathComparator(\SyscallSummaryRow.totalNanos, order: .reverse)]
     @State private var selection: Set<SyscallRecord.ID> = []
     @State private var summarySelection: Set<SyscallSummaryRow.ID> = []
     @State private var activitySelection: Set<ActivityRowID> = []
@@ -302,7 +302,7 @@ struct SyscallTraceView: View {
     }
 
     private var key: String {
-        "\(tracer.phase)\u{0}\(filter)\u{0}\(errorsOnly)\u{0}\(mode)\u{0}\(sort.first.map { "\($0.keyPath)\($0.order == .forward)" } ?? "")"
+        "\(tracer.phase)\u{0}\(filter)\u{0}\(errorsOnly)\u{0}\(mode)\u{0}\(sort.column)\(sort.ascending)"
     }
 
     var body: some View {
@@ -418,104 +418,91 @@ struct SyscallTraceView: View {
         .padding(30).frame(maxWidth: 520).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// The man page's entry and Reveal in Finder, which were buttons in the cells, are in the row's menu.
     private var callsTable: some View {
-        Table(shown, selection: $selection, sortOrder: $sort) {
-            TableColumn("Time", value: \.time) { r in
-                Text(r.start.map(Self.seconds) ?? "before").monospacedDigit()
-            }
-            .width(min: 70, ideal: 84, max: 110)
-            TableColumn("Thread", value: \.thread) { r in
-                let t = Self.thread(r.thread, tracer.context.threadNames)
-                Text(t).monospacedDigit().foregroundStyle(.secondary).truncationHelp(t)
-            }
-                .width(min: 50, ideal: 110, max: 260)
-            TableColumn("Syscall", value: \.name) { r in
-                HStack(spacing: 4) {
-                    // Purple: Mach traps; teal: dyld's library calls, from its trace events rather than the kernel.
-                    Text(r.name).foregroundStyle(r.mach ? Color.purple : r.isLibraryCall ? Color.teal : Color.primary)
-                        .truncationHelp(r.isLibraryCall ? r.name + " (a dyld call, from dyld's trace events)" : r.name)
-                    Spacer(minLength: 0)
-                    ManPageButton(name: r.name)
-                }
-            }
-            .width(min: 90, ideal: 150)
-            TableColumn("Arguments") { r in
-                let t = argNames ? r.namedArgsText : r.argsText
-                Text(t).foregroundStyle(.secondary).truncationHelp(t)
-            }
-                .width(min: 100, ideal: 240)
-            TableColumn("Result") { r in
-                let t = Self.result(r, tracer.context)
-                Text(t)
-                    .foregroundStyle(r.failed ? Color.red : (r.state == .inProgress ? Color.orange : Color.primary))
-                    .truncationHelp(t)
-            }
-            .width(min: 60, ideal: 200)
-            TableColumn("Duration", value: \.durationKey) { r in
-                Text(r.duration.map(Self.duration) ?? "—").monospacedDigit()
-            }
-            .width(min: 60, ideal: 76, max: 110)
-            TableColumn("Caller") { r in Text(r.caller).foregroundStyle(.secondary).truncationHelp(r.caller) }
-                .width(min: showCaller ? 80 : 0, ideal: showCaller ? 220 : 0, max: showCaller ? .infinity : 0)
-            TableColumn("Path") { r in
-                HStack(spacing: 4) {
-                    Text(r.pathText).truncationHelp(r.pathText)
-                    // The first existing one: a rename's source is usually gone, its destination isn't.
-                    if let path = r.paths.lazy.compactMap(Reveal.path(in:)).first { Spacer(minLength: 0); RevealButton(path: path) }
-                }
-            }
-                .width(min: 80, ideal: 260)
+        let context = tracer.context, argNames = argNames, symbols = tracer.symbols
+        return DataTable(rows: shown, columns: Self.callsColumns(context: context, argNames: argNames), initialSort: ("time", false),
+                         autosave: "syscallCalls", live: true, sort: $sort, hiddenColumns: showCaller ? [] : ["caller"],
+                         copyText: { rows in
+                             rows.map { r in Self.line(r, argNames: argNames, context: context) + symbols.frames(r.stack).map { "\n    " + $0.text }.joined() }
+                                 .joined(separator: "\n")
+                         },
+                         selection: $selection,
+                         menu: { rows in
+                             var items: [DataMenuItem] = []
+                             let pages = Set(rows.compactMap { ManPage.page(for: $0.name) })
+                             if pages.count == 1, let page = pages.first {
+                                 items.append(DataMenuItem(title: "\(page.title) Man Page") { ManPage.open(page) })
+                             }
+                             // The first existing one: a rename's source is usually gone, its destination isn't.
+                             if rows.count == 1, let path = rows[0].paths.lazy.compactMap(Reveal.path(in:)).first {
+                                 items.append(DataMenuItem(title: "Reveal in Finder") { Reveal.reveal([path]) })
+                             }
+                             return items
+                         },
+                         exportName: "\(target.name) syscalls")
+    }
+
+    /// The Calls table's columns; `less` is also what recompute sorts by, off the main thread.
+    nonisolated static func callsColumns(context: SyscallActivity.Context, argNames: Bool) -> [DataColumn<SyscallRecord>] {
+        let names = context.threadNames
+        func col(_ id: String, _ title: String, _ width: CGFloat, color: ((SyscallRecord) -> NSColor?)? = nil,
+                 tooltip: ((SyscallRecord) -> String?)? = nil, _ text: @escaping (SyscallRecord) -> String) -> DataColumn<SyscallRecord> {
+            DataColumn(id: id, title: title, width: width, mono: true, text: text, color: color, tooltip: tooltip,
+                       less: { text($0).localizedStandardCompare(text($1)) == .orderedAscending })
         }
-        .font(.system(size: 11, design: .monospaced))
-        .contextMenu(forSelectionType: SyscallRecord.ID.self) { ids in
-            Button("Copy") { copy(ids) }
-            let pages = Set(shown.filter { ids.contains($0.id) }.compactMap { ManPage.page(for: $0.name) })
-            if pages.count == 1, let page = pages.first {
-                Button("\(page.title) Man Page") { ManPage.open(page) }
-            }
-        }
-        .onCopyCommand { [ids = selection] in
-            [NSItemProvider(object: text(for: ids) as NSString)]
-        }
+        let secondary: (SyscallRecord) -> NSColor? = { _ in .secondaryLabelColor }
+        var time = col("time", "Time", 84) { $0.start.map(Self.seconds) ?? "before" }
+        time.less = { $0.time < $1.time }
+        var thread = col("thread", "Thread", 110, color: secondary) { Self.thread($0.thread, names) }
+        thread.less = { $0.thread < $1.thread }
+        var duration = col("duration", "Duration", 76) { $0.duration.map(Self.duration) ?? "—" }
+        duration.less = { $0.durationKey < $1.durationKey }
+        return [
+            time,
+            thread,
+            // Purple: Mach traps; teal: dyld's library calls, from its trace events rather than the kernel.
+            col("name", "Syscall", 150, color: { $0.mach ? .systemPurple : $0.isLibraryCall ? .systemTeal : nil },
+                tooltip: { $0.isLibraryCall ? $0.name + " (a dyld call, from dyld's trace events)" : nil }) { $0.name },
+            col("args", "Arguments", 240, color: secondary) { argNames ? $0.namedArgsText : $0.argsText },
+            col("result", "Result", 200, color: { $0.failed ? .systemRed : $0.state == .inProgress ? .systemOrange : nil }) { Self.result($0, context) },
+            duration,
+            col("caller", "Caller", 220, color: secondary) { $0.caller },
+            col("path", "Path", 260) { $0.pathText },
+        ]
+    }
+
+    /// `rows` in the order the Calls table asked for; equal rows keep their order (the trace's).
+    nonisolated static func ordered(_ rows: [SyscallRecord], by sort: DataSort, context: SyscallActivity.Context, argNames: Bool) -> [SyscallRecord] {
+        guard let c = callsColumns(context: context, argNames: argNames).first(where: { $0.id == sort.column }) else { return rows }
+        return rows.enumerated().sorted { a, b in
+            if c.less(a.element, b.element) { return sort.ascending }
+            if c.less(b.element, a.element) { return !sort.ascending }
+            return a.offset < b.offset
+        }.map(\.element)
     }
 
     private var summaryTable: some View {
-        Table(summary, selection: $summarySelection, sortOrder: $summarySort) {
-            TableColumn("Syscall", value: \.name) { s in
-                HStack(spacing: 4) {
-                    Text(s.name).truncationHelp(s.name)
-                    Spacer(minLength: 0)
-                    ManPageButton(name: s.name)
-                }
-            }
-            .width(min: 120, ideal: 200)
-            TableColumn("Calls", value: \.calls) { s in Text(s.calls.formatted()).monospacedDigit() }.width(min: 50, ideal: 70)
-            TableColumn("Errors", value: \.errors) { s in
-                Text(s.errors == 0 ? "" : s.errors.formatted()).monospacedDigit().foregroundStyle(.red)
-            }
-            .width(min: 50, ideal: 60)
-            TableColumn("Total time", value: \.totalNanos) { s in Text(Self.duration(s.totalNanos)).monospacedDigit() }.width(min: 70, ideal: 90)
-            TableColumn("Average", value: \.avgNanos) { s in Text(Self.duration(s.avgNanos)).monospacedDigit() }.width(min: 70, ideal: 90)
-            TableColumn("Longest", value: \.maxNanos) { s in Text(Self.duration(s.maxNanos)).monospacedDigit() }.width(min: 70, ideal: 90)
-        }
-        .font(.system(size: 11, design: .monospaced))
-        .contextMenu(forSelectionType: SyscallSummaryRow.ID.self) { ids in
-            Button("Copy") { Pasteboard.copy(summaryText(ids)) }
-            if ids.count == 1, let name = ids.first, let page = ManPage.page(for: name) {
-                Button("\(page.title) Man Page") { ManPage.open(page) }
-            }
-        }
-        .onCopyCommand { [ids = summarySelection] in
-            [NSItemProvider(object: summaryText(ids) as NSString)]
-        }
-        .onChange(of: summarySort) { summary.sort(using: summarySort) }
+        DataTable(rows: summary, columns: [
+            .text("name", "Syscall", width: 200, mono: true) { $0.name },
+            .number("calls", "Calls", width: 70, value: { $0.calls }, format: { $0.formatted() }),
+            .number("errors", "Errors", width: 60, color: { _ in .systemRed }, value: { $0.errors == 0 ? nil : $0.errors }, format: { $0.formatted() }),
+            .number("total", "Total time", width: 90, value: { $0.totalNanos }, format: Self.duration),
+            .number("average", "Average", width: 90, value: { $0.avgNanos }, format: Self.duration),
+            .number("longest", "Longest", width: 90, value: { $0.maxNanos }, format: Self.duration),
+        ], initialSort: ("total", false), autosave: "syscallSummary", live: true, selection: $summarySelection,
+                  menu: { rows in
+                      guard rows.count == 1, let page = ManPage.page(for: rows[0].name) else { return [] }
+                      return [DataMenuItem(title: "\(page.title) Man Page") { ManPage.open(page) }]
+                  },
+                  exportName: "\(target.name) syscall summary")
     }
 
     /// Filter and sort off the main thread; while tracing, at most ~3 times a second.
     private func recompute() async {
         guard !Task.isCancelled else { return }
         let all = tracer.records + tracer.pending
-        let filter = filter, errorsOnly = errorsOnly, context = tracer.context, sort = sort, summaryMode = mode == "Summary", summarySort = summarySort
+        let filter = filter, errorsOnly = errorsOnly, context = tracer.context, sort = sort, summaryMode = mode == "Summary", argNames = argNames
         if mode == "Activity" {
             let groups = await Task.detached(priority: .userInitiated) {
                 SyscallActivity.build(all, filter: filter, errorsOnly: errorsOnly, context: context)
@@ -531,8 +518,9 @@ struct SyscallTraceView: View {
                  || r.caller.localizedCaseInsensitiveContains(filter)
                  || (context.threadNames[r.thread]?.localizedCaseInsensitiveContains(filter) ?? false))
             }
-            if summaryMode { return ([], SyscallSummaryRow.build(rows).sorted(using: summarySort)) }
-            return (rows.sorted(using: sort), [])
+            // The summary's table sorts itself (it is short); this order is the export's.
+            if summaryMode { return ([], SyscallSummaryRow.build(rows).sorted { $0.totalNanos > $1.totalNanos }) }
+            return (Self.ordered(rows, by: sort, context: context, argNames: argNames), [])
         }.value
         guard !Task.isCancelled else { return }
         if summaryMode { summary = result.1 } else { shown = result.0 }
@@ -577,8 +565,6 @@ struct SyscallTraceView: View {
         .font(.system(size: 11, design: .monospaced))
         .frame(height: min(CGFloat(frames.count) * 16 + 14, 200))
     }
-
-    private func copy(_ ids: Set<SyscallRecord.ID>) { Pasteboard.copy(text(for: ids)) }
 
     private func text(for ids: Set<SyscallRecord.ID>?) -> String {
         shown.filter { ids?.contains($0.id) ?? true }.map { r in

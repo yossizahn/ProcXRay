@@ -78,17 +78,3 @@ enum ManPage {
         wait4 write writev
         """.split(whereSeparator: \.isWhitespace).map(String.init))
 }
-
-/// A small book button that opens a syscall's man page; nothing when it has none.
-struct ManPageButton: View {
-    let name: String
-    var body: some View {
-        if let page = ManPage.page(for: name) {
-            Button { ManPage.open(page) } label: { Image(systemName: "book") }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-                .help(ManPage.help(page))
-                .accessibilityLabel(ManPage.help(page))
-        }
-    }
-}
