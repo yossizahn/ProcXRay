@@ -40,6 +40,7 @@ The app is held to budgets for what it costs to run, measured on the running bun
 - `PROCXRAY_PERF=<file>` in the app's environment appends each refresh stage's CPU time to the file every 30 s (`PerfStages`): which stage is over, and whether it ran on the main thread.
 - `ProcXRay --helper-call metrics` (signed bundle, helper running) compares what a timer refresh asks the helper for with the full reading, and gives the helper's CPU per call for each.
 - `PROCXRAY_SETTINGS=<tab>` (`general`, `performance`, `helper`, `menuBar`, `alerts`) opens Settings on that tab at launch, for a screenshot without a click.
+- In the VM nothing can click or take a screenshot. `PROCXRAY_INSPECT=<pid or name>` opens an inspector at launch (on the tab in the `inspectorTab` default), `PROCXRAY_AUTORUN=1` starts the Syscalls trace or the Logs query as its tab appears, and `PROCXRAY_WINDOW_PNG=<file>` writes a picture of the newest window there after `PROCXRAY_WINDOW_PNG_AFTER` seconds (default 15; needs the Screen Recording row described below). `open --env NAME=VALUE … '/Applications/Proc X-Ray Dev.app'` passes them.
 
 Rules the measurements led to:
 
@@ -58,7 +59,7 @@ Rules the measurements led to:
 
 ## Shared UI components
 
-- Rows of data go in `DataTable` (AppKit, `UI/DataTable.swift`): selection, keyboard navigation, type-to-jump, sort, column show/hide, ⌘C, copy cell / rows / with headers and CSV/TSV export come with it. Row actions go in its context menu and on double-click (`onOpen`), not in buttons inside cells. Still on SwiftUI `Table`: the syscall trace's two tables, open files and the log list, whose cells hold controls.
+- Rows of data go in `DataTable` (AppKit, `UI/DataTable.swift`): selection, keyboard navigation, type-to-jump, sort, column show/hide, ⌘C, copy cell / rows / with headers and CSV/TSV export come with it. Row actions go in its context menu and on double-click (`onOpen`), not in buttons inside cells. A cell is text, with an optional state dot, SF Symbol or bar before it. A table too big to sort on the main thread hands sorting to its owner (`sort:`), a column that doesn't apply right now is listed in `hiddenColumns`, `copyText` replaces the tab-separated copy, and `followsEnd` keeps the newest row in view. No SwiftUI `Table` is left in the app.
 - Small graphs of recent readings are `SeriesGraphView` (`MiniGraph`, `MirrorGraph` wrap it). Only the menu bar label, which is rendered to an image, draws its own.
 - Histories are `SeriesRing`s (`History`, `ProcHistory`).
 - A setting's explanation is a `Hint`.

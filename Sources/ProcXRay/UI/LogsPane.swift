@@ -356,6 +356,8 @@ struct LogsPane: View {
                 EmptyRunButton(title: "Run", help: "The last 10 minutes of this process's events, and others' that mention its pid") {
                     session.runSnapshot(pid: proc.pid)
                 }
+                // PROCXRAY_AUTORUN: run as the tab appears (see SyscallTraceView).
+                .task { if ProcessInfo.processInfo.environment["PROCXRAY_AUTORUN"] != nil, !session.started { session.runSnapshot(pid: proc.pid) } }
                 EmptyRunButton(title: "Live", systemImage: "dot.radiowaves.left.and.right",
                                disabledReason: exited ? InspectorView.exitedNote : nil,
                                help: "This process's events from the last 10 minutes, then new ones as it logs them (log stream)") {

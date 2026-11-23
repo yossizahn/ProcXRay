@@ -6,6 +6,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppActivation.install()
         AmbientMonitor.shared.update()
         if !AmbientPrefs.launchesHidden { NSApp.activate(ignoringOtherApps: true) }
+        // PROCXRAY_WINDOW_PNG=<file>: some seconds after launch (PROCXRAY_WINDOW_PNG_AFTER, default 15), write a
+        // picture of the newest window there. With PROCXRAY_INSPECT and PROCXRAY_AUTORUN it shows an inspector tab
+        // at work in the VM, where nothing can click or take a screenshot (AGENTS.md). Needs Screen Recording.
+        if let png = ProcessInfo.processInfo.environment["PROCXRAY_WINDOW_PNG"] {
+            let after = ProcessInfo.processInfo.environment["PROCXRAY_WINDOW_PNG_AFTER"].flatMap { Double($0) } ?? 15
+            DispatchQueue.main.asyncAfter(deadline: .now() + after) {
+                MainActor.assumeIsolated {
+                    let windows = NSApp.windows.filter { $0.styleMask.contains(.titled) && $0.isVisible }
+                    guard let w = windows.max(by: { $0.windowNumber < $1.windowNumber }) else {
+                        try? "no window".write(toFile: png + ".error", atomically: true, encoding: .utf8)
+                        return
+                    }
+                    let id = CGWindowID(w.windowNumber)
+                    Task {
+                        do {
+                            let img = try await WindowActions.screenshot(window: id)
+                            try WindowActions.png(img)?.write(to: URL(fileURLWithPath: png))
+                        } catch {
+                            try? "\(error)".write(toFile: png + ".error", atomically: true, encoding: .utf8)
+                        }
+                    }
+                }
+            }
+        }
         // PROCXRAY_EXPLORE=<pid>: open the AppleScript object explorer for that app at launch, for testing it
         // in the VM, where nothing can click (AGENTS.md).
         if let v = ProcessInfo.processInfo.environment["PROCXRAY_EXPLORE"], let pid = pid_t(v),

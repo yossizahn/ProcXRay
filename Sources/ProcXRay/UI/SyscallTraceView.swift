@@ -342,6 +342,13 @@ struct SyscallTraceView: View {
             } while !Task.isCancelled
         }
         .onDisappear { tracer.stop() }
+        // PROCXRAY_AUTORUN: start tracing as the tab appears, for looking at it where nothing can click (AGENTS.md).
+        .task {
+            guard ProcessInfo.processInfo.environment["PROCXRAY_AUTORUN"] != nil, tracer.phase == .idle else { return }
+            // The helper's state is probed as the app starts.
+            for _ in 0..<20 where disabledReason != nil { try? await Task.sleep(for: .milliseconds(250)) }
+            if disabledReason == nil, tracer.phase == .idle { tracer.start(pid: target.pid, start: target.start, stacks: stacks) }
+        }
     }
 
     private var header: some View {
