@@ -19,6 +19,9 @@ final class StackSymbols: @unchecked Sendable {
         let symbol: String?
         let offset: UInt64
         let address: UInt64
+        /// The OS's code (the shared cache, /System, /usr/lib) rather than the process's own, or what it ships
+        /// (its executable, its bundle's frameworks); nil when the frame's image isn't known.
+        var system: Bool? = nil
 
         /// "stat + 8 (libsystem_kernel.dylib)", or "deep + 0x47c" without a symbol.
         var text: String {
@@ -70,20 +73,21 @@ final class StackSymbols: @unchecked Sendable {
         var f = Frame(image: "", symbol: nil, offset: 0, address: addr)
         if sharedCache.contains(addr) {
             if let s = own?.lookup(look), !s.image.isEmpty {
-                f = Frame(image: s.image, symbol: s.name, offset: addr - s.start, address: addr)
+                f = Frame(image: s.image, symbol: s.name, offset: addr - s.start, address: addr, system: true)
             } else if let img = cacheImages.image(addr) {
                 let unslid = addr - cacheImages.slide
                 let image = (img.path as NSString).lastPathComponent
-                f = Frame(image: image, symbol: nil, offset: unslid - img.start, address: addr)
+                f = Frame(image: image, symbol: nil, offset: unslid - img.start, address: addr, system: true)
                 if let sym = symbolicator(img.path, cache: true), let s = sym.lookup(unslid - (addr - look)) {
-                    f = Frame(image: image, symbol: s.name, offset: unslid - s.start, address: addr)
+                    f = Frame(image: image, symbol: s.name, offset: unslid - s.start, address: addr, system: true)
                 }
             }
         } else if let r = region(addr), !r.path.isEmpty {
             let image = (r.path as NSString).lastPathComponent
-            f = Frame(image: image, symbol: nil, offset: addr - r.start, address: addr)
+            let system = Self.systemPaths.contains { r.path.hasPrefix($0) }
+            f = Frame(image: image, symbol: nil, offset: addr - r.start, address: addr, system: system)
             if let sym = symbolicator(r.path), let s = sym.lookup(sym.base + (look - r.start)) {
-                f = Frame(image: image, symbol: s.name, offset: sym.base + (addr - r.start) - s.start, address: addr)
+                f = Frame(image: image, symbol: s.name, offset: sym.base + (addr - r.start) - s.start, address: addr, system: system)
             }
         }
         cache[key] = f
@@ -101,6 +105,95 @@ final class StackSymbols: @unchecked Sendable {
             if f.image != "libsystem_kernel.dylib" { return f.short }
         }
         return stack.isEmpty ? "" : frame(stack[0], isReturn: false).short
+    }
+
+    /// Images outside the shared cache that are still the OS's: dyld, a few libraries, plug-ins.
+    static let systemPaths = ["/System/", "/usr/lib/", "/usr/libexec/", "/Library/Apple/"]
+
+    /// The OS function the process's own code called to make this call, and the call site in that code: walking
+    /// out from the trap, the last system frame before the first of the process's own. BetterDisplay polls with
+    /// "IOServiceGetMatchingServices (IOKit)" from "BetterDisplay + 0xa29068": one call there is a dozen messages
+    /// to the kernel (io_service_get_matching_services_bin, io_iterator_next…) that say little on their own.
+    ///   - nil when the process's code made the trap itself (no system frame between), or a frame on the way
+    ///     isn't known (the walk can't tell whose it is).
+    ///   - nil when the system frame is a run loop the process handed its thread to (`handOvers`): what runs in
+    ///     there is the framework's own work, not a call the process made.
+    ///   - A tail call shows the function it jumped to: CGSessionCopyCurrentDictionary is
+    ///     "SLSessionCopyCurrentDictionary (SkyLight)", IORegistryEntryCreateCFProperty is
+    ///     "IORegistryEntrySearchCFProperty (IOKit)". Still the right name, one level down.
+    func entry(_ stack: [UInt64]) -> (api: Frame, site: Frame)? {
+        var api: Frame?
+        for (i, a) in stack.enumerated() {
+            let f = frame(a, isReturn: i > 0)
+            guard let system = f.system else { return nil }
+            if system {
+                if f.image != "libsystem_kernel.dylib" || api != nil { api = f }
+                continue
+            }
+            guard let api, !Self.handOvers.contains(api.symbol ?? "") else { return nil }
+            return (api, f)
+        }
+        return nil
+    }
+
+    /// Functions a program calls to give its thread to a run loop for good (or for a modal session).
+    static let handOvers: Set<String> = [
+        "-[NSApplication run]", "NSApplicationMain", "-[NSApplication runModalForWindow:]", "-[NSApplication runModalSession:]",
+        "CFRunLoopRun", "CFRunLoopRunInMode", "CFRunLoopRunSpecific", "dispatch_main", "UIApplicationMain", "static App.main()",
+        "-[NSRunLoop(NSRunLoop) run]", "-[NSRunLoop(NSRunLoop) runMode:beforeDate:]", "-[NSRunLoop(NSRunLoop) runUntilDate:]",
+        "-[NSRunLoop(NSRunLoop) acceptInputForMode:beforeDate:]",
+    ]
+
+    /// What set a call off: the outermost callout on its stack (a dispatch source firing, a run-loop timer, a
+    /// message arriving) and the process's code it called, as "dispatch source · BetterDisplay + 0x3883dc", with
+    /// the next frame of that code in `inner`. A Swift closure goes through a thunk that every closure of its shape
+    /// shares: both of BetterDisplay's timers enter at + 0x3883dc and part at the next frame (+ 0xcf5ec, + 0xd12d10),
+    /// so SyscallActivity tries the outer name first and the inner one when that mixes two rhythms.
+    ///   - No code of the process's inside the callout: the function the callout called ("incoming message ·
+    ///     mshMIGPerform  (HIServices)", another app's Accessibility request).
+    ///   - No callout: a thread's own loop, by its entry in the process's code ("thread · …"); a worker thread
+    ///     waking a run loop for a dispatch timer is "timer delivery". Otherwise nil.
+    func trigger(_ stack: [UInt64]) -> (outer: String, inner: String)? {
+        let frames = frames(stack)
+        for k in frames.indices.reversed() {
+            guard let kind = Self.callouts[frames[k].symbol ?? ""] else { continue }
+            var i = k - 1
+            while i >= 0, frames[i].system != false { i -= 1 }
+            guard i >= 0 else { return k > 0 ? (kind + " · " + frames[k - 1].short, "") : nil }
+            let inner = i > 0 && frames[i - 1].system == false ? frames[i - 1].text : ""
+            return (kind + " · " + frames[i].text, inner)
+        }
+        if frames.contains(where: { $0.symbol == "_pthread_start" }),
+           let i = frames.lastIndex(where: { $0.system == false }) {
+            return ("thread · " + frames[i].text, i > 0 && frames[i - 1].system == false ? frames[i - 1].text : "")
+        }
+        if frames.contains(where: { $0.symbol == "_dispatch_event_loop_drain_timers" }),
+           !frames.contains(where: { $0.system == false }) {
+            return (Self.timerDelivery, "")
+        }
+        return nil
+    }
+
+    static let timerDelivery = "timer delivery"
+
+    /// Where the system calls into a program's code, by what it is delivering. Not the main queue's drain or a
+    /// queue's block callout: they hold the timers and sources, which say more.
+    static let callouts: [String: String] = [
+        "_dispatch_source_latch_and_call": "dispatch source", "_dispatch_source_invoke": "dispatch source",
+        "__CFRUNLOOP_IS_CALLING_OUT_TO_A_TIMER_CALLBACK_FUNCTION__": "run-loop timer",
+        "__CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE1_PERFORM_FUNCTION__": "incoming message",
+        "__CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE0_PERFORM_FUNCTION__": "run-loop source",
+        "__CFRUNLOOP_IS_CALLING_OUT_TO_AN_OBSERVER_CALLBACK_FUNCTION__": "run-loop observer",
+        "-[NSApplication(NSEventRouting) sendEvent:]": "event",
+    ]
+
+    /// What a trace's calls need from their stacks: the caller, the API and its call site (`entry`), and what set
+    /// the call off (`trigger`).
+    func attribute(_ r: inout SyscallRecord) {
+        guard !r.stack.isEmpty else { return }
+        r.caller = caller(r.stack)
+        if let e = entry(r.stack) { r.api = e.api.short; r.site = e.site.text }
+        if let t = trigger(r.stack) { r.trigger = t.outer; r.triggerInner = t.inner }
     }
 
     private func region(_ a: UInt64) -> StackRegion? {

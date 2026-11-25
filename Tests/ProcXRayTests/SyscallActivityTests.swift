@@ -602,4 +602,97 @@ final class SyscallActivityTests: XCTestCase {
         ])
         XCTAssertEqual(out.first?.paths, ["/private/etc/hosts"])
     }
+
+    /// Mach calls made inside an OS function the process called (stacks) are one row per function, as BetterDisplay's
+    /// display poll is: IOServiceGetMatchingServices, then IOIteratorNext and property reads from several places.
+    func testCallsIntoOSFunctions() throws {
+        let sendRcv = UInt64(MACH_SEND_MSG | MACH_RCV_MSG)
+        let routine = try XCTUnwrap(MIGRoutines.names.firstIndex(of: "task_info"))
+        let matching = "IOServiceGetMatchingServices  (IOKit)", next = "IOIteratorNext  (IOKit)"
+        let property = "IORegistryEntrySearchCFProperty  (IOKit)"
+        var id = 0
+        func call(_ t: UInt64, _ api: String, _ site: String, _ name: String = "mach_msg2_trap", receiver: Int32? = nil) -> SyscallRecord {
+            id += 1
+            var r = SyscallRecord(id: id, start: t, end: t + 5, thread: 7, mach: true, number: 0, name: name,
+                                  args: name == "mach_msg2_trap" ? [1, sendRcv, 0x13, 0x203] : [0x203, 0x1503])
+            if name == "mach_msg2_trap", receiver == nil { r.kernelRoutine = routine }
+            r.receiver = receiver
+            r.api = api
+            r.site = site
+            return r
+        }
+        var recs: [SyscallRecord] = []
+        for round in 0..<3 {
+            let t = UInt64(round) * 2_000_000_000
+            recs += [call(t, matching, "App + 0x10"), call(t + 6, matching, "App + 0x10"),
+                     // A port released inside the call: joins it.
+                     call(t + 8, matching, "App + 0x10", "mach_port_deallocate_trap"),
+                     call(t + 20, next, "App + 0x20"), call(t + 40, next, "App + 0x20"),
+                     call(t + 100, property, "App + 0x30"), call(t + 200, property, "App + 0x40")]
+        }
+        // Released with no call under way: no row. A message with no API: a row of its own as before.
+        recs.append(call(5_000_000_000, matching, "App + 0x99", "mach_port_deallocate_trap"))
+        var plain = call(5_100_000_000, "", "", receiver: 42)
+        plain.args = [1, UInt64(MACH_SEND_MSG), 0x13, 0x1650b]
+        recs.append(plain)
+
+        let context = SyscallActivity.Context(pid: 10, processNames: [42: "cfprefsd"])
+        let groups = SyscallActivity.build(recs, scope: TraceScope(), context: context).reversed().map { $0 }
+        XCTAssertEqual(groups.map(\.operation), [.api, .api, .api, .api, .api, .api, .api, .api, .api, .message])
+        XCTAssertEqual(groups.prefix(3).map(\.target), [matching, next, property])
+        XCTAssertEqual(groups[0].calls.count, 3)
+        XCTAssertEqual(groups[1].calls.count, 2)
+        XCTAssertEqual(groups[2].sites, ["App + 0x30", "App + 0x40"])
+        XCTAssertEqual(groups[0].reached, ["task_info (kernel)"])
+        XCTAssertTrue(groups[0].detail.hasPrefix("task_info (kernel) · took "), groups[0].detail)
+        XCTAssertTrue(groups[0].detail.contains("from App + 0x10 · 3 calls · ↻ every 2.0 s (1 of 3)"), groups[0].detail)
+        XCTAssertTrue(groups[2].detail.contains("from 2 places"), groups[2].detail)
+        XCTAssertEqual(groups.last?.target, "cfprefsd (42)")
+        XCTAssertEqual(SyscallActivity.kind(groups[0].calls[0], context), .messages)
+        let sentence = TraceOverview.build(recs, scope: TraceScope(), context: context, groups: groups, fromStart: true).sentence
+        XCTAssertTrue(sentence.contains("1 message to 1 destination · 18 kernel calls"), sentence)
+    }
+
+    /// Two timers entering through one shared Swift thunk (as BetterDisplay's 1 s and 2 s timers do), each tick
+    /// woken by a worker thread: every row a tick starts carries its timer's rhythm and handler, a one-off message
+    /// inside a tick included, and the worker's wakeup is marked as that timer's delivery.
+    func testTimerTicksNameTheirHandler() {
+        let send = UInt64(MACH_SEND_MSG), sendRcv = UInt64(MACH_SEND_MSG | MACH_RCV_MSG)
+        var id = 0
+        func message(_ t: UInt64, thread: UInt64 = 7, to port: UInt64, receiver: Int32? = nil, trigger: String, inner: String = "") -> SyscallRecord {
+            id += 1
+            var r = SyscallRecord(id: id, start: t, end: t + 5_000, thread: thread, mach: true, number: 0, name: "mach_msg2_trap",
+                                  args: [1, receiver == nil ? send : sendRcv, 0x18, port])
+            r.receiver = receiver
+            r.trigger = trigger
+            r.triggerInner = inner
+            return r
+        }
+        let thunk = "dispatch source · App + 0x38"
+        var recs: [SyscallRecord] = []
+        for s in 0..<6 {
+            let t = UInt64(s) * 1_000_000_000 + 457_000_000
+            recs.append(message(t - 500_000, thread: 9, to: 0x3003, trigger: StackSymbols.timerDelivery))
+            recs.append(message(t, to: 0x80f, receiver: 1, trigger: thunk, inner: "App + 0xcf"))
+            if s == 3 { recs.append(message(t + 100_000, to: 0x17f77, receiver: 443, trigger: thunk, inner: "App + 0xcf")) }
+            if s % 2 == 0 {
+                recs.append(message(t - 292_500_000, thread: 9, to: 0x3003, trigger: StackSymbols.timerDelivery))
+                recs.append(message(t - 292_000_000, to: 0x80f, receiver: 1, trigger: thunk, inner: "App + 0xd1"))
+            }
+        }
+        let context = SyscallActivity.Context(pid: 10, processNames: [1: "launchd", 443: "WindowServer"], portKinds: [0x3003: "own port"])
+        let groups = SyscallActivity.build(recs, scope: TraceScope(), context: context).reversed().map { $0 }
+        let one = groups.filter { $0.recurrence?.cause == "timer · App + 0xcf" }
+        XCTAssertEqual(one.count, 7)
+        XCTAssertEqual(one.first?.recurrence?.period, 1_000_000_000)
+        let windowServer = try? XCTUnwrap(groups.first { $0.target == "WindowServer (443)" })
+        XCTAssertEqual(windowServer?.recurrence?.text, "↻ every 1.0 s (4 of 6) · timer · App + 0xcf")
+        let two = groups.filter { $0.recurrence?.cause == "timer · App + 0xd1" }
+        XCTAssertEqual(two.map { $0.recurrence!.period }, [2_000_000_000, 2_000_000_000, 2_000_000_000])
+        let delivery = groups.filter { $0.target == "Own port" }
+        XCTAssertEqual(Set(delivery.compactMap { $0.recurrence?.cause }), ["timer · App + 0xcf (delivery)", "timer · App + 0xd1 (delivery)"])
+        // Without triggers, rows keep the rhythm of their own operation and target only.
+        let plain = recs.map { r -> SyscallRecord in var r = r; r.trigger = ""; return r }
+        XCTAssertNil(SyscallActivity.build(plain, scope: TraceScope(), context: context).first { $0.target == "WindowServer (443)" }?.recurrence)
+    }
 }

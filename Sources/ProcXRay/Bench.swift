@@ -589,13 +589,15 @@ enum Bench {
             let lost = args.contains("lost")
             var byCPU: [UInt32: Int] = [:], byKind: [UInt32: Int] = [:], lastByCPU: [UInt32: UInt64] = [:]
             var all: [SyscallRecord] = []
-            func take(_ rs: [SyscallRecord]) {
+            func take(_ batch: [SyscallRecord]) {
+                var rs = batch
+                for i in rs.indices { symbols.attribute(&rs[i]) }
                 if activity { all += rs }
                 for r in rs {
                     recs += 1; names[r.name, default: 0] += 1
                     guard !r.stack.isEmpty else { continue }
                     withStack += 1
-                    let c = symbols.caller(r.stack)
+                    let c = r.caller
                     callers["\(r.name) ← \(c)", default: 0] += 1
                     if examples[r.name] == nil || examples.count < 400 { examples["\(r.name)#\(examples.count)"] = r }
                 }

@@ -48,6 +48,8 @@ struct SyscallActivity: Identifiable, Sendable {
         case loadImage = "Load libraries", initializers = "Run initializers", openLibrary = "Open library (dlopen)"
         case closeLibrary = "Close library (dlclose)", symbol = "Look up symbols (dlsym)", address = "Find an address's library (dladdr)"
         case kernelCall = "Kernel call"
+        /// An OS function the process called, by its Mach messages and kernel calls (SyscallRecord.api).
+        case api = "Call"
         case dyldSetup = "Launch setup (dyld)", mainStarts = "main() starts"
         case waits = "Waits and event polls"
     }
@@ -141,6 +143,10 @@ struct SyscallActivity: Identifiable, Sendable {
     var kinds: Set<Operation> = []
     /// Messages: time spent in calls that also waited for the reply.
     var replyTime: UInt64 = 0
+    /// A call (`.api`): where its messages went and the kernel routines it asked, first seen first ("launchd (1)",
+    /// "io_iterator_next (kernel)"), and the places in the process's code it was called from.
+    var reached: [String] = []
+    var sites: [String] = []
     /// The target is a stand-in ("Socket", "fd 4") that the first label of the descriptor replaces.
     private var provisional = false
     /// One round of something the process does at even intervals (`markRecurring`): how often, which round this
@@ -149,8 +155,10 @@ struct SyscallActivity: Identifiable, Sendable {
         var period: UInt64
         var round: Int
         var rounds: Int
+        /// What runs on that rhythm, when the calls' stacks say (`markTicks`): "timer · BetterDisplay + 0xcf5ec".
+        var cause: String? = nil
         /// "↻ every 2.0 s (3 of 5)": the same words on every round, so filtering by them shows the loop alone.
-        var text: String { "↻ every \(SyscallActivity.interval(period)) (\(round) of \(rounds))" }
+        var text: String { "↻ every \(SyscallActivity.interval(period)) (\(round) of \(rounds))" + (cause.map { " · " + $0 } ?? "") }
     }
     var recurrence: Recurrence?
     /// A roll-up (`rollUp`): how many paths under `target`, a directory, one burst of this operation touched. 0: none.
@@ -204,6 +212,12 @@ struct SyscallActivity: Identifiable, Sendable {
                 if replyTime > 0 { parts.append("replies took " + SyscallTraceView.duration(replyTime)) }
             case .kernelCall:
                 if replyTime > 0 { parts.append("took " + SyscallTraceView.duration(replyTime)) }
+            case .api:
+                parts.append(reached.prefix(Self.reachedShown).joined(separator: ", ")
+                             + (reached.count > Self.reachedShown ? " +\(reached.count - Self.reachedShown) more" : ""))
+                let total = calls.compactMap(\.duration).reduce(0, +)
+                if total > 0 { parts.append("took " + SyscallTraceView.duration(total)) }
+                parts.append(sites.count == 1 ? "from " + sites[0] : "from \(sites.count) places")
             case .mainStarts:
                 parts.append(first.resultText)
             default: break
@@ -237,6 +251,8 @@ struct SyscallActivity: Identifiable, Sendable {
         if let recurrence { parts.append(recurrence.text) }
         return parts.joined(separator: " · ")
     }
+
+    static let reachedShown = 3
 
     /// dyld's work, from its trace events rather than syscalls (SyscallRecord.isLibraryCall).
     static let libraryOperations: Set<Operation> = [.loadImage, .initializers, .openLibrary, .closeLibrary, .symbol, .address,
@@ -281,6 +297,9 @@ struct SyscallActivity: Identifiable, Sendable {
         var cwd = context.cwd
         /// Threads with a working directory of their own (pthread_chdir): their relative paths stay as given.
         var ownDirectory = Set<UInt64>()
+        /// Each thread's call into an OS function (`.api`) still taking calls: its activity, which call and from
+        /// where, and when its last call ended.
+        var calling: [UInt64: (index: Int, key: String, end: UInt64)] = [:]
         // Start order also puts calls still pending at trace stop in their proper position.
         for r in records.sorted(by: { ($0.time, $0.id) < ($1.time, $1.id) }) {
             let name = r.name.hasSuffix("_nocancel") ? String(r.name.dropLast(9)) : r.name
@@ -344,13 +363,48 @@ struct SyscallActivity: Identifiable, Sendable {
                 }
                 continue
             }
+            // A Mach call made inside an OS function the process's code called (a trace with stacks) is part of
+            // that call: one IOServiceGetMatchingServices is a dozen messages to the kernel. Calls of one
+            // invocation follow each other on a thread from one place, within `callGap`; a call without an
+            // operation of its own (a port released on the way) joins one but never starts one.
+            if !r.api.isEmpty, op == nil || op == .message || op == .kernelCall {
+                let key = r.api + "\u{0}" + r.site
+                if let c = calling[r.thread], c.key == key, r.time <= c.end + callGap {
+                    groups[c.index].append(r, kind: op)
+                    groups[c.index].reach(r, context)
+                    calling[r.thread]?.end = r.end ?? r.time
+                    continue
+                }
+                guard op != nil else { continue }
+                // Calls to the same function soon after join as repeats do (nine property reads in a poll),
+                // whichever place they came from.
+                let repeatKey = String(r.thread) + "\u{0}" + Operation.api.rawValue + "\u{0}" + r.api + "\u{0}" + r.trigger + r.triggerInner
+                let index: Int
+                if let i = recent[repeatKey], let last = groups[i].calls.last, last.state == .done, r.state == .done,
+                   r.time - last.time <= repeatGap {
+                    index = i
+                    groups[i].append(r, kind: op)
+                } else {
+                    var g = Self(operation: .api, target: r.api, calls: [])
+                    g.append(r, kind: op)
+                    index = groups.count
+                    recent[repeatKey] = index
+                    groups.append(g)
+                }
+                groups[index].reach(r, context)
+                if !groups[index].sites.contains(r.site) { groups[index].sites.append(r.site) }
+                calling[r.thread] = (index, key, r.end ?? r.time)
+                continue
+            }
             guard let op else { continue }
 
             let target = target(op, name, r, context, base: base)
             var g = Self(operation: op, target: target, calls: [])
             // One-off calls a thread repeats on the same target, with the same result, join one activity. Another
             // thread's are its own: two threads asking the same service are separate work that shares a destination.
+            // So are calls two handlers made (two timers' polls, by their stacks: SyscallRecord.trigger).
             let key = String(r.thread) + "\u{0}" + op.rawValue + "\u{0}" + target + "\u{0}" + String(r.error)
+                + "\u{0}" + r.trigger + r.triggerInner
             if repeats.contains(op), let i = recent[key], let last = groups[i].calls.last,
                last.state == .done, r.state == .done, r.time - last.time <= repeatGap {
                 groups[i].append(r, kind: op)
@@ -363,6 +417,7 @@ struct SyscallActivity: Identifiable, Sendable {
         for i in groups.indices where groups[i].fd != nil { groups[i].settle() }
         groups = rollUp(groups)
         markRecurring(&groups)
+        markTicks(&groups)
         groups.reverse()
         if let waits { groups.append(waits) }
         return groups
@@ -436,6 +491,8 @@ struct SyscallActivity: Identifiable, Sendable {
     private mutating func absorb(_ o: Self) {
         calls += o.calls
         bytesIn += o.bytesIn; bytesOut += o.bytesOut
+        for t in o.reached where !reached.contains(t) { reached.append(t) }
+        for t in o.sites where !sites.contains(t) { sites.append(t) }
         failures += o.failures
         replyTime += o.replyTime
         threads.formUnion(o.threads)
@@ -455,17 +512,95 @@ struct SyscallActivity: Identifiable, Sendable {
         for (i, g) in groups.enumerated() where g.calls[0].start != nil {
             same[g.operation.rawValue + "\u{0}" + g.target, default: []].append(i)
         }
-        for (_, indexes) in same where indexes.count >= recurringRounds {
-            let starts = indexes.map { groups[$0].calls[0].time }
-            let gaps = zip(starts.dropFirst(), starts).map { $0 - $1 }
-            let period = gaps.sorted()[gaps.count / 2]
-            guard period >= shortestPeriod else { continue }
-            let slack = max(period * 15 / 100, 2_000_000)
-            let odd = gaps.filter { $0 > period + slack || $0 + slack < period }.count
-            guard gaps.count < 5 ? odd == 0 : odd * 5 <= gaps.count else { continue }
+        for (_, indexes) in same {
+            guard let period = rhythm(indexes.map { groups[$0].calls[0].time }) else { continue }
             for (n, i) in indexes.enumerated() {
                 groups[i].recurrence = Recurrence(period: period, round: n + 1, rounds: indexes.count)
             }
+        }
+    }
+
+    /// The usual gap between `starts` (in order) when they are evenly spaced, each within 15% of it (a long run
+    /// may have one odd gap in five); nil for fewer than `recurringRounds`, or closer than `shortestPeriod`.
+    static func rhythm(_ starts: [UInt64]) -> UInt64? {
+        guard starts.count >= recurringRounds else { return nil }
+        let gaps = zip(starts.dropFirst(), starts).map { $0 - $1 }
+        let period = gaps.sorted()[gaps.count / 2]
+        guard period >= shortestPeriod else { return nil }
+        let slack = max(period * 15 / 100, 2_000_000)
+        let odd = gaps.filter { $0 > period + slack || $0 + slack < period }.count
+        return (gaps.count < 5 ? odd == 0 : odd * 5 <= gaps.count) ? period : nil
+    }
+
+    /// A worker thread's wakeup of a run loop for a timer comes this soon before the timer's handler runs.
+    static let deliveryLead: UInt64 = 3_000_000
+
+    /// Marks what one handler does on a timer (traces with stacks): the calls a callout set off (SyscallRecord.
+    /// trigger) make a tick while they follow each other within `burstGap`; when a trigger's ticks are evenly
+    /// spaced, every activity a tick starts is marked with its round and the cause, whatever its own target. A
+    /// one-off message inside a timer's handler is then that timer's work, not a row of its own rhythm.
+    /// A trigger whose ticks mix two rhythms (two Swift timers entering through one shared thunk) is split by
+    /// the next frame in (`triggerInner`). A dispatch source is a timer when most of its ticks follow a worker
+    /// thread's timer delivery, and that delivery's activity takes the mark too. Marks only: nothing moves.
+    static func markTicks(_ groups: inout [Self]) {
+        var byTrigger: [String: [SyscallRecord]] = [:]
+        var deliveries: [UInt64] = []
+        for g in groups where g.operation != .waits {
+            for r in g.calls where !r.trigger.isEmpty && r.start != nil {
+                if r.trigger == StackSymbols.timerDelivery { deliveries.append(r.time) } else { byTrigger[r.trigger, default: []].append(r) }
+            }
+        }
+        guard !byTrigger.isEmpty else { return }
+        deliveries.sort()
+        func ticks(_ rs: [SyscallRecord]) -> [UInt64] {
+            var starts: [UInt64] = [], last: UInt64?
+            for r in rs {
+                if last.map({ r.time - $0 > burstGap }) ?? true { starts.append(r.time) }
+                last = r.end ?? r.time
+            }
+            return starts
+        }
+        /// Trigger key → (its ticks' starts, the period, the cause's words).
+        var rhythms: [String: (starts: [UInt64], period: UInt64, cause: String)] = [:]
+        func delivered(_ start: UInt64) -> UInt64? {
+            deliveries.last { $0 <= start && start - $0 <= deliveryLead }
+        }
+        func add(_ key: String, _ rs: [SyscallRecord], handler: String) -> Bool {
+            let starts = ticks(rs)
+            guard let period = rhythm(starts) else { return false }
+            var kind = String(key.prefix { $0 != "·" }).trimmingCharacters(in: .whitespaces)
+            if kind == "dispatch source", starts.filter({ delivered($0) != nil }).count * 2 >= starts.count { kind = "timer" }
+            rhythms[key] = (starts, period, kind + " · " + handler)
+            return true
+        }
+        for (trigger, var rs) in byTrigger {
+            rs.sort { ($0.time, $0.id) < ($1.time, $1.id) }
+            let outer = String(trigger.drop { $0 != "·" }.dropFirst()).trimmingCharacters(in: .whitespaces)
+            if add(trigger, rs, handler: outer) { continue }
+            for (inner, part) in Dictionary(grouping: rs, by: \.triggerInner) where !inner.isEmpty {
+                _ = add(trigger + "\u{0}" + inner, part, handler: inner)
+            }
+        }
+        guard !rhythms.isEmpty else { return }
+        func round(_ key: String, _ t: UInt64) -> Recurrence? {
+            guard let r = rhythms[key], let n = r.starts.lastIndex(where: { $0 <= t }) else { return nil }
+            return Recurrence(period: r.period, round: n + 1, rounds: r.starts.count, cause: r.cause)
+        }
+        // Delivery time → the timer tick it led to.
+        var deliveredTick: [UInt64: Recurrence] = [:]
+        for r in rhythms.values where r.cause.hasPrefix("timer ·") {
+            for (n, s) in r.starts.enumerated() {
+                if let d = delivered(s) { deliveredTick[d] = Recurrence(period: r.period, round: n + 1, rounds: r.starts.count, cause: r.cause + " (delivery)") }
+            }
+        }
+        for i in groups.indices where groups[i].operation != .waits {
+            let r = groups[i].calls[0]
+            if r.trigger == StackSymbols.timerDelivery {
+                if let m = deliveredTick[r.time] { groups[i].recurrence = m }
+                continue
+            }
+            guard !r.trigger.isEmpty else { continue }
+            if let m = round(r.trigger, r.time) ?? round(r.trigger + "\u{0}" + r.triggerInner, r.time) { groups[i].recurrence = m }
         }
     }
 
@@ -496,6 +631,15 @@ struct SyscallActivity: Identifiable, Sendable {
             if a[1] & UInt64(MACH_RCV_MSG) != 0, let d = r.duration { replyTime += d }
         default: break
         }
+    }
+
+    /// Calls of one OS function this close (end to start) are one invocation of it.
+    static let callGap: UInt64 = 1_000_000
+
+    /// Notes where a call's message went, for a `.api` activity.
+    private mutating func reach(_ r: SyscallRecord, _ context: Context) {
+        guard let t = context.messageTarget(r), !reached.contains(t) else { return }
+        reached.append(t)
     }
 
     /// A socket's label gains its endpoints on connect: the latest wins. A file keeps the path it was opened with.
@@ -595,7 +739,7 @@ struct SyscallActivity: Identifiable, Sendable {
         if isWait(name, r) { return .waits }
         guard let (op, onFD) = operation(name, r) else { return .other }
         switch op {
-        case .message, .kernelCall: return .messages
+        case .message, .kernelCall, .api: return .messages
         case .connect, .connection, .listen, .accept, .send, .receive: return .network
         case .launch, .signal, .inspect, .loadImage, .initializers, .openLibrary, .closeLibrary, .symbol, .address,
              .dyldSetup, .mainStarts, .waits:

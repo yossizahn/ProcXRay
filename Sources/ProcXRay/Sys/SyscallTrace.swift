@@ -92,6 +92,14 @@ struct SyscallRecord: Identifiable, Sendable, Hashable {
     // Display text, built once (off the main thread) so the table only reads strings.
     /// The first frame outside libsystem_kernel (the syscall stubs), symbolicated; empty without a stack.
     var caller = ""
+    /// The OS function the process's own code called that made this call ("IOServiceGetMatchingServices  (IOKit)"),
+    /// and where in that code ("BetterDisplay + 0xa29068"): StackSymbols.entry. Empty without a stack, or when the
+    /// call is a framework's own work.
+    var api = ""
+    var site = ""
+    /// What set the call off, and the next frame of the process's code inside it: StackSymbols.trigger.
+    var trigger = ""
+    var triggerInner = ""
     /// Resolved resource for syscalls whose first argument is a descriptor.
     var firstFDLabel: String?
     /// One display text per argument shown ("…" alone when the entry, and so the arguments, wasn't seen).

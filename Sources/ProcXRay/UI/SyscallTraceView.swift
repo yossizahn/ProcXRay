@@ -182,7 +182,7 @@ final class SyscallTracer {
             if resume != nil, let low = recs.lazy.map(\.thread).min() { mainThread = min(mainThread ?? low, low) }
             fds.label(&recs, sockets: { s.takeSeenSockets() }) { s.describeFds($0) }
             let names = threads.label(&recs) { s.threads($0) }
-            for i in recs.indices where !recs[i].stack.isEmpty { recs[i].caller = symbols.caller(recs[i].stack) }
+            for i in recs.indices { symbols.attribute(&recs[i]) }
             var n = notes.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
             if bad > 0 { n.append("\(bad) unreadable trace lines skipped.") }
             if !evs.isEmpty { await tracer.ran(dec.takeRuns(), open: dec.openRuns(), measured: dec.cpuMeasured) }
@@ -199,7 +199,7 @@ final class SyscallTracer {
         await tracer.ran(dec.endRuns(), open: [], measured: dec.cpuMeasured)
         fds.label(&last, sockets: { s.takeSeenSockets() }) { s.describeFds($0) }
         let names = threads.label(&last) { s.threads($0) }
-        for i in last.indices where !last[i].stack.isEmpty { last[i].caller = symbols.caller(last[i].stack) }
+        for i in last.indices { symbols.attribute(&last[i]) }
         if !last.isEmpty {
             await tracer.append(last, events: 0, notes: [], names: names,
                                 threads: Self.threadNames(threads.threadNames, dec.threadNames, main: mainThread))

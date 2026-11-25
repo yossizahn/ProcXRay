@@ -86,6 +86,12 @@ struct TraceOverview: Sendable, Equatable {
                 connections += 1; sent += g.bytesOut; received += g.bytesIn
             case .message: messages += g.calls.count; destinations.insert(g.target)
             case .kernelCall: kernelCalls += g.calls.count
+            case .api:
+                // Its messages and kernel calls, counted as their own rows would be.
+                for r in g.calls where r.name == "mach_msg2_trap" {
+                    if r.kernelRoutine != nil { kernelCalls += 1 } else if let a = r.args, a.count > 1, a[1] & UInt64(MACH_SEND_MSG) != 0 { messages += 1 }
+                }
+                for t in g.reached where !t.hasSuffix(" (kernel)") { destinations.insert(t) }
             case .launch: launches += g.calls.count
             default: break
             }
