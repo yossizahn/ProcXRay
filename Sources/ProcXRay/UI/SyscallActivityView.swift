@@ -174,7 +174,7 @@ private struct ActivityOutline: NSViewRepresentable {
         menu.delegate = co
         outline.menu = menu
 
-        let scroll = NSScrollView()
+        let scroll = SelectionKeepingScrollView()
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true

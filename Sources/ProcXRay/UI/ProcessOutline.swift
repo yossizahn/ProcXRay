@@ -84,7 +84,7 @@ struct ProcessOutline: NSViewRepresentable {
         co.headerMenu = headerMenu
         co.listenForColumnCommands()
 
-        let scroll = NSScrollView()
+        let scroll = SelectionKeepingScrollView()
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true

@@ -169,7 +169,7 @@ struct DataTable<Row: Identifiable>: NSViewRepresentable where Row.ID: Hashable 
         header.menu = hm
         co.apply()
 
-        let scroll = NSScrollView()
+        let scroll = SelectionKeepingScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
@@ -651,6 +651,33 @@ final class DataCellView: NSTableCellView {
             track?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
             dot?.backgroundColor = dotColor?.cgColor
         }
+    }
+}
+
+/// A table's scroll view that keeps the selected row in sight as it gets shorter: a pane opening below the table
+/// (the call's stack, the selected process) or a divider dragged up would otherwise hide the row just clicked.
+/// Only a row that was in sight is followed, so a selection scrolled away on purpose stays where it was.
+final class SelectionKeepingScrollView: NSScrollView {
+    /// The selected row, in sight when the scroll view began to shrink: scrolled to once the clip view has its
+    /// new size (`tile`). Scrolling before that measured against the old size and left the clip view drawing
+    /// over the pane below it.
+    private var keep: Int?
+
+    override func setFrameSize(_ newSize: NSSize) {
+        if newSize.height < frame.height, let table = documentView as? NSTableView {
+            let row = table.selectedRowIndexes.last ?? -1
+            if row >= 0, row < table.numberOfRows, contentView.documentVisibleRect.intersects(table.rect(ofRow: row)) {
+                keep = row
+            }
+        }
+        super.setFrameSize(newSize)
+    }
+
+    override func tile() {
+        super.tile()
+        guard let row = keep, let table = documentView as? NSTableView else { return }
+        keep = nil
+        if row < table.numberOfRows { table.scrollRowToVisible(row) }
     }
 }
 

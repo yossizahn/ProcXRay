@@ -26,11 +26,14 @@ struct SplitPane<Top: View, Bottom: View>: View {
         GeometryReader { geo in
             let total = geo.size.height
             let topHeight = showsBottom ? clamp(total * fraction, total) : total
+            // Each pane is held to its share, from the top: content taller than its pane (the inspector's header,
+            // tabs and toolbar in a short window) would otherwise be centred, spilling over the list above and
+            // hiding the rows at its foot, the selected one included.
             VStack(spacing: 0) {
-                top.frame(width: geo.size.width, height: topHeight)
+                top.frame(width: geo.size.width, height: topHeight, alignment: .top).clipped()
                 if showsBottom {
                     divider(total: total, topHeight: topHeight)
-                    bottom.frame(width: geo.size.width, height: max(0, total - topHeight - 1))
+                    bottom.frame(width: geo.size.width, height: max(0, total - topHeight - 1), alignment: .top).clipped()
                 }
             }
         }
