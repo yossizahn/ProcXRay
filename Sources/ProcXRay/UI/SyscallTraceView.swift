@@ -592,7 +592,7 @@ struct SyscallTraceView: View {
             col("name", "Syscall", 150, color: { $0.mach ? .systemPurple : $0.isLibraryCall ? .systemTeal : nil },
                 tooltip: { $0.isLibraryCall ? $0.name + " (a dyld call, from dyld's trace events)" : nil }) { $0.name },
             col("args", "Arguments", 240, color: secondary) { argNames ? $0.namedArgsText : $0.argsText },
-            col("result", "Result", 200, color: { $0.failed ? .systemRed : $0.state == .inProgress ? .systemOrange : nil }) { Self.result($0, context) },
+            col("result", "Result", 200, color: { $0.failed ? .systemRed : $0.expected ? .secondaryLabelColor : $0.state == .inProgress ? .systemOrange : nil }) { Self.result($0, context) },
             duration,
             cpu,
             col("caller", "Caller", 220, color: secondary) { $0.caller },

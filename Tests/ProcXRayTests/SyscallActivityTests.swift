@@ -285,7 +285,42 @@ final class SyscallActivityTests: XCTestCase {
         XCTAssertFalse(call("psynch_cvwait", [0, 0, 0, 0], error: Int64(EINTR)).failed)
         let bad = call("psynch_cvwait", [0, 0, 0, 0], error: Int64(EINVAL) | 0x200)
         XCTAssertTrue(bad.failed)
+        XCTAssertFalse(bad.expected)
         XCTAssertEqual(bad.resultText, "-1 EINVAL (Invalid argument) | ECVPREPOST")
+        XCTAssertTrue(timedOut.expected)
+    }
+
+    /// Errors that are the answer the caller asked for are muted, not failures; the same errno from another
+    /// call still fails.
+    func testErrorsThatAreAnswers() {
+        func call(_ name: String, _ args: [UInt64], error: Int64 = 0, ret: UInt64 = 0, mach: Bool = false) -> SyscallRecord {
+            var r = SyscallRecord(id: 1, start: 0, end: 5, thread: 7, mach: mach, number: 0, name: name, args: args, ret: ret)
+            r.error = error
+            SyscallFormat.fill(&r)
+            return r
+        }
+        let answers: [(SyscallRecord, String)] = [
+            (call("mkdirat", [UInt64(bitPattern: -2), 0, 0o777], error: Int64(EEXIST)), "-1 EEXIST: already exists"),
+            (call("mkdir", [0, 0o755], error: Int64(EEXIST)), "-1 EEXIST: already exists"),
+            (call("readlink", [0, 0, 1026], error: Int64(EINVAL)), "-1 EINVAL: not a symlink"),
+            (call("gettid", [0, 0], error: Int64(ESRCH)), "-1 ESRCH: no identity of its own (the process's applies)"),
+            (call("ulock_wake", [0x1000002, 0x201eda32c, 0], ret: UInt64(bitPattern: Int64(-ENOENT))), "-2 (ENOENT): nobody was waiting"),
+        ]
+        for (r, text) in answers {
+            XCTAssertFalse(r.failed, r.name)
+            XCTAssertTrue(r.expected, r.name)
+            XCTAssertEqual(r.resultText, text)
+        }
+        let timeout = call("mach_msg2_trap", [0, UInt64(MACH_RCV_MSG | MACH_RCV_TIMEOUT), 0, 0], error: 0x10004003, mach: true)
+        XCTAssertTrue(timeout.expected)
+        XCTAssertFalse(timeout.failed)
+
+        for r in [call("mkdirat", [0, 0, 0o777], error: Int64(EACCES)), call("open", [0, 0, 0], error: Int64(EEXIST)),
+                  call("readlinkat", [0, 0, 0], error: Int64(ENOENT))] {
+            XCTAssertTrue(r.failed, r.name)
+            XCTAssertFalse(r.expected, r.name)
+        }
+        XCTAssertFalse(call("mkdirat", [0, 0, 0o777]).expected)
     }
 
     func testScopeNarrowsByKindAndStretch() {

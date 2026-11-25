@@ -105,6 +105,9 @@ struct SyscallRecord: Identifiable, Sendable, Hashable {
     }
     var resultText = ""
     var failed = false
+    /// An error return that is the answer the caller asked for, not a failure: mkdir's EEXIST under "create if
+    /// missing", readlink's EINVAL for "not a symlink", a timed wait running out. Not `failed`; shown muted.
+    var expected = false
 
     var duration: UInt64? {
         guard let s = start, let e = end, e >= s else { return nil }
@@ -1078,6 +1081,7 @@ enum SyscallFormat {
         } else {
             r.argValues = ["…"]
         }
+        r.expected = false
         switch r.state {
         case .inProgress:
             r.resultText = "(still in the kernel)"
@@ -1091,23 +1095,49 @@ enum SyscallFormat {
                 let kr = Int32(truncatingIfNeeded: r.error)
                 // A timeout the caller asked for (a polling mach_msg, semaphore_timedwait) is how the call is
                 // used, not a failure: counting it flooded "Errors only" in a live Finder trace.
-                r.failed = kr != 0 && !machTimeouts.contains(kr)
+                r.expected = machTimeouts.contains(kr)
+                r.failed = kr != 0 && !r.expected
                 r.resultText = kr == 0 ? "KERN_SUCCESS" : machError(kr)
             } else if r.error == 0 {
                 r.failed = false
                 r.resultText = result(r)
+                if r.name == "ulock_wake", Int32(truncatingIfNeeded: r.ret) == -ENOENT {
+                    // ULF_NO_ERRNO: -ENOENT in the return value, the lock had no waiter to wake.
+                    r.expected = true
+                    r.resultText += ": nobody was waiting"
+                }
             } else if r.name == "psynch_cvwait", r.error > 0 {
                 // The errno is the low byte; ECVCLEARED / ECVPREPOST ride above it (seen: 316 = ETIMEDOUT|ECVCLEARED
                 // on CVDisplayLink's every frame). libpthread turns ETIMEDOUT into pthread_cond_timedwait's timeout
                 // and EINTR into a spurious wakeup: neither is a failure the caller sees.
                 let e = r.error & 0xff, extra = UInt64(r.error) & ~0xff
                 r.failed = e != Int64(ETIMEDOUT) && e != Int64(EINTR)
+                r.expected = !r.failed
                 r.resultText = errnoText(e) + (extra == 0 ? "" : " | " + SyscallFlags.bits(extra, SyscallFlags.psynchErrorBits))
+            } else if let answer = answer(r) {
+                r.failed = false
+                r.expected = true
+                r.resultText = "-1 " + (errnoNames[Int(r.error)] ?? "errno \(r.error)") + ": " + answer
             } else {
                 // EJUSTRETURN and ERESTART are the kernel's own bookkeeping, not failures the process sees.
                 r.failed = r.error > 0
                 r.resultText = errnoText(r.error)
             }
+        }
+    }
+
+    /// An errno that answers the question the call is used to ask, in place of strerror's text where that
+    /// misleads ("Invalid argument" for "not a symlink"). Seen in an idle PDF Expert, every few seconds:
+    /// FileManager's createDirectory(withIntermediateDirectories:) is mkdir and ignore EEXIST at every level
+    /// (libc's _mkpath); destinationOfSymbolicLink is readlink, EINVAL on anything that isn't a link; Foundation
+    /// asks gettid for the thread's own uid and gid, ESRCH when it has none, then reads the process's.
+    static func answer(_ r: SyscallRecord) -> String? {
+        let base = r.name.hasSuffix("_nocancel") ? String(r.name.dropLast(9)) : r.name
+        switch (base, Int32(truncatingIfNeeded: r.error)) {
+        case ("mkdir", EEXIST), ("mkdirat", EEXIST): return "already exists"
+        case ("readlink", EINVAL), ("readlinkat", EINVAL): return "not a symlink"
+        case ("gettid", ESRCH): return "no identity of its own (the process's applies)"
+        default: return nil
         }
     }
 

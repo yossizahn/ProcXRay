@@ -180,7 +180,7 @@ struct SyscallActivity: Identifiable, Sendable {
         if operation == .waits {
             parts.append("\(threads.count) thread\(threads.count == 1 ? "" : "s")")
             if let longest { parts.append("longest " + SyscallTraceView.duration(longest)) }
-        } else if allFailed || (count == 1 && first.state == .inProgress) {
+        } else if allFailed || (count == 1 && first.state == .inProgress) || (failures == 0 && calls.allSatisfy(\.expected)) {
             // Answers ("Create directory — -1 EEXIST: already exists") say what they found, not "Succeeded".
             if paths > 0 { parts.append("\(paths.formatted()) paths") }
             parts.append(first.resultText)
