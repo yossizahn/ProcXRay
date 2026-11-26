@@ -611,7 +611,8 @@ final class SyscallActivityTests: XCTestCase {
         let matching = "IOServiceGetMatchingServices  (IOKit)", next = "IOIteratorNext  (IOKit)"
         let property = "IORegistryEntrySearchCFProperty  (IOKit)"
         var id = 0
-        func call(_ t: UInt64, _ api: String, _ site: String, _ name: String = "mach_msg2_trap", receiver: Int32? = nil) -> SyscallRecord {
+        func call(_ t: UInt64, _ api: String, _ site: String, _ name: String = "mach_msg2_trap", receiver: Int32? = nil,
+                  path: UInt64 = 0) -> SyscallRecord {
             id += 1
             var r = SyscallRecord(id: id, start: t, end: t + 5, thread: 7, mach: true, number: 0, name: name,
                                   args: name == "mach_msg2_trap" ? [1, sendRcv, 0x13, 0x203] : [0x203, 0x1503])
@@ -619,17 +620,25 @@ final class SyscallActivityTests: XCTestCase {
             r.receiver = receiver
             r.api = api
             r.site = site
+            r.apiPath = path
             return r
         }
         var recs: [SyscallRecord] = []
         for round in 0..<3 {
             let t = UInt64(round) * 2_000_000_000
-            recs += [call(t, matching, "App + 0x10"), call(t + 6, matching, "App + 0x10"),
+            // One call making three syscalls, each by its own way through the function: one call.
+            recs += [call(t, matching, "App + 0x10", path: 1), call(t + 6, matching, "App + 0x10", path: 2),
                      // A port released inside the call: joins it.
-                     call(t + 8, matching, "App + 0x10", "mach_port_deallocate_trap"),
-                     call(t + 20, next, "App + 0x20"), call(t + 40, next, "App + 0x20"),
-                     call(t + 100, property, "App + 0x30"), call(t + 200, property, "App + 0x40")]
+                     call(t + 8, matching, "App + 0x10", "mach_port_deallocate_trap", path: 3),
+                     // A loop calling a one-syscall function, back to back from one place: each comes the way
+                     // the first did, so two calls.
+                     call(t + 20, next, "App + 0x20", path: 9), call(t + 40, next, "App + 0x20", path: 9),
+                     call(t + 100, property, "App + 0x30", path: 5), call(t + 200, property, "App + 0x40", path: 6)]
         }
+        // The same function called again 257 ms later is another call: a row of its own.
+        let query = "SLSWindowQueryWindows  (SkyLight)"
+        recs.append(call(4_500_000_000, query, "App + 0x50", path: 7))
+        recs.append(call(4_757_000_000, query, "App + 0x50", path: 7))
         // Released with no call under way: no row. A message with no API: a row of its own as before.
         recs.append(call(5_000_000_000, matching, "App + 0x99", "mach_port_deallocate_trap"))
         var plain = call(5_100_000_000, "", "", receiver: 42)
@@ -638,19 +647,29 @@ final class SyscallActivityTests: XCTestCase {
 
         let context = SyscallActivity.Context(pid: 10, processNames: [42: "cfprefsd"])
         let groups = SyscallActivity.build(recs, scope: TraceScope(), context: context).reversed().map { $0 }
-        XCTAssertEqual(groups.map(\.operation), [.api, .api, .api, .api, .api, .api, .api, .api, .api, .message])
+        XCTAssertEqual(groups.map(\.operation), [.api, .api, .api, .api, .api, .api, .api, .api, .api, .api, .api, .message])
+        XCTAssertEqual(groups[9].calls.map(\.start), [4_500_000_000])
+        XCTAssertEqual(groups[10].calls.map(\.start), [4_757_000_000])
+        XCTAssertEqual([groups[9].invocations, groups[10].invocations], [1, 1])
+        XCTAssertFalse(groups[9].detail.contains("syscall"), groups[9].detail)
         XCTAssertEqual(groups.prefix(3).map(\.target), [matching, next, property])
         XCTAssertEqual(groups[0].calls.count, 3)
         XCTAssertEqual(groups[1].calls.count, 2)
         XCTAssertEqual(groups[2].sites, ["App + 0x30", "App + 0x40"])
         XCTAssertEqual(groups[0].reached, ["task_info (kernel)"])
         XCTAssertTrue(groups[0].detail.hasPrefix("task_info (kernel) · took "), groups[0].detail)
-        XCTAssertTrue(groups[0].detail.contains("from App + 0x10 · 3 calls · ↻ every 2.0 s (1 of 3)"), groups[0].detail)
-        XCTAssertTrue(groups[2].detail.contains("from 2 places"), groups[2].detail)
+        XCTAssertEqual(groups.prefix(3).map(\.invocations), [1, 2, 2])
+        XCTAssertTrue(groups[0].detail.contains("from App + 0x10 · 3 syscalls · ↻ every 2.0 s (1 of 3)"), groups[0].detail)
+        XCTAssertTrue(groups[1].detail.contains("from App + 0x20 · called 2× · 2 syscalls"), groups[1].detail)
+        XCTAssertTrue(groups[2].detail.contains("from 2 places · called 2× · 2 syscalls"), groups[2].detail)
+        // Without paths (no stacks saved for them), syscalls this close from one place are one call.
+        let pathless = recs.map { r -> SyscallRecord in var r = r; r.apiPath = 0; return r }
+        let loose = SyscallActivity.build(pathless, scope: TraceScope(), context: context).reversed().map { $0 }
+        XCTAssertEqual(loose[1].invocations, 1)
         XCTAssertEqual(groups.last?.target, "cfprefsd (42)")
         XCTAssertEqual(SyscallActivity.kind(groups[0].calls[0], context), .messages)
         let sentence = TraceOverview.build(recs, scope: TraceScope(), context: context, groups: groups, fromStart: true).sentence
-        XCTAssertTrue(sentence.contains("1 message to 1 destination · 18 kernel calls"), sentence)
+        XCTAssertTrue(sentence.contains("1 message to 1 destination · 20 kernel calls"), sentence)
     }
 
     /// Two timers entering through one shared Swift thunk (as BetterDisplay's 1 s and 2 s timers do), each tick

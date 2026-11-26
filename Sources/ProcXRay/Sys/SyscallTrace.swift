@@ -97,6 +97,11 @@ struct SyscallRecord: Identifiable, Sendable, Hashable, Codable {
     /// call is a framework's own work.
     var api = ""
     var site = ""
+    /// The stack from the trap up to `api`'s frame, hashed (FNV-1a over the addresses; 0 without one): the way
+    /// this call reached the kernel through the function. Each call of a function starts the same way, so a
+    /// syscall whose path is its call's first one's again starts another call (SyscallActivity: three
+    /// IOIteratorNext in a loop are three calls, the five syscalls of one IOServiceGetMatchingServices one).
+    var apiPath: UInt64 = 0
     /// What set the call off, and the next frame of the process's code inside it: StackSymbols.trigger.
     var trigger = ""
     var triggerInner = ""

@@ -147,17 +147,23 @@ final class StackSymbols: @unchecked Sendable {
     ///   - A tail call shows the function it jumped to: CGSessionCopyCurrentDictionary is
     ///     "SLSessionCopyCurrentDictionary (SkyLight)", IORegistryEntryCreateCFProperty is
     ///     "IORegistryEntrySearchCFProperty (IOKit)". Still the right name, one level down.
-    func entry(_ stack: [UInt64]) -> (api: Frame, site: Frame)? {
+    func entry(_ stack: [UInt64]) -> (api: Frame, site: Frame, path: UInt64)? {
         var api: Frame?
+        var apiIndex = 0
         for (i, a) in stack.enumerated() {
             let f = frame(a, isReturn: i > 0)
             guard let system = f.system else { return nil }
             if system {
-                if f.image != "libsystem_kernel.dylib" || api != nil { api = f }
+                if f.image != "libsystem_kernel.dylib" || api != nil { api = f; apiIndex = i }
                 continue
             }
             guard let api, !Self.handOvers.contains(api.symbol ?? "") else { return nil }
-            return (api, f)
+            // FNV-1a: the same in every process, so a saved trace's paths still compare.
+            var h: UInt64 = 0xcbf2_9ce4_8422_2325
+            for a in stack[...apiIndex] {
+                for shift in stride(from: 0, to: 64, by: 8) { h = (h ^ (a >> UInt64(shift) & 0xff)) &* 0x100_0000_01b3 }
+            }
+            return (api, f, h)
         }
         return nil
     }
@@ -218,7 +224,7 @@ final class StackSymbols: @unchecked Sendable {
     func attribute(_ r: inout SyscallRecord) {
         guard !r.stack.isEmpty else { return }
         r.caller = caller(r.stack)
-        if let e = entry(r.stack) { r.api = e.api.short; r.site = e.site.text }
+        if let e = entry(r.stack) { r.api = e.api.short; r.site = e.site.text; r.apiPath = e.path }
         if let t = trigger(r.stack) { r.trigger = t.outer; r.triggerInner = t.inner }
     }
 

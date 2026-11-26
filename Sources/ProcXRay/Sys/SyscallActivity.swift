@@ -147,6 +147,8 @@ struct SyscallActivity: Identifiable, Sendable {
     /// "io_iterator_next (kernel)"), and the places in the process's code it was called from.
     var reached: [String] = []
     var sites: [String] = []
+    /// A call (`.api`): how many times the function was called, as against the syscalls those calls made.
+    var invocations = 0
     /// The target is a stand-in ("Socket", "fd 4") that the first label of the descriptor replaces.
     private var provisional = false
     /// One round of something the process does at even intervals (`markRecurring`): how often, which round this
@@ -239,7 +241,12 @@ struct SyscallActivity: Identifiable, Sendable {
             }
             if parts.isEmpty { parts.append("Succeeded") }
         }
-        if count > 1 {
+        if operation == .api {
+            // The calls of the function, and the syscalls they made: "called 3× · 3 syscalls" for a loop of a
+            // one-syscall function, "5 syscalls" for one call that made five.
+            if invocations > 1 { parts.append("called \(invocations.formatted())×") }
+            if count > 1 || invocations > 1 { parts.append("\(count.formatted()) syscall" + (count == 1 ? "" : "s")) }
+        } else if count > 1 {
             let unit = switch operation {
             case .loadImage: "images"
             case .initializers: "initializers"
@@ -299,7 +306,7 @@ struct SyscallActivity: Identifiable, Sendable {
         var ownDirectory = Set<UInt64>()
         /// Each thread's call into an OS function (`.api`) still taking calls: its activity, which call and from
         /// where, and when its last call ended.
-        var calling: [UInt64: (index: Int, key: String, end: UInt64)] = [:]
+        var calling: [UInt64: (index: Int, key: String, first: UInt64, end: UInt64)] = [:]
         // Start order also puts calls still pending at trace stop in their proper position.
         for r in records.sorted(by: { ($0.time, $0.id) < ($1.time, $1.id) }) {
             let name = r.name.hasSuffix("_nocancel") ? String(r.name.dropLast(9)) : r.name
@@ -364,24 +371,29 @@ struct SyscallActivity: Identifiable, Sendable {
                 continue
             }
             // A Mach call made inside an OS function the process's code called (a trace with stacks) is part of
-            // that call: one IOServiceGetMatchingServices is a dozen messages to the kernel. Calls of one
-            // invocation follow each other on a thread from one place, within `callGap`; a call without an
-            // operation of its own (a port released on the way) joins one but never starts one.
+            // that call: one IOServiceGetMatchingServices is a dozen messages to the kernel. Syscalls of one call
+            // follow each other on a thread from one place, within `callGap`. Back to back, one call making three
+            // syscalls and three calls making one each look alike but for the stack: each call starts the same
+            // way, so a syscall that comes the way its call's first one did starts another call (`apiPath`). A
+            // call without an operation of its own (a port released on the way) joins one but never starts one.
             if !r.api.isEmpty, op == nil || op == .message || op == .kernelCall {
                 let key = r.api + "\u{0}" + r.site
-                if let c = calling[r.thread], c.key == key, r.time <= c.end + callGap {
+                if let c = calling[r.thread], c.key == key, r.time <= c.end + callGap,
+                   op == nil || r.apiPath == 0 || r.apiPath != c.first {
                     groups[c.index].append(r, kind: op)
                     groups[c.index].reach(r, context)
                     calling[r.thread]?.end = r.end ?? r.time
                     continue
                 }
                 guard op != nil else { continue }
-                // Calls to the same function soon after join as repeats do (nine property reads in a poll),
-                // whichever place they came from.
+                // Calls to the same function in one tight burst (within `burstGap` of the last: nine property
+                // reads in a poll) join, whichever place they came from. Further apart, each call is a row of its
+                // own where it happened (AltTab's two SLSWindowQueryWindows 257 ms apart are two queries, not one
+                // that took both), and markRecurring says when they make a rhythm.
                 let repeatKey = String(r.thread) + "\u{0}" + Operation.api.rawValue + "\u{0}" + r.api + "\u{0}" + r.trigger + r.triggerInner
                 let index: Int
                 if let i = recent[repeatKey], let last = groups[i].calls.last, last.state == .done, r.state == .done,
-                   r.time - last.time <= repeatGap {
+                   r.time - (last.end ?? last.time) <= burstGap {
                     index = i
                     groups[i].append(r, kind: op)
                 } else {
@@ -391,9 +403,10 @@ struct SyscallActivity: Identifiable, Sendable {
                     recent[repeatKey] = index
                     groups.append(g)
                 }
+                groups[index].invocations += 1
                 groups[index].reach(r, context)
                 if !groups[index].sites.contains(r.site) { groups[index].sites.append(r.site) }
-                calling[r.thread] = (index, key, r.end ?? r.time)
+                calling[r.thread] = (index, key, r.apiPath, r.end ?? r.time)
                 continue
             }
             guard let op else { continue }
@@ -493,6 +506,7 @@ struct SyscallActivity: Identifiable, Sendable {
         bytesIn += o.bytesIn; bytesOut += o.bytesOut
         for t in o.reached where !reached.contains(t) { reached.append(t) }
         for t in o.sites where !sites.contains(t) { sites.append(t) }
+        invocations += o.invocations
         failures += o.failures
         replyTime += o.replyTime
         threads.formUnion(o.threads)
