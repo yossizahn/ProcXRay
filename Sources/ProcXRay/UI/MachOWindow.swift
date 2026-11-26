@@ -101,6 +101,13 @@ struct MachOWindow: View {
         .handlesExternalEvents(preferring: ["file:"], allowing: ["file:"])
         .onOpenURL { u in
             guard u.isFileURL else { return }
+            // A saved trace opened from Finder: its own window, and this empty one goes.
+            if SavedTraceFiles.isTrace(u.path) {
+                SavedTraceFiles.open(u.path, openWindow)
+                // The window SwiftUI made for the file may not be on screen yet: it closes as it arrives.
+                if ref == nil { host.close() }
+                return
+            }
             guard ref == nil else { MachOOpen.openAny(u.path, openWindow); return }
             guard let t = MachOProbe.target(u.path) else { rejected = u.path; return }
             if Self.open.contains(t) { MachOOpen.open(t, openWindow); host.window?.close() } else { ref = MachORef(path: t) }
@@ -146,7 +153,17 @@ private extension Array {
 
 /// The NSWindow a view is in.
 private struct HostWindow: NSViewRepresentable {
-    final class Box { weak var window: NSWindow? }
+    final class Box {
+        weak var window: NSWindow? {
+            didSet { if closing, let window { DispatchQueue.main.async { window.close() } } }
+        }
+        private var closing = false
+        /// Closes the window now, or as soon as the view is in one.
+        func close() {
+            closing = true
+            if let window { DispatchQueue.main.async { window.close() } }
+        }
+    }
     let box: Box
     func makeNSView(context: Context) -> NSView { Probe(box: box) }
     func updateNSView(_ v: NSView, context: Context) {}

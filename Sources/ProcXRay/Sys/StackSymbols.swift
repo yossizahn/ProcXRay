@@ -14,7 +14,7 @@ import Foundation
 /// Frames after the first are return addresses: they are looked up one byte back (the call instruction) but
 /// their offset is printed as is, as `sample` does.
 final class StackSymbols: @unchecked Sendable {
-    struct Frame: Sendable {
+    struct Frame: Sendable, Codable {
         let image: String
         let symbol: String?
         let offset: UInt64
@@ -92,6 +92,32 @@ final class StackSymbols: @unchecked Sendable {
         }
         cache[key] = f
         return f
+    }
+
+    /// A frame's name as a trace gave it, by address (a return address with the top bit set): saved with the
+    /// trace (SavedTrace), since the shared cache moves at every boot and a library may change or go.
+    struct SavedFrame: Codable, Sendable {
+        var key: UInt64
+        var frame: Frame
+    }
+
+    /// The names of every frame in these calls' stacks.
+    func saved(_ recs: [SyscallRecord]) -> [SavedFrame] {
+        var seen = Set<UInt64>()
+        var out: [SavedFrame] = []
+        for r in recs {
+            for (i, a) in r.stack.enumerated() {
+                let key = i > 0 ? a | 1 << 63 : a
+                if seen.insert(key).inserted { out.append(SavedFrame(key: key, frame: frame(a, isReturn: i > 0))) }
+            }
+        }
+        return out
+    }
+
+    /// Names frames as a saved trace named them, rather than looking them up again here.
+    func preload(_ frames: [SavedFrame]) {
+        lock.lock(); defer { lock.unlock() }
+        for f in frames { cache[f.key] = f.frame }
     }
 
     func frames(_ stack: [UInt64]) -> [Frame] {

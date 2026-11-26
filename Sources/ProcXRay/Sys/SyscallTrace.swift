@@ -43,8 +43,8 @@ import Foundation
 //            The index counts every kernel MIG routine in order; MIGRoutines reads the names in that order.
 
 /// One syscall, paired.
-struct SyscallRecord: Identifiable, Sendable, Hashable {
-    enum State: Sendable, Hashable {
+struct SyscallRecord: Identifiable, Sendable, Hashable, Codable {
+    enum State: Sendable, Hashable, Codable {
         case done
         /// Still in the kernel when the trace stopped (a blocking read, a parked thread).
         case inProgress
@@ -323,7 +323,7 @@ struct SyscallDecoder: Sendable {
     }
 
     /// A stretch one of the traced process's threads spent on a CPU, in ns since the trace started.
-    struct Run: Sendable, Equatable {
+    struct Run: Sendable, Equatable, Codable {
         let thread: UInt64
         let start: UInt64
         let end: UInt64
@@ -1614,7 +1614,7 @@ enum MIGRoutines {
 }
 
 /// When the traced process's threads were on a CPU, from the trace's context switches (SyscallDecoder.Run).
-struct TraceCPU: Sendable {
+struct TraceCPU: Sendable, Codable {
     /// Finished runs, in the order they ended, then the ones still going at the last event.
     var runs: [SyscallDecoder.Run] = []
     var open: [SyscallDecoder.Run] = []

@@ -53,7 +53,7 @@ final class SyscallTracer {
     /// `resume`: the process was started suspended (Launcher) and runs once the trace is on, or is killed if the
     /// trace can't start, so none of its work goes untraced.
     func start(pid: Int32, start: Date, stacks: Bool, resume: Suspended? = nil) {
-        guard !isActive else { return }
+        guard !isActive, opened == nil else { return }
         records = []; pending = []; notes = []; events = 0; dropped = 0; revision += 1
         cpu = TraceCPU()
         context = SyscallActivity.Context(pid: pid, cwd: Native.cwd(pid))
@@ -130,10 +130,50 @@ final class SyscallTracer {
     }
 
     func clear() {
-        guard !isActive else { return }
+        guard !isActive, opened == nil else { return }
         records = []; pending = []; notes = []; events = 0; dropped = 0; revision += 1
         cpu = TraceCPU()
         phase = .idle
+    }
+
+    /// A trace opened from a file: when and where it was recorded. Such a tracer never traces.
+    private(set) var opened: (url: URL, saved: Date, system: String)?
+
+    /// The trace as it stands, for saving. The frames are named off the main thread by `SavedTrace.frames`'s
+    /// caller (`save(to:)`).
+    func saved(target: TraceTarget) -> SavedTrace {
+        SavedTrace(target: target, saved: Date(), system: opened?.system ?? SavedTrace.thisSystem, records: records,
+                   pending: pending, notes: notes, events: events, dropped: dropped, context: context, cpu: cpu,
+                   withStacks: withStacks, hasCallers: hasCallers, frames: [])
+    }
+
+    /// Writes the trace to `url`, naming its stacks' frames and compressing off the main thread.
+    func save(target: TraceTarget, to url: URL) async throws {
+        var t = saved(target: target)
+        let symbols = symbols
+        try await Task.detached(priority: .userInitiated) {
+            t.frames = symbols.saved(t.records + t.pending)
+            try t.encoded().write(to: url, options: .atomic)
+        }.value
+    }
+
+    /// A stopped tracer showing a saved trace.
+    static func opened(_ t: SavedTrace, from url: URL) -> SyscallTracer {
+        let tracer = SyscallTracer()
+        tracer.opened = (url, t.saved, t.system)
+        tracer.records = t.records
+        tracer.pending = t.pending
+        tracer.notes = t.notes
+        tracer.events = t.events
+        tracer.dropped = t.dropped
+        tracer.context = t.context
+        tracer.cpu = t.cpu
+        tracer.withStacks = t.withStacks
+        tracer.hasCallers = t.hasCallers
+        tracer.symbols.preload(t.frames)
+        tracer.phase = .stopped
+        tracer.revision += 1
+        return tracer
     }
 
     private nonisolated static func run(pid: Int32, start: Date, stacks: Bool, resume: Suspended?, symbols: StackSymbols,
@@ -268,7 +308,7 @@ final class SyscallTracer {
 }
 
 /// The process a trace view traces.
-struct TraceTarget: Hashable, Sendable {
+struct TraceTarget: Hashable, Sendable, Codable {
     let pid: Int32
     let start: Date
     let name: String
@@ -375,7 +415,7 @@ struct SyscallTraceView: View {
         .onChange(of: tracer.phase) { _, phase in if phase == .starting { range = nil } }
         // PROCXRAY_AUTORUN: start tracing as the tab appears, for looking at it where nothing can click (AGENTS.md).
         .task {
-            guard ProcessInfo.processInfo.environment["PROCXRAY_AUTORUN"] != nil, tracer.phase == .idle else { return }
+            guard ProcessInfo.processInfo.environment["PROCXRAY_AUTORUN"] != nil, tracer.phase == .idle, tracer.opened == nil else { return }
             // The helper's state is probed as the app starts.
             for _ in 0..<20 where disabledReason != nil { try? await Task.sleep(for: .milliseconds(250)) }
             if disabledReason == nil, tracer.phase == .idle { tracer.start(pid: target.pid, start: target.start, stacks: stacks) }
@@ -388,7 +428,10 @@ struct SyscallTraceView: View {
     /// the footer, where it has the pane's width.
     private var header: some View {
         HStack(spacing: 8) {
-            if tracer.isActive {
+            if tracer.opened != nil {
+                // A saved trace: nothing to trace again here.
+                Label("Saved trace", systemImage: "doc").foregroundStyle(.secondary).labelStyle(.titleAndIcon)
+            } else if tracer.isActive {
                 Button { tracer.stop() } label: { traceLabel("Stop", "stop.fill") }
                     .disabled(tracer.phase == .stopping)
             } else {
@@ -413,13 +456,15 @@ struct SyscallTraceView: View {
             TextField("Filter", text: $filter).textFieldStyle(.roundedBorder).controlSize(.small)
                 .frame(minWidth: 60, maxWidth: 160)
             Menu {
-                Toggle("Record Call Stacks", isOn: $stacks).disabled(tracer.isActive)
+                Toggle("Record Call Stacks", isOn: $stacks).disabled(tracer.isActive || tracer.opened != nil)
                 Toggle("Argument Names in Calls", isOn: $argNames)
                 Divider()
                 Button("Copy All") { Pasteboard.copy(exportText()) }.disabled(tracer.phase == .idle)
                 Button("Save as Text…") { save() }.disabled(tracer.phase == .idle)
+                Button("Save Trace…") { saveTrace() }
+                    .disabled(tracer.phase != .stopped || tracer.records.isEmpty && tracer.pending.isEmpty)
                 Divider()
-                Button("Clear Trace") { clear() }.disabled(tracer.isActive || tracer.phase == .idle)
+                Button("Clear Trace") { clear() }.disabled(tracer.isActive || tracer.phase == .idle || tracer.opened != nil)
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -503,7 +548,9 @@ struct SyscallTraceView: View {
         case .starting: return "Starting the trace…"
         case .running: return "Tracing · \(calls)\(showing)\(dropped)"
         case .stopping: return "Stopping · \(calls)"
-        case .stopped: return "Stopped · \(calls)\(showing)\(dropped)"
+        case .stopped:
+            guard let o = tracer.opened else { return "Stopped · \(calls)\(showing)\(dropped)" }
+            return "Recorded \(o.saved.formatted(date: .abbreviated, time: .shortened)) on \(o.system) · pid \(target.pid) · \(calls)\(showing)\(dropped)"
         }
     }
 
@@ -776,6 +823,23 @@ struct SyscallTraceView: View {
         panel.nameFieldStringValue = "\(target.name) \(mode) \(f.string(from: Date())).\(mode == "Summary" ? "tsv" : "txt")"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try? exportText().write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Saves the whole trace (not only what the view shows) to open again with File ▸ Open Trace….
+    private func saveTrace() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [SavedTraceFiles.contentType]
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        panel.nameFieldStringValue = "\(target.name) \(f.string(from: tracer.opened?.saved ?? Date())).\(SavedTrace.fileExtension)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do { try await tracer.save(target: target, to: url) } catch {
+                let a = NSAlert(error: error)
+                a.messageText = "The trace couldn't be saved"
+                a.runModal()
+            }
+        }
     }
 
     nonisolated static func seconds(_ ns: UInt64) -> String { String(format: "+%.6f", Double(ns) / 1e9) }

@@ -55,7 +55,7 @@ struct SyscallActivity: Identifiable, Sendable {
     }
 
     /// What the build knows besides the records.
-    struct Context: Sendable {
+    struct Context: Sendable, Codable {
         /// The traced process.
         var pid: Int32 = 0
         /// Port names in the traced process's port space → the process holding the receive right (MachPortNames).

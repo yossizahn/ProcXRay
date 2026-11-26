@@ -421,6 +421,7 @@ struct ProcXRayApp: App {
             InspectorTabCommands()
             ColumnsCommands()
             OpenBinaryCommand()
+            OpenTraceCommand()
             LaunchCommand()
             CommandGroup(after: .toolbar) {
                 Button("Refresh Now") { store.refresh() }.keyboardShortcut("r")
@@ -466,6 +467,14 @@ struct ProcXRayApp: App {
         .handlesExternalEvents(matching: [])
         .restorationBehavior(.disabled)   // not reopened at launch, no saved frame
         .commandsRemoved()   // no "New Process Window": these only open from a process row
+
+        WindowGroup("Trace", id: SavedTraceWindow.id, for: SavedTraceRef.self) { $ref in
+            if $ref.wrappedValue != nil { SavedTraceWindow(ref: $ref).environment(store) }
+        }
+        .defaultSize(width: 1100, height: 720)
+        .handlesExternalEvents(matching: [])
+        .restorationBehavior(.disabled)
+        .commandsRemoved()   // opened from File ▸ Open Trace…, Finder or a drop (through MachOOpen.openAny)
 
         WindowGroup("Binary", id: MachOWindow.id, for: MachORef.self) { $ref in
             MachOWindow(ref: $ref)   // with no value yet when SwiftUI opens it for a file: onOpenURL fills it in

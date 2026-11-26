@@ -80,6 +80,8 @@ enum MachOOpen {
 
     /// Opens what `path` names if it's a Mach-O (or a bundle with one); otherwise says why not.
     @MainActor static func openAny(_ path: String, _ openWindow: OpenWindowAction? = nil) {
+        // Files opened with the app all come here: a saved trace opens in its own window.
+        if SavedTraceFiles.isTrace(path) { SavedTraceFiles.open(path, openWindow); return }
         if let t = MachOProbe.target(path) { open(t, executable: nil, openWindow); return }
         let a = NSAlert()
         a.messageText = "Not a Mach-O file"

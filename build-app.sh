@@ -81,6 +81,24 @@ cat > "$APP/Contents/Info.plist" <<PLIST
         <string>com.apple.bundle</string>
       </array>
     </dict>
+    <!-- Syscall traces saved from the Syscalls tab (Save Trace…): Proc X-Ray's own, opened in a trace window. -->
+    <dict>
+      <key>CFBundleTypeName</key><string>Proc X-Ray Trace</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Owner</string>
+      <key>LSItemContentTypes</key>
+      <array><string>local.procxray.trace</string></array>
+    </dict>
+  </array>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key><string>local.procxray.trace</string>
+      <key>UTTypeDescription</key><string>Proc X-Ray Trace</string>
+      <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>pxrtrace</string></array></dict>
+    </dict>
   </array>
 </dict>
 </plist>
