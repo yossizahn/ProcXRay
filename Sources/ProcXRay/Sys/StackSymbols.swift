@@ -10,7 +10,9 @@ import Foundation
 ///     (DesktopServicesPriv, Accounts, FileProvider...); that lookup named all but a few.
 ///   - Anything else: the helper sends the mapped file behind each frame (StackRegion, from
 ///     PROC_PIDREGIONPATHINFO), and the file is symbolicated from its path, slid by where its __TEXT starts.
-///     Checked on a test program: leaf+28 and main+116, as its own addresses said.
+///     Checked on a test program: leaf+28 and main+116, as its own addresses said. A file with no symbol there
+///     (a stripped app) names the function from its start and the strings it refers to (FunctionMap):
+///     "fn_cf604 “Sample console availability” + 764".
 /// Frames after the first are return addresses: they are looked up one byte back (the call instruction) but
 /// their offset is printed as is, as `sample` does.
 final class StackSymbols: @unchecked Sendable {
@@ -88,6 +90,9 @@ final class StackSymbols: @unchecked Sendable {
             f = Frame(image: image, symbol: nil, offset: addr - r.start, address: addr, system: system)
             if let sym = symbolicator(r.path), let s = sym.lookup(sym.base + (look - r.start)) {
                 f = Frame(image: image, symbol: s.name, offset: sym.base + (addr - r.start) - s.start, address: addr, system: system)
+            } else if let map = functionMap(r.path), let fn = map.function(at: look - r.start) {
+                // No symbol (a stripped app): its function, named by what it refers to (FunctionMap).
+                f = Frame(image: image, symbol: fn.name, offset: addr - r.start - fn.start, address: addr, system: system)
             }
         }
         cache[key] = f
@@ -232,6 +237,14 @@ final class StackSymbols: @unchecked Sendable {
         var lo = 0, hi = regions.count
         while lo < hi { let m = (lo + hi) / 2; if regions[m].start + regions[m].size <= a { lo = m + 1 } else { hi = m } }
         return lo < regions.count && regions[lo].start <= a ? regions[lo] : nil
+    }
+
+    private var maps: [String: FunctionMap?] = [:]
+    private func functionMap(_ path: String) -> FunctionMap? {
+        if let m = maps[path] { return m }
+        let m = FunctionMap(path: path)
+        maps[path] = m
+        return m
     }
 
     private func symbolicator(_ path: String, cache: Bool = false) -> CS.Symbolicator? {
